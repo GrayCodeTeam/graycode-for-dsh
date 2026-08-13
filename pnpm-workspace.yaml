@@ -1,0 +1,8 @@
+packages:
+  - 'packages/*'
+
+allowBuilds:
+  esbuild: true
+  koffi: true
+
+minimumReleaseAge: 0

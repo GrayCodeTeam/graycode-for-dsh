@@ -1,0 +1,19 @@
+{
+  "name": "graycode-dsh",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "pnpm --filter @graycode/dsh-plugin build",
+    "typecheck": "pnpm --filter @graycode/dsh-plugin typecheck",
+    "test": "vitest run",
+    "pack": "pnpm -r pack",
+    "dsh:plugin": "dsh plugin --profile graycode"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

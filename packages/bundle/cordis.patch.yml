@@ -1,0 +1,7 @@
+# GrayCode bundle layer: mounts the GrayCode host plugin over the dsh-base
+# layer. All defaults live in the plugin's Schemastery schema; the rows here
+# only pin ids and (later) deployment-level overrides.
+
+- insert:
+    - id: graycode
+      name: '@graycode/dsh-plugin'
