@@ -367,7 +367,7 @@ graycode/checkpoint-restored
 | `ChatViewProvider` / Webview | 删除 | DSH Web App | 不保留 VS Code Webview 宿主。 |
 | Webview `postMessage` 协议 | 替换 | Remote + session events + projections | 不把 1,104 行协议机械改成 HTTP。 |
 | ChatHandler / ToolIterationLoop | 采用 DSH | Agent / agent-loop | Gray Code 不再拥有主循环。 |
-| ConversationManager / BranchService | 优先采用 DSH | session / persistence / lineage | 先做语义对照；只补 DSH 缺失的分支产品能力。 |
+| ConversationManager / BranchService | 保留分支产品语义，底层采用 DSH | session fork / lineage + Gray branch sidecar | 树状分支、重生成、编辑重试、候选切换作为 Gray 差异化能力保留；对话主存储与循环由 DSH 接管。 |
 | 渠道和模型列表 | 采用并扩展 DSH | `LlmAdapter` / settings / credentials | DeepSeek 用内置适配器；其他提供方先验证 `dsh-llm-pi-ai` 覆盖度，缺口才写适配器。 |
 | 文件读写、搜索、Shell | 采用 DSH | fs / tool-fs / fs-search / bash/pwsh | 不迁移同名基础工具实现。 |
 | VS Code LSP | 采用 DSH | lsp / lsp-stdio / tool-lsp | 接受 DSH 已定义的查询集合；额外符号功能需单独扩展。 |
@@ -382,7 +382,7 @@ graycode/checkpoint-restored
 | TODO | 优先采用 DSH | tool-todo | 仅在数据模型确有差异时补适配层。 |
 | 永久记忆 | 保留并重写 | system prompt section + tools + storageDomain | 这是 Gray Code 的差异化能力。 |
 | 存档点 / 工作区恢复 | 保留语义，重新设计 | fs + storageDomain + approval | 不要把 DSH 的“持久化 checkpoint policy”误当成工作区快照。 |
-| Token、成本、活动统计 | 采用 DSH 后补投影 | token meter / session stats / client projection | 删除重复采集，必要时增加 Gray 专属统计投影。 |
+| Token、成本、活动统计 | 采用 DSH 后补投影 | token meter / session stats / client projection + 浏览器端采样 | 删除重复采集；Web 使用活动改为浏览器端采样 + Host 聚合，必要时增加 Gray 专属统计投影。 |
 | 设置 | 替换 | Schemastery Config + `ctx.settings` | 部署参数放 `cordis.yml`，用户参数放命名空间设置。 |
 | API Key | 替换 | `ctx.credentials` | 任何 UI 和导出文件只保存凭据引用，不保存明文 key。 |
 | 本地数据 | 重写适配层 | session persistence + storageDomain + checkpoint blob store | 不让业务包直接绑定 JSON/SQLite 实现；大文件与结构化记录分离。 |
@@ -391,6 +391,10 @@ graycode/checkpoint-restored
 | CodeLens / Hover / Code Action | 删除/替代 | inline tool cards / file open callbacks | 视 DSH Client 能力决定是否补 Web 交互。 |
 | Windows 原生通知 | 可选重写 | 独立通知插件 | 不应是核心插件的必需依赖。 |
 | VSIX 更新器 | 删除 | npm/tarball + `dsh plugin` | 版本升级交给包管理与 profile。 |
+| 媒体工具（裁剪/缩放/旋转/去背景/生成） | 重写 | dsh FS/Attachment + `ctx.jobs` | 可选原生依赖（sharp）改为 npm 预构建 dependency，不运行时懒装；结果返回结构化附件引用。 |
+| 固定文件（pinned files）/ 提示词上下文组装 | 重写 | dsh prompt section + agent preset | 文件树/环境段落映射到 prompt section；`{{$MODULE}}` 模板映射到 persona/preset。 |
+| 历史搜索 | 采用 DSH 后适配 | `dsh-session-query`（显式 openAt） | Gray `history_search` 映射到 session-query 检索；base 默认禁用需显式开启。 |
+| 子代理转录/冷恢复 | 采用 DSH | dsh-subagent child session log | child session log 天然持久化转录，无需额外迁移。 |
 
 ### 6.1 目录级处置清单
 
@@ -403,7 +407,7 @@ graycode/checkpoint-restored
 | `backend/core/services/diff/` | 保留纯算法 | checkpoints 或 staged-diff domain | 脱离 VS Code 类型并有单测 |
 | `backend/modules/api/` | 大部删除 | DSH Agent、Remote、session events | 端到端聊天和工具流通过 |
 | `backend/modules/channel/` | 先矩阵验证，再删除/补适配器 | DSH LLM adapters、settings、credentials | provider matrix 达标 |
-| `backend/modules/conversation/` | 大部删除 | DSH sessions/persistence/lineage | 分支、恢复、标题和工作区映射通过 |
+| `backend/modules/conversation/` | 大部删除；分支语义提取 | DSH sessions/persistence/lineage + branch sidecar | 分支、恢复、标题和工作区映射通过 |
 | `backend/modules/checkpoint/` | 保留语义，重写 adapters | checkpoints domain/application/adapters | schema v1/v2 fixture 导入与恢复通过 |
 | `backend/modules/memory/` | 保留领域能力，替换存储 | memory domain + storage provider | 旧固定记录格式解析 fixture 通过 |
 | `backend/modules/config/`、`settings/` | 只保留迁移映射 | Schemastery、settings、credentials | 配置升级和敏感字段测试通过 |
@@ -413,6 +417,9 @@ graycode/checkpoint-restored
 | `backend/tools/design/`、`progress/`、`review/` | 提取并重写 | workflows plugin | schema、文档结果和错误码兼容 |
 | `backend/tools/memory/` | 提取并重写 | memory plugin | 作用域、预算和并发测试通过 |
 | `backend/tools/subagents/`、`todo/`、`plan/` | 默认采用 DSH | DSH subagent/todo/plan | feature matrix 确认无阻断缺口 |
+| `backend/tools/media/` | 提取并重写 | media 工具 + `ctx.jobs` + attachment | 图片处理、长任务和附件引用通过 |
+| `backend/modules/prompt/` | 提取映射规则，宿主重写 | dsh system-prompt section + preset | 固定文件、文件树、模板占位符映射通过 |
+| `backend/tools/history/` | 默认删除 | dsh session-query | 检索、分页、会话过滤通过 |
 | `webview/` | 删除 | Remote/event/projection adapters | 旧命令均有替代或 DROP 记录 |
 | `shared/protocol.ts` | 删除 | 小型领域 DTO + DSH 公开契约 | 不再有 `postMessage` consumer |
 | `frontend/src/` | 选择性提取，UI 重写 | `packages/client` React slots | 差异化界面完成且旧 Vue 无运行入口 |
@@ -447,6 +454,33 @@ graycode/checkpoint-restored
 | 凭据 | 只存引用，不写 settings、事件或日志 |
 
 初始目标渠道：DeepSeek、OpenAI-compatible、OpenAI Responses、Anthropic、Gemini。若 DSH 锁定版本未覆盖某协议，将其标为 `GAP` 并单独排期；不阻塞已覆盖渠道的 Phase 2 验收。
+
+### 6.4 首版明确不迁移清单
+
+以下能力不迁移为运行时代码，避免保留 VS Code 宿主或重复 DSH 能力：
+
+| 旧能力 | 不迁移原因 | 替代/降级 |
+| --- | --- | --- |
+| 旧工具 XML/JSON 调用模式 | dsh 原生 Function Calling/Code Mode 接管 | 不保留兼容开关 |
+| 自有 Channel formatter 全部兼容开关 | pi-ai 覆盖已确认用例 | 缺口才写独立 LlmAdapter |
+| HTTP 代理连接模型 API（proxyFetch） | 依赖系统 `HTTP_PROXY` | 若 dsh 适配器不支持代理则记录为已知限制 |
+| per-tool 免确认白名单（toolAutoExec） | dsh 只有 preset/会话级 permission + approval | 降级为 approval 策略建议 |
+| 单回合工具调用计数上限（maxToolIterations） | dsh 靠 token 预算/compaction/max-tokens 截断 | 不迁移 |
+| VS Code 活跃编辑器/选区/标签页/diagnostics | 编辑器专属语义 | 删除 |
+| VS Code 原生 Diff 面板/CodeLens/标题按钮 | 编辑器宿主 UI | 删除 |
+
+### 6.5 Agent 作用域与 preset 污染控制
+
+Gray 工具不粗暴注册为所有 preset 的全局工具。按 Agent 作用域安装：
+
+- 主插件监听 root Agent 生命周期（`agent/created` / `agent/disposed`），在 `agent.ctx` 上做 scoped 注册，随 Agent 销毁自动卸载；scoped 工具遮蔽同名全局工具。
+- 设置项 `agentScope = roots | all | disabled`，默认 `roots`。
+- `standard` 或插件明确允许的 preset：安装完整 Gray 工具；
+- `minimal`：不安装；
+- 用户自定义 preset：默认不自动安装，用户可在 Gray 设置中显式允许。
+- 工具集合一经会话产生内容，不允许中途切换，遵守 dsh preset 锁定原则。
+- 默认不向 subagent 重复安装整套 Gray UI/管理工具；子 agent 继承哪些能力由 dsh preset 和 subagent 机制决定。
+- 插件可附带 `graycode` preset 模板作为便捷入口；若树外 bundle 暂无稳定「追加 preset root」扩展点，先采用 root Agent 安装策略，preset 模板延后。
 
 ## 7. 数据与配置迁移
 
@@ -488,6 +522,8 @@ graycode/checkpoint-restored
 7. 单个领域失败不假装全局回滚。用 import run 状态记录每一步提交点，使成功部分可校验、失败部分可安全重跑。
 8. 凭据默认不迁移。用户在 DSH credentials 中重新录入；渠道/MCP 配置只生成引用占位和待办。
 9. 迁移报告同时输出人类可读 Markdown 和机器可读 JSON，并对源/目标计数、哈希和跳过原因负责。
+
+旧扩展通过 `SettingsExporter` 导出的单一 JSON（`limcode-settings.json`）可作为配置一键导入入口，按 7.3 映射表逐键落到 dsh 原生配置与 Gray 配置：`vscodeSettings` 的 `graycode.*` 键 → dsh `graycode` settings namespace；`channelConfigs` → llm settings + credentials 引用；`mcpServers` → dsh MCP 配置；`skills` → dsh skill。边界：机器作用域键（`proxy`、`storagePath`）跳过；密钥只转 credentials 引用占位、要求用户重新录入；`toolsConfig` 的 diff 审阅、`toolAutoExec` 及编辑器专属配置降级或放弃，并在报告列出。
 
 ### 7.3 旧目录到新模型的映射
 
@@ -557,11 +593,12 @@ interface ImportRun {
 
 ### 7.6 Checkpoint 新存储细节
 
-建议把 `graycode-checkpoints` domain 与 Blob root 分离：
+建议把 `graycode-checkpoints` domain 与 Blob root 分离，顶层按稳定 `workspaceId` 分目录，manifest 使用内容哈希与增量父链：
 
 ```text
-<dsh-private-data>/graycode/checkpoints/
-├── blobs/sha256/ab/<full-hash>
+$DSH_HOME/graycode/checkpoints/<workspace-id>/
+├── blobs/<content-hash>          # 内容寻址，同 hash 复用
+├── manifests/<checkpoint-id>.json
 ├── staging/<operation-id>/
 └── quarantine/<operation-id>/
 ```
@@ -769,7 +806,10 @@ Phase 2 的核心 E2E 场景：
 4. **延迟 Diff 审阅**
    - 评估 DSH approval + diff card 是否已满足需求。
    - 若不满足，实现 staged-diff service、写入工具适配和专属结果 meta；避免复活 VS Code Diff Editor。
-5. **统计与通知**
+5. **树状分支**
+   - 用 dsh Session fork + Gray branch sidecar 表达候选、重生成、编辑重试和候选切换。
+   - 不迁移旧「主历史重写」架构；对话真源始终是 dsh append-only Session。
+6. **统计与通知**
    - 优先组合 DSH token/session stats。
    - 仅补充 Gray 特有指标；系统通知作为可选插件。
 
@@ -814,7 +854,9 @@ interface WorkflowRun {
 
 旧 `LOG.txt`/`TREE` 固定记录格式仅由 legacy reader 使用。导入 fixture 必须覆盖现行 `LOG_REC=1024`、`TREE_REC=288` 以及已知旧 `LOG_REC=320`；损坏记录要隔离并在报告中标出 offset，不因一条坏记录丢弃整个 scope。
 
-Memory 工具默认建议：`memory_note`、`memory_recall`、`memory_forget`、`memory_update`；压缩和配置优先作为人工命令或后台 job，除非产品确认模型需要直接调用。所有查询返回 `truncated`、`matchedCount` 和稳定 ids，避免 UI 从自然语言中解析。
+模型注入不继续依赖「每次会话第一条必须调用 memory_wake」的脆弱约定：在首次合格 `agent/pre-step` waterfall 中通过 `enter(messages)` 自动注入一份有界记忆快照，作为插件来源的持久 `user/message` 记录（source 标记为非 direct 的 injected context）；相同记忆 revision 不重复注入，记忆变化后只在下一步骤边界追加新快照。手动 `memory_wake` 仍保留，供模型主动扩展上下文。快照含全局与当前 Workspace 两部分，明确来源和 revision。
+
+Memory 工具保留 Gray-Code 现存的 7 个工具名称与主要参数语义：`memory_wake`、`memory_note`、`memory_recall`、`memory_zoom`、`memory_compress`、`memory_forget`、`memory_config`。压缩与配置也作为工具暴露给模型，同时保留人工命令/后台 job 入口。所有查询返回 `truncated`、`matchedCount` 和稳定 ids，避免 UI 从自然语言中解析。
 
 #### P3C：Checkpoint 详细契约
 
@@ -844,6 +886,65 @@ Checkpoint 恢复的安全不变量：
 
 先用四个场景判断 DSH 原生 diff/approval 是否足够：单文件接受、部分文件拒绝、跨工具累计修改、会话重启后继续审阅。若均能满足，不实现 staged-diff service；若任一产品必需语义缺失，先写 ADR，明确状态机、所有权和恢复策略后再开发。该能力不得成为 Phase 3 其他领域的隐式依赖。
 
+#### P3E：树状分支（Branch Coordinator）
+
+树状分支是 Gray Code 保留的差异化产品能力，但底层不迁移旧「主历史重写 + sidecar 候选内容」架构。dsh Session 日志是 append-only 真源，分支以原生 Session fork 表达：
+
+- 一个候选分支是一条独立 dsh Session；
+- `SessionHeader.parentSession` 表示原生谱系；
+- `seedLength` 标识继承前缀；
+- Gray sidecar 只保存分组、候选次序、显示名称、软删除、激活候选和 Workspace Snapshot 关联，不保存对话正文副本。
+
+最小持久模型：
+
+```ts
+interface GrayBranchGroup {
+  id: string
+  workspaceId?: string
+  rootSessionId: SessionId
+  activeSessionId: SessionId
+  candidates: Array<{
+    sessionId: SessionId
+    parentSessionId?: SessionId
+    /** 对应 ctx.sessions.fork(source, boundary, childSessionId) 的 inclusive source event seq */
+    boundary?: number
+    kind: 'root' | 'reroll' | 'edit' | 'manual'
+    label?: string
+    deletedAt?: number
+    workspaceSnapshotId?: string
+  }>
+  revision: number
+}
+```
+
+操作语义：
+
+- 重新生成：从目标轮次之前的最近完整 `turn/end` fork 新 Session，把原用户消息重新发送到新 Session。
+- 编辑并重试：从目标轮次之前 fork，把编辑后的用户消息发送到新 Session。
+- 手动创建分支：使用 dsh `session.fork` 的完整轮次边界。
+- 候选切换：改变 `activeSessionId` 并让 Client 打开目标 Session；不改写任何日志。
+- 删除：默认只软删除候选并从 Gray 分支 UI 隐藏；dsh Session 仍保留。
+- 恢复：清除候选 tombstone。
+- 物理清理：仅在用户明确执行、Session 未被其他分支/Workspace 引用且不活跃时进行。
+- 消息插入/打断：旧 `interruptMessage` 映射到 dsh `agent.followup` / `steer` / `inject` 原生能力。
+- 消息删除/清空历史：dsh Session append-only 不物理删除；旧 `deleteMessage` / `clearHistory` 语义改为 fork 新 Session 从目标点重来，首版不提供「原地删除消息」UI。
+
+分支与工作区快照：
+
+- 文件写工具成功前创建的 snapshot 可绑定到对应 Session/Turn；
+- 切换候选默认只切对话；
+- 「切换对话与工作区」需显式选择并展示恢复预览；
+- 工作区恢复失败时不切换 active candidate；
+- 聊天切换成功不隐式修改文件。
+
+并发与原子性：
+
+- 每个 Branch Group 使用 revision/CAS 更新；
+- 创建候选顺序：创建并持久化 child Session → 写 Gray sidecar → 发布 active 变更；
+- sidecar 写失败时保留普通 dsh fork Session，但不加入 Gray 分支组，并向用户报告可恢复的孤儿；
+- UI 请求携带 `expectedRevision`；冲突返回权威快照；
+- 不持有 dsh Session 内部锁时获取工作区恢复锁。
+
 每项能力的验收门槛：
 
 - 插件卸载后注册自动消失，异步资源完全停稳。
@@ -853,6 +954,7 @@ Checkpoint 恢复的安全不变量：
 - HMR 或配置更新不会产生重复注册和旧实例泄漏。
 - 每个领域都有 schema version、升级测试、并发测试和故障注入测试。
 - Checkpoint restore、memory forget 和 destructive workflow 操作均有明确审批/权限策略。
+- 分支操作不重写或删除已有 Session 日志；候选切换失败不破坏 active 状态。
 
 ### Phase 4：DSH 原生 Client UI
 
@@ -870,7 +972,7 @@ Checkpoint 恢复的安全不变量：
    - Gray 专属用量或活动视图。
 4. 工具卡片使用 `presentCall` / `presentationMeta` / `presentResult` 提供可回放状态；UI 不在回放时做 I/O。
 5. 前端状态以 host 投影为权威，不保留独立的乐观业务真源。
-6. UI 文案注册独立 locale namespace，并提供中英文。
+6. UI 文案注册独立 locale namespace，并提供中文、英文、日文。
 
 UI 交付拆分：
 
@@ -891,8 +993,9 @@ Client 边界规则：
 - 历史节点渲染不得发起隐式写入或依赖当前 workspace 文件仍存在。
 - 大列表必须分页/虚拟化；checkpoint preview 不一次把全部文件内容发到浏览器。
 - 无 Gray Client 时 Host 的 JSON 工具结果仍可理解，Client 版本不匹配时显示降级提示。
-- 所有交互支持键盘、焦点可见、非颜色状态标识和中英文溢出测试。
+- 所有交互支持键盘、焦点可见、非颜色状态标识和中英日溢出测试。
 - 浏览器 bundle 不包含 Node 内置模块、文件系统路径或凭据。
+- 工具声明的模型可见 `description` 按用户语言本地化：dsh locale 体系只覆盖 UI 文案，不覆盖工具 description，因此在 Gray 工具注册层（defineTool 时按当前语言生成 description）自行处理。
 
 验收门槛：
 
@@ -900,7 +1003,7 @@ Client 边界规则：
 - 插件 client bundle 可独立缓存失效和 HMR。
 - 未安装 Gray Client 插件时，Host 工具仍能以 DSH 通用卡片正常使用。
 - 业务组件不依赖 Vue、`acquireVsCodeApi` 或旧消息协议。
-- axe/等价可访问性检查无阻断问题，窄屏和长中英文文本有视觉回归。
+- axe/等价可访问性检查无阻断问题，窄屏和长中英日文本有视觉回归。
 - Host/Client 版本不一致的行为有契约测试，不出现无限加载或静默空白。
 
 ### Phase 5：旧数据迁移
