@@ -79,6 +79,7 @@
 
 - `backend/core/services/diff/` 中的纯 Diff 算法与统计；
 - Design / Plan / Progress / Review 文档格式与验证逻辑；
+- 提示词模式 / 预设条目 / 伪造思考（PromptMode、promptEntries、fakeThought）的配置模型、组装与发送侧过滤规则（见 6.6）；
 - Memory 的日志格式、压缩、召回和覆盖逻辑；
 - 渠道响应解析、流式聚合中 DSH 尚未覆盖的提供方特殊处理；
 - 工具参数校验、文本格式化和跨平台路径策略中的纯函数；
@@ -393,6 +394,9 @@ graycode/checkpoint-restored
 | VSIX 更新器 | 删除 | npm/tarball + `dsh plugin` | 版本升级交给包管理与 profile。 |
 | 媒体工具（裁剪/缩放/旋转/去背景/生成） | 重写 | dsh FS/Attachment + `ctx.jobs` | 可选原生依赖（sharp）改为 npm 预构建 dependency，不运行时懒装；结果返回结构化附件引用。 |
 | 固定文件（pinned files）/ 提示词上下文组装 | 重写 | dsh prompt section + agent preset | 文件树/环境段落映射到 prompt section；`{{$MODULE}}` 模板映射到 persona/preset。 |
+| 提示词编辑（模板/占位符/前缀后缀） | 保留并重写 | dsh system-prompt section + Gray prompt 资产 | PromptSettings 的模板编辑、`{{$MODULE}}` 占位符模块、customPrefix/Suffix 与 token 估算是 Gray 差异化表面；现状与映射见 6.6。 |
+| 提示词预设（PromptMode 模式 + promptEntries 预设条目） | 保留并重写 | agent preset + Gray prompt provider（`SPIKE`/`GAP`） | 内置 code/design/plan/ask/review 5 模式 + 自定义模式 CRUD/导入/复制；fast-tavern 风格条目编排（system/user/assistant/chat_history）。DSH 无直接等价，见 6.6。 |
+| 伪造助手消息 / 伪造思考过程（临时 assistant 条目 + fakeThought） | 保留并重写 | DSH 请求构造扩展点（`SPIKE`） | role=assistant 条目生成临时 model 消息（不写入真实历史）；fakeThought 以 thought part 附加正文前，发送侧由渠道 sendHistoryThoughts 开关过滤。见 6.6。 |
 | 历史搜索 | 采用 DSH 后适配 | `dsh-session-query`（显式 openAt） | Gray `history_search` 映射到 session-query 检索；base 默认禁用需显式开启。 |
 | 子代理转录/冷恢复 | 采用 DSH | dsh-subagent child session log | child session log 天然持久化转录，无需额外迁移。 |
 
@@ -418,7 +422,7 @@ graycode/checkpoint-restored
 | `backend/tools/memory/` | 提取并重写 | memory plugin | 作用域、预算和并发测试通过 |
 | `backend/tools/subagents/`、`todo/`、`plan/` | 默认采用 DSH | DSH subagent/todo/plan | feature matrix 确认无阻断缺口 |
 | `backend/tools/media/` | 提取并重写 | media 工具 + `ctx.jobs` + attachment | 图片处理、长任务和附件引用通过 |
-| `backend/modules/prompt/` | 提取映射规则，宿主重写 | dsh system-prompt section + preset | 固定文件、文件树、模板占位符映射通过 |
+| `backend/modules/prompt/` | 提取映射规则，宿主重写 | dsh system-prompt section + preset + Gray prompt provider | 固定文件、文件树、模板占位符映射通过；模式/预设条目/伪造思考的组装与发送侧过滤见 6.6 |
 | `backend/tools/history/` | 默认删除 | dsh session-query | 检索、分页、会话过滤通过 |
 | `webview/` | 删除 | Remote/event/projection adapters | 旧命令均有替代或 DROP 记录 |
 | `shared/protocol.ts` | 删除 | 小型领域 DTO + DSH 公开契约 | 不再有 `postMessage` consumer |
@@ -481,6 +485,47 @@ Gray 工具不粗暴注册为所有 preset 的全局工具。按 Agent 作用域
 - 工具集合一经会话产生内容，不允许中途切换，遵守 dsh preset 锁定原则。
 - 默认不向 subagent 重复安装整套 Gray UI/管理工具；子 agent 继承哪些能力由 dsh preset 和 subagent 机制决定。
 - 插件可附带 `graycode` preset 模板作为便捷入口；若树外 bundle 暂无稳定「追加 preset root」扩展点，先采用 root Agent 安装策略，preset 模板延后。
+
+### 6.6 提示词编辑 / 提示词预设 / 伪造助手消息与伪造思考
+
+现状（Gray Code 1.5.4，[`https://github.com/Komeiji-Shiki/Gray-Code`](https://github.com/Komeiji-Shiki/Gray-Code)）：三项能力均有完整实现，属于「提示词编排层」，分布在 `backend/modules/prompt/`（PromptManager、promptContextCache）、`backend/modules/settings/`（PromptSettingsService、promptModes、types/promptTypes）与 `frontend/src/components/settings/`（PromptSettings.vue 及 prompt/ 子组件群、PromptEntriesEditor.vue）。
+
+#### 6.6.1 提示词编辑
+
+- 用户可编辑静态系统提示词模板（支持 `{{$MODULE}}` 占位符）、customPrefix / customSuffix、动态上下文模板与动态上下文策略（`single` / `preserve`）。
+- 占位符模块目录：ENVIRONMENT、WORKSPACE_FILES、OPEN_TABS、ACTIVE_EDITOR、DIAGNOSTICS、PINNED_FILES、CONTEXT_BADGE_FORMAT、TOOLS、MCP_TOOLS、TODO_LIST、MEMORY。
+- 后端：PromptSettingsService（`system_prompt` 配置段 CRUD、归一化、版本迁移）；PromptManager（模板渲染、占位符替换、动态上下文差分指纹）。
+- 前端：PromptSettings.vue（约 1.3k 行）与 prompt/ 子组件（StaticTemplateSection、DynamicTemplateSection、DynamicStrategyBlock、AssemblyModeSelector、TokenCountSection、ToolPolicySection、ModulesReference、ImportModesDialog）。
+
+#### 6.6.2 提示词预设
+
+- 预设以「提示词模式（PromptMode）」承载：内置 code / design / plan / ask / review 五种模式，每个模式含独立模板、动态模板、动态上下文策略、工具策略 allowlist（toolPolicy + toolPolicyCustomized）与可选的预设条目（promptEntries）。
+- 支持用户新增、复制、导入（ImportModesDialog JSON 负载）、重命名、删除模式，并持久化 currentModeId。
+- promptEntries 为 fast-tavern 风格的有序条目：system（合并进系统提示词）、user（临时用户上下文）、assistant（临时助手消息）、chat_history（真实历史插入点，唯一且不可删除）；条目按 order 排序、支持 enabled 开关与 `{{$MODULE}}` 占位符。
+
+#### 6.6.3 伪造助手消息与伪造思考过程（fakeThought）
+
+- 伪造助手消息 = role=assistant 的 prompt entry：组装请求时生成一条临时 model 消息（不写入真实历史），随请求发送给模型，模拟 AI 已有回复；chat_history 条目决定其相对真实历史的位置（before / after）。
+- 伪造思考 = PromptEntry.fakeThought（仅 assistant 角色生效）：PromptManager 组装时以 thought part（`{ text, thought: true }`）附加在该临时消息正文之前；动态条目指纹同时纳入 role + fakeThought + content，防止差分缓存漏发。
+- 发送侧过滤：applyPromptContextThoughtPolicy（ToolIterationLoopService）在发送前按渠道开关 sendHistoryThoughts（BaseChannelConfig）剥离 thought part——未显式开启时伪造思考不发、正文照发，与真实历史思考同一语义；该过滤必须在发送侧执行，不能写入 turnDynamicContext 缓存（缓存可能被不同渠道复用）。
+- 前端：PromptEntriesEditor 提供「伪造思考过程」输入框（仅 assistant 条目可见）；渠道设置提供「发送历史思考内容」开关。
+
+#### 6.6.4 迁移判断
+
+| 能力 | 现状位置 | DSH 目标 | 标记 | 说明 |
+| --- | --- | --- | --- | --- |
+| 模板/占位符编辑 | PromptManager + PromptSettingsService | dsh system-prompt section + Gray prompt 资产 | `SPIKE` | DSH 有 system-prompt section / persona 扩展面；模板渲染与占位符是 Gray 差异化，需 Phase 0 探针确认 section 覆盖与组合顺序。 |
+| 提示词模式（预设） | PromptSettingsService + promptModes | agent preset / persona + Gray preset 扩展层 | `SPIKE` | Gray 模式是「模板 + 动态模板 + 工具策略 + 条目」四层组合，比 DSH preset 更重；是否可映射为 DSH preset 属性需探针。 |
+| promptEntries 条目编排 | PromptManager.getPromptContextBundle | DSH 请求构造扩展点 | `GAP` | 「多消息骨架 + 临时 user/assistant 消息 + 历史插入点」若 DSH 只能注入单条 system prompt，则需实现 Gray prompt 注入 provider（发送前 hook）。 |
+| fakeThought / thought part | PromptManager + applyPromptContextThoughtPolicy | DSH 请求构造 + 渠道适配层 | `SPIKE` | 依赖 DSH message 构造支持带 thought part 的临时消息；sendHistoryThoughts 需映射到 DSH 渠道配置（base.ts 注释默认 true 与 formatter `?? false` 存在分歧，迁移时统一默认值）。 |
+
+#### 6.6.5 迁移建议
+
+1. 把提示词编排提取为纯 domain（模板渲染、占位符模块、条目编排、指纹、fakeThought 策略），宿主依赖全部重写。
+2. 静态模板与模式尽量映射到 DSH agent preset / system-prompt section；条目编排与伪造思考若无公开扩展点，实现 Gray prompt 注入 provider（只影响请求构造，不写入会话历史）。
+3. sendHistoryThoughts 及其默认值统一为 DSH 渠道配置，并纳入 provider matrix（reasoning 内容维度）。
+4. UI（PromptSettings.vue + prompt/ 子组件 + PromptEntriesEditor）按 Phase 4 React slot 重写，保留模式管理、条目编辑器（含伪造思考输入框）与导入模式对话框。
+5. Phase 0 增加探针：P0-13（system-prompt section 组合覆盖）、P0-14（请求构造层注入临时消息/thought part）、P0-15（渠道适配层 sendHistoryThoughts 等价开关）。
 
 ## 7. 数据与配置迁移
 
@@ -956,6 +1001,25 @@ interface GrayBranchGroup {
 - Checkpoint restore、memory forget 和 destructive workflow 操作均有明确审批/权限策略。
 - 分支操作不重写或删除已有 Session 日志；候选切换失败不破坏 active 状态。
 
+#### P3F：提示词编排（Prompt Modes / Preset Entries / FakeThought）
+
+目标：把提示词编辑、提示词预设、伪造助手消息与伪造思考作为 Gray 差异化能力迁移（现状与判定见 6.6）。
+
+工作项：
+
+1. 提取 prompt domain：模板渲染、占位符模块、条目编排（before/after history 拆分）、动态上下文差分指纹、fakeThought 策略，全部脱离宿主。
+2. 静态模板与模式映射到 DSH system-prompt section / agent preset；未覆盖的「多消息骨架 + 临时 user/assistant 消息 + 历史插入点」面实现 Gray prompt 注入 provider（请求构造层，不写会话历史）。
+3. fakeThought 以 thought part 注入临时 model 消息；发送侧过滤策略迁移为渠道适配层策略，sendHistoryThoughts 映射到 DSH 渠道配置并统一默认值。
+4. 保留 PromptEntriesEditor 的条目编辑（含伪造思考输入框）、模式管理（新增/复制/导入/重命名/删除）与 ImportModesDialog 的 JSON 导入。
+5. 建立模板渲染 golden 测试：同一输入下新实现与 1.5.4 输出字节一致；fakeThought 在开关开/关下与旧版发送字节一致。
+
+验收门槛：
+
+- 模板/占位符渲染、single/preserve 策略行为与 1.5.4 等价；
+- 临时 user/assistant 条目不写入会话历史，仅在请求构造中出现；
+- fakeThought 随 sendHistoryThoughts 开关正确回传/剥离，且不破坏提示词前缀缓存；
+- 模式与条目的导入、复制、重命名在迁移后仍可用。
+
 ### Phase 4：DSH 原生 Client UI
 
 目标：只为 Gray Code 独有能力增加 UI，不复制整个 DSH Web Client。
@@ -1234,6 +1298,7 @@ PR 合并规则：
 | P3B Memory | 10–18 | 新索引/provider、prompt 预算、旧记录兼容 |
 | P3C Checkpoints | 18–32 | 增量 Blob、恢复安全、并发和跨平台路径 |
 | P3D Staged diff（条件项） | 0 或 10–18 | DSH 原生 approval/diff 是否满足产品语义 |
+| P3F 提示词编排（模式/预设条目/伪造思考，条件项） | 6–12 | DSH system-prompt 与请求构造扩展面（见 6.6） |
 | Phase 4 Client UI | 20–38 | 必要界面范围、Client slot 能力、视觉回归 |
 | Phase 5 完整迁移器 | 15–28 | 旧版本脏数据、DSH session seed API |
 | Phase 6 删除、文档、发布 | 7–12 | 发布基础设施和跨平台收尾 |
@@ -1307,6 +1372,7 @@ PR 合并规则：
 8. Legacy migration 输入格式、幂等键、部分提交与报告。
 9. Host/Client 版本兼容和降级策略。
 10. VS Code legacy 冻结、删除和发布切换方案。
+11. 提示词编排（模式/预设条目/伪造思考）与 DSH system-prompt / 请求构造扩展面的映射与注入边界。
 
 ## 15. 参考资料
 
