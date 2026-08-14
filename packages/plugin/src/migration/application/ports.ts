@@ -54,8 +54,17 @@ export interface ValidatedObject {
   data?: unknown
 }
 
+export interface ValidateOptions {
+  /** apply 授权模式：settings 解析时在内存中保留渠道明文 apiKey（仅供凭据迁移写入） */
+  collectSecrets?: boolean
+}
+
 export interface ValidatePort {
-  validateAll(sourceDir: string, entries: readonly InventoryEntry[]): Promise<ValidatedObject[]>
+  validateAll(
+    sourceDir: string,
+    entries: readonly InventoryEntry[],
+    options?: ValidateOptions,
+  ): Promise<ValidatedObject[]>
 }
 
 // ─── Plan（workspace/冲突映射） ─────────────────────────
@@ -86,6 +95,11 @@ export interface WriteTargetInput {
 export interface WriteTargetResult {
   targetRef: string
   notes?: string[]
+  /**
+   * 写时结果摘要（机器可读、已脱敏）：供最终报告合流到对应域的 summary
+   * （B2：settings 直写结果进入 report.settingsSummary.writeResult）。
+   */
+  summary?: Record<string, unknown>
 }
 
 export interface TargetWriterPort {
