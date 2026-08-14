@@ -110,7 +110,11 @@ restore 执行前**默认**先创建一个新 checkpoint 作为可恢复保护�
 - 旧实现（CheckpointRetentionService）按 retentionDays 保留 + 链上文件 merge 到后继；
   内容寻址下 blob 物理共享，驱逐只重挂父链，**无需文件 merge**（物理等价）；
 - 保留数量上限 `maxCheckpoints` 驱逐最旧存档（链重挂 + 减引用），blob 回收交给 GC。
-  这是有意的设计取舍，非实现遗漏（审查报告 C-05/U-01）。
+  这是有意的设计取舍，非实现遗漏（审查报告 C-05/U-01）；
+- H1 修正：被后继引用为 base 的节点**拒绝驱逐**——只重挂 baseCheckpointId 而不重写后继
+  manifest 的 changes/type 会让 resolveChainState 的 overlay/files 交叉校验 fail-closed
+  （后继全部 restore/preview 失败）。驱逐时跳过该类节点并记日志，链完整性优先，
+  数量上限在增量链场景下退化为尽力而为（仅无后继的节点可被驱逐）。
 
 ### D-6：恢复自愈 = fail-closed（取代旧 auto-prune，更安全）
 

@@ -581,8 +581,15 @@ export async function restoreWorkspaceSnapshot(
                 await workspaceWriter.unlink(absolutePath);
                 deleted += 1;
                 deletedPaths.push(absolutePath);
-            } catch {
-                failures.push({ path: scopedKey, reason: 'delete_failed' });
+            } catch (err) {
+                // M2：ENOENT = 目标已不存在——幂等删除视为成功（目标状态已达成），
+                // 不记 delete_failed（否则整次恢复失败）；其余错误才记失败。
+                if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+                    deleted += 1;
+                    deletedPaths.push(absolutePath);
+                } else {
+                    failures.push({ path: scopedKey, reason: 'delete_failed' });
+                }
             }
             processed += 1;
             options.onProgress?.(processed, progressTotal);

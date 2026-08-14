@@ -268,6 +268,8 @@ export class CheckpointService {
      * @internal RecordStoreImpl 持有本服务引用，通过该字段串行化并发写。
      */
     recordsWriteChain: Promise<unknown> = Promise.resolve();
+    /** 已弃用标志：dispose 后（未 await 的 initialize 在途完成时）不再回填状态 */
+    private disposed = false;
 
     constructor(config: CheckpointServiceConfig, workspaceWriter?: RestoreWorkspaceWriter) {
         this.config = config;
@@ -292,13 +294,15 @@ export class CheckpointService {
         });
     }
 
-    /** 确保存档目录存在 */
+    /** 确保存档目录存在（已弃用实例直接短路） */
     async initialize(): Promise<void> {
+        if (this.disposed) return;
         await fs.mkdir(this.checkpointsDir, { recursive: true });
     }
 
     /** 释放内部资源（测试/生命周期用） */
     dispose(): void {
+        this.disposed = true;
         for (const controller of this.operations.values()) {
             controller.controller.abort();
         }
@@ -389,6 +393,20 @@ export class CheckpointService {
                 },
                 signal
             );
+        } catch (err) {
+            // L4：取消错误统一映射（参照 restore/delete/gc 的 cancelled 处理）——排队/取锁
+            // 被取消（CP-LOCK-1，CHECKPOINT_LOCK_CANCELLED_MESSAGE）与 CheckpointAbortError /
+            // 信号已中止，归一为 CHECKPOINT_LOCK_CANCELLED_MESSAGE 抛出（工具层按取消语义
+            // 上报，不记 error 日志；executeBackup 内部已清理 staging/manifest）；其余错误
+            // （队列满/取锁超时等）原样上抛，由调用方/工具层按失败处理。
+            if (
+                (err as Error)?.message === CHECKPOINT_LOCK_CANCELLED_MESSAGE ||
+                err instanceof CheckpointAbortError ||
+                options?.signal?.aborted
+            ) {
+                throw new Error(CHECKPOINT_LOCK_CANCELLED_MESSAGE);
+            }
+            throw err;
         } finally {
             // 无进程级遗留（staging/quarantine 证据保留）
         }
@@ -407,6 +425,8 @@ export class CheckpointService {
     }): Promise<CreateCheckpointResult | null> {
         const { conversationId, roots, checkpointId, opId, storage } = params;
         const signal = params.signal;
+        // H2：记录是否已提交（提交后任一步失败都要回收记录，避免幽灵记录）
+        let recordCommitted = false;
         try {
             // 上一检查点：沿父链解析完整文件集（增量基线；hash 差集决定写入量）
             const existing = await this.store.getCheckpointRecords(conversationId);
@@ -569,6 +589,9 @@ export class CheckpointService {
             const description = [params.title, params.notes].filter(part => part && part.length > 0).join(' — ');
             const isIncremental = prevState !== undefined;
             const blobCount = new Set(Object.values(files).map(entry => entry.hash)).size;
+            // H2：lastEvent 在提交前折叠进记录（记录只写一次，提交后不再有第二步记录写；
+            // 后续步骤（驱逐等）失败时 catch 只需按「已提交」回收单条记录）。
+            const lastEvent = `checkpoint-created:${checkpointId}@${Date.now()}`;
             const checkpoint: CheckpointRecord = {
                 id: checkpointId,
                 conversationId,
@@ -600,19 +623,17 @@ export class CheckpointService {
                 manifestHash,
                 excludeRuleVersion: exclusionSnapshot.version,
                 blobCount,
-                status: 'active'
+                status: 'active',
+                lastEvent
             };
             throwIfAborted(signal);
-            await this.store.updateCheckpoints(conversationId, list => [...list, checkpoint]);
-
-            // 提交后增加 blob 引用（§7.6 第 4 步：domain 引用计数 +1）
+            // H2：引用计数先于记录提交——incrementRefs 失败时 manifest 可安全回滚且无幽灵
+            // 记录；refs 已 +1 但 manifest 被回滚的残留由 GC 按 manifests 权威重算调和。
             await storage.blobs.incrementRefs([...new Set(Object.values(files).map(entry => entry.hash))]);
 
-            // §7.6 第 5 步：发布 checkpoint-created 事件（DSH 无事件基础设施 → 记日志 + lastEvent）
-            const lastEvent = `checkpoint-created:${checkpointId}@${Date.now()}`;
-            await this.store.updateCheckpoints(conversationId, list =>
-                list.map(cp => (cp.id === checkpointId ? { ...cp, lastEvent } : cp))
-            );
+            // §7.6 第 4 步：记录提交（最后一步领域写；此后不再写 records.json）
+            await this.store.updateCheckpoints(conversationId, list => [...list, checkpoint]);
+            recordCommitted = true;
             log('checkpoint_created', {
                 checkpointId,
                 type: checkpoint.type,
@@ -649,6 +670,15 @@ export class CheckpointService {
                 await storage.blobs.cleanupStaging(opId);
             } catch (cleanupErr) {
                 warn('Failed to recycle staging after failed create:', cleanupErr);
+            }
+            // H2：记录已提交但后续步骤（保留策略清理等）失败 → 从 records.json 回收记录，
+            // 避免「manifest 已删、记录仍在」的幽灵记录。
+            if (recordCommitted) {
+                try {
+                    await this.store.updateCheckpoints(conversationId, list => list.filter(cp => cp.id !== checkpointId));
+                } catch (rmRecordErr) {
+                    warn('Failed to remove committed record after failed create:', rmRecordErr);
+                }
             }
             storage.manifests.clearCache(checkpointId);
             try {
@@ -697,15 +727,33 @@ export class CheckpointService {
             }
             const evicted = await this.evictCheckpoint(conversationId, cp);
             if (!evicted) {
-                break;
+                // H1：候选被跳过（链保护/不安全名）——继续尝试下一个候选，而不是中断整轮
+                // 驱逐。链完整性优先：驱逐不了就保留（数量上限退化为尽力而为）。
+                continue;
             }
         }
     }
 
-    /** 驱逐单个存档：链重挂后继 → 记录移除 → 删 manifest + 减 blob 引用 */
+    /**
+     * 驱逐单个存档：链重挂后继 → 记录移除 → 删 manifest + 减 blob 引用。
+     *
+     * H1（链完整性）：被后继引用为 base 的节点**拒绝驱逐**——只重挂 baseCheckpointId 而
+     * 不重写后继 manifest 的 changes/type 会让 resolveChainState 的 overlay 与 files 逐条
+     * 交叉校验失败，后继所有 restore/preview fail-closed。跳过并记日志，保留策略在增量链
+     * 场景下退化为尽力而为（链完整性优先于数量上限）。
+     */
     private async evictCheckpoint(conversationId: string, target: CheckpointRecord): Promise<boolean> {
         if (!isSafeCheckpointDirName(target.backupDir)) {
             warn(`Refusing to evict checkpoint ${target.id}: unsafe backupDir ${target.backupDir}`);
+            return false;
+        }
+        const records = await this.store.getCheckpointRecords(conversationId);
+        const referencedBy = records.find(cp => cp.id !== target.id && cp.baseCheckpointId === target.id);
+        if (referencedBy) {
+            warn(
+                `Skipping eviction of checkpoint ${target.id}: referenced as base by ${referencedBy.id} ` +
+                '(evicting would break the incremental chain; retention is best-effort)'
+            );
             return false;
         }
         let removed = false;
@@ -1420,8 +1468,25 @@ export class CheckpointService {
                     const storage = this.workspaceStorageFor(conversationId);
                     await storage.blobs.initialize();
                     const refs = await storage.blobs.readRefs();
-                    // 权威引用计数：扫描 manifests（domain 记录与磁盘的调和基准）
-                    const authoritative = await this.computeAuthoritativeBlobCounts(storage.manifests);
+                    // M3：调和孤儿 manifest——manifest 未被任何 records 引用（记录被删/损坏后
+                    // 的残留，使 blob 引用永不归零）。工作区锁保证与 create/delete/restore
+                    // 互斥，删除安全；dry-run 不删除（只从权威计数排除，保持 dry-run 与真实
+                    // GC 口径一致）。
+                    const records = await this.store.getCheckpointRecords(conversationId);
+                    const referencedManifestIds = new Set(records.map(record => record.id));
+                    const orphanManifestIds = await this.listOrphanManifestIds(storage.manifests, referencedManifestIds);
+                    if (!dryRun && orphanManifestIds.length > 0) {
+                        for (const cpId of orphanManifestIds) {
+                            storage.manifests.clearCache(cpId);
+                            await storage.manifests.deleteManifest(cpId);
+                        }
+                        log('collect_garbage_orphan_manifests', {
+                            workspace: conversationId,
+                            removed: orphanManifestIds.length
+                        });
+                    }
+                    // 权威引用计数：扫描 manifests（domain 记录与磁盘的调和基准；排除孤儿）
+                    const authoritative = await this.computeAuthoritativeBlobCounts(storage.manifests, orphanManifestIds);
                     const { hashes, invalidNames } = await storage.blobs.listBlobs();
 
                     // 调和 blobRefs.json：count 以 manifests 为准，orphanedAt 保留已有归零时刻
@@ -1467,18 +1532,24 @@ export class CheckpointService {
                         dryRun,
                         removed: toRemove.length,
                         pending: pending.length,
-                        refsVerified: hashes.length
+                        refsVerified: hashes.length,
+                        orphanManifests: orphanManifestIds.length
                     });
 
+                    const issues: string[] = [];
+                    if (invalidNames.length > 0) {
+                        issues.push(`invalid blob filenames found: ${invalidNames.join(', ')}`);
+                    }
+                    if (dryRun && orphanManifestIds.length > 0) {
+                        issues.push(`orphan manifests found (dry-run: not removed): ${orphanManifestIds.join(', ')}`);
+                    }
                     return {
                         dryRun,
                         removedBlobs: toRemove,
                         removedBytes,
                         pendingBlobs: pending,
                         refsVerified: hashes.length,
-                        ...(invalidNames.length > 0
-                            ? { issue: `invalid blob filenames found: ${invalidNames.join(', ')}` }
-                            : {})
+                        ...(issues.length > 0 ? { issue: issues.join('; ') } : {})
                     };
                 },
                 options?.signal
@@ -1492,9 +1563,44 @@ export class CheckpointService {
         }
     }
 
-    /** 权威 blob 引用计数：扫描工作区 manifests 中全部 files 映射 */
-    private async computeAuthoritativeBlobCounts(manifests: CheckpointManifestRepository): Promise<Map<string, number>> {
+    /**
+     * 列出未被任何 records 引用的孤儿 manifest（records.json 是 manifest 存活性的权威；
+     * M3）。只按文件名收集（非法名跳过，不做内容校验——内容损坏的 manifest 由
+     * computeAuthoritativeBlobCounts 跳过，其 blob 已按孤儿回收）。
+     */
+    private async listOrphanManifestIds(
+        manifests: CheckpointManifestRepository,
+        referencedIds: ReadonlySet<string>
+    ): Promise<string[]> {
+        let names: string[];
+        try {
+            names = await fs.readdir(path.join(manifests.workspaceDir, 'manifests'));
+        } catch {
+            return []; // manifests 目录不存在 = 无 manifest
+        }
+        const orphans: string[] = [];
+        for (const name of names) {
+            if (!name.endsWith('.json')) {
+                continue;
+            }
+            const cpId = name.slice(0, -'.json'.length);
+            if (!isSafeCheckpointDirName(cpId)) {
+                continue;
+            }
+            if (!referencedIds.has(cpId)) {
+                orphans.push(cpId);
+            }
+        }
+        return orphans.sort();
+    }
+
+    /** 权威 blob 引用计数：扫描工作区 manifests 中全部 files 映射（orphanIds 排除在外） */
+    private async computeAuthoritativeBlobCounts(
+        manifests: CheckpointManifestRepository,
+        orphanIds: readonly string[] = []
+    ): Promise<Map<string, number>> {
         const counts = new Map<string, number>();
+        const excluded = new Set(orphanIds);
         let names: string[];
         try {
             names = await fs.readdir(path.join(manifests.workspaceDir, 'manifests'));
@@ -1506,7 +1612,7 @@ export class CheckpointService {
                 continue;
             }
             const cpId = name.slice(0, -'.json'.length);
-            if (!isSafeCheckpointDirName(cpId)) {
+            if (!isSafeCheckpointDirName(cpId) || excluded.has(cpId)) {
                 continue;
             }
             const manifest = await manifests.loadManifest(cpId);
@@ -1841,14 +1947,34 @@ export class CheckpointService {
 class RecordStoreImpl implements CheckpointRecordMetadataStore {
     constructor(private readonly service: CheckpointService) {}
 
-    /** 读取全部记录（跨工作区）；文件缺失/损坏返回空数组 */
+    /** 读取全部记录（跨工作区）；文件缺失返回空数组，损坏时保留证据（改名 .corrupt-<ts>） */
     async readAllRecords(): Promise<CheckpointRecord[]> {
         try {
             const raw = await fs.readFile(this.service.recordsFile, 'utf-8');
             const parsed = JSON.parse(raw) as unknown;
-            return Array.isArray(parsed) ? parsed as CheckpointRecord[] : [];
-        } catch {
+            if (!Array.isArray(parsed)) {
+                // 内容不是数组（损坏/版本不符）：保留证据后按空处理
+                await this.preserveCorruptRecords();
+                return [];
+            }
+            return parsed as CheckpointRecord[];
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+                // 读取/解析失败（损坏）：保留证据（改名 .corrupt-<ts>）再返回空，
+                // 不静默丢弃可能含全部存档记录的文件
+                await this.preserveCorruptRecords();
+            }
             return [];
+        }
+    }
+
+    /** records.json 损坏时保留证据：改名 `.corrupt-<ts>`（避免后续写回覆盖唯一副本） */
+    private async preserveCorruptRecords(): Promise<void> {
+        try {
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            await fs.rename(this.service.recordsFile, `${this.service.recordsFile}.corrupt-${stamp}`);
+        } catch {
+            // 已改过名（并发调用）/无权限：忽略，按空处理
         }
     }
 

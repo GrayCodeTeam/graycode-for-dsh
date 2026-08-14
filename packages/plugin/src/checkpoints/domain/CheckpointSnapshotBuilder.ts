@@ -330,13 +330,15 @@ async function buildAffectedPathsSnapshot(
         const relativePath = path.relative(root.fsPath, absPath).replace(/\\/g, '/');
         const scopedPath = createWorkspaceScopedPath(root.id, relativePath);
 
-        // 先 stat 确定真实类型（文件/目录），再按类型判定忽略规则——目录路径以尾斜杠形式
+        // 先 lstat 确定真实类型（文件/目录），再按类型判定忽略规则——目录路径以尾斜杠形式
         // 参与目录型规则匹配，与全量分支 collectEntries 先取 dirent.isDirectory 再
         // shouldIgnore 的顺序一致（此前在 stat 前以 isDirectory=false 判定，目录型规则
         // 对受影响路径中的目录不生效）。
+        // H3：必须用 lstat（不跟随符号链接）——stat 会把工作区外目标内容哈希进 blob，
+        // 而恢复时 resolveSafePathInsideRoot 拒绝符号链接段，恢复必失败。
         let stat: BigIntStats;
         try {
-            stat = await fs.stat(absPath, { bigint: true });
+            stat = await fs.lstat(absPath, { bigint: true });
         } catch {
             // stat 失败（ENOENT 等，如 delete_file 删除后目标已不存在）→ 不可读
             unreadable.push({ scopedPath, reason: 'unreadable' });
@@ -352,6 +354,14 @@ async function buildAffectedPathsSnapshot(
                 rule: ignoreResult.rule,
                 source: ignoreResult.source
             });
+            continue;
+        }
+
+        // CP-SYMLINK-1（H3）：符号链接（及 fifo/socket 等特殊文件类型）不支持备份——
+        // 与全量分支 collectEntries 同口径（参考 CheckpointIgnoreResolver）：计入 excluded
+        // （reason=unsupported_file_type），不归档（恢复侧同样拒绝符号链接段）。
+        if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+            excluded.push({ path: scopedPath, reason: 'unsupported_file_type', source: 'filesystem' });
             continue;
         }
 

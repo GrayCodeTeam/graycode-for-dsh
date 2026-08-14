@@ -172,6 +172,19 @@ export class BlobStore {
         const target = this.blobPath(hash);
         await fs.mkdir(this.blobsDir, { recursive: true });
         // staging 与 blobs 同卷：rename 即原子 move（§7.6 第 3 步）
+        // L6b：复用判定先于 rename——POSIX rename 会静默覆盖已存在目标（EEXIST 分支在
+        // POSIX 上不触发，reused 恒为 false → newBlobBytes 统计虚高：同内容多文件并发
+        // 提交时重复计新字节）。先探测目标存在性；工作区锁已保证同 hash 写互斥（含跨进程
+        // 文件锁），探测与 rename 之间无并发写者。
+        try {
+            await fs.access(target);
+            await fs.rm(stagedPath, { force: true });
+            return { ok: true, hash, size, reused: true };
+        } catch (accessErr) {
+            if ((accessErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+                // 非 ENOENT（权限等）：不吞错——交给下方 rename 抛真实错误
+            }
+        }
         try {
             await fs.rename(stagedPath, target);
             return { ok: true, hash, size, reused: false };
@@ -276,13 +289,29 @@ export class BlobStore {
 
     // ==================== 引用计数（domain 记录） ====================
 
-    /** 读取引用计数表（缺失/损坏返回空表） */
+    /** 读取引用计数表（缺失返回空表；损坏条目按 count=0 净化，杜绝 NaN 写回） */
     async readRefs(): Promise<BlobRefsPayload['counts']> {
         try {
             const raw = await fs.readFile(this.refsFile, 'utf-8');
             const parsed = JSON.parse(raw) as Partial<BlobRefsPayload>;
             if (parsed && typeof parsed === 'object' && parsed.counts && typeof parsed.counts === 'object') {
-                return parsed.counts as BlobRefsPayload['counts'];
+                const counts: BlobRefsPayload['counts'] = {};
+                for (const [hash, entry] of Object.entries(parsed.counts)) {
+                    if (!entry || typeof entry !== 'object') {
+                        continue;
+                    }
+                    const rawCount = (entry as { count?: unknown }).count;
+                    const count = Number(rawCount);
+                    // L6a：count 非有限数值（NaN/字符串/负数/缺失）→ 按 0 净化，
+                    // 杜绝 NaN 写回 blobRefs.json（incrementRefs/decrementRefs 直接 +1/-1）
+                    counts[hash] = {
+                        count: Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0,
+                        ...(typeof (entry as { orphanedAt?: unknown }).orphanedAt === 'number'
+                            ? { orphanedAt: (entry as { orphanedAt?: number }).orphanedAt }
+                            : {})
+                    };
+                }
+                return counts;
             }
             return {};
         } catch {
@@ -290,11 +319,11 @@ export class BlobStore {
         }
     }
 
-    /** 原子写引用计数表（tmp + rename） */
+    /** 原子写引用计数表（tmp + rename；tmp 带随机后缀，避免并发写同路径 tmp 互相覆盖） */
     private async writeRefs(counts: BlobRefsPayload['counts']): Promise<void> {
         await fs.mkdir(this.rootDir, { recursive: true });
         const payload: BlobRefsPayload = { version: 1, counts };
-        const tmp = `${this.refsFile}.tmp`;
+        const tmp = `${this.refsFile}.${crypto.randomUUID()}.tmp`;
         await fs.writeFile(tmp, JSON.stringify(payload, null, 2), 'utf-8');
         await fs.rename(tmp, this.refsFile);
     }

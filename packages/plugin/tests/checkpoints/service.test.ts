@@ -18,12 +18,12 @@ import { describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { CheckpointService, type CheckpointServiceConfig, type CreateCheckpointResult } from '../../src/checkpoints/service.ts'
-import { createDshFsRestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
+import { createDshFsRestoreWorkspaceWriter, createNodeFsRestoreWorkspaceWriter, type RestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
 import { computeForcedKeepIds } from '../../src/checkpoints/domain/CheckpointDeletionService.ts'
 import { BlobStore, BLOB_HASH_PATTERN } from '../../src/checkpoints/domain/BlobStore.ts'
 import * as fileHashing from '../../src/checkpoints/domain/fileHashing.ts'
 import type { CheckpointRecord } from '../../src/checkpoints/domain/types.ts'
-import { makeEnv, writeFile, createTempDir, cleanup } from './helpers.ts'
+import { makeEnv, makeService, writeFile, createTempDir, cleanup } from './helpers.ts'
 
 /**
  * 默认行为 = 真实实现；staging 失败注入用例临时替换实现（见下方 quarantine describe）。
@@ -510,6 +510,47 @@ describe('CheckpointService blob GC (dry-run, refcount, grace period)', () => {
       await cleanup(workspaceDir)
     }
   })
+
+  test('GC removes orphan manifests (not referenced by any record) and reclaims their blobs (M3)', async () => {
+    const { workspaceDir, service } = await makeEnv({ blobGracePeriodDays: 0 })
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const created = await service.createCheckpoint(workspaceDir)
+      const wsId = service.conversationIdFor(workspaceDir)
+      const blobsDir = blobsDirOf(service, workspaceDir)
+      const hashes = await listBlobHashes(blobsDir)
+      expect(hashes).toHaveLength(1)
+
+      // 模拟记录丢失：直接从 records.json 移除该记录（manifest 残留为孤儿，blob 引用永不归零）
+      const recordsFile = path.join(service.checkpointsDir, 'records.json')
+      const records = JSON.parse(await fs.readFile(recordsFile, 'utf-8'))
+      await fs.writeFile(
+        recordsFile,
+        JSON.stringify(records.filter((r: { id: string }) => r.id !== created!.checkpointId), null, 2),
+        'utf-8',
+      )
+      const manifestPath = path.join(service.checkpointsDir, wsId, 'manifests', `${created!.checkpointId}.json`)
+
+      // dry-run：报告孤儿 manifest（issue），不删除任何文件
+      const dryRun = await service.collectGarbage(workspaceDir)
+      expect(dryRun.dryRun).toBe(true)
+      expect(dryRun.issue).toContain('orphan manifests')
+      await expect(fs.access(manifestPath)).resolves.toBeUndefined()
+
+      // 真实 GC：孤儿 manifest 被删除 + 其 blob 可回收（引用归零）
+      const collected = await service.collectGarbage(workspaceDir, { dryRun: false })
+      expect(collected.removedBlobs.sort()).toEqual(hashes)
+      await expect(fs.access(manifestPath)).rejects.toThrow()
+
+      // 幂等：再次 GC 无内容
+      const again = await service.collectGarbage(workspaceDir, { dryRun: false })
+      expect(again.removedBlobs).toEqual([])
+      expect(again.issue).toBeUndefined()
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
 })
 
 describe('CheckpointService staging quarantine (failure evidence preserved)', () => {
@@ -625,7 +666,7 @@ describe('CheckpointService verify integrity', () => {
 })
 
 describe('CheckpointService retention', () => {
-  test('excess checkpoints are evicted oldest-first with chain protection', async () => {
+  test('eviction skips checkpoints referenced as base (H1): every remaining checkpoint previews and restores', async () => {
     const { workspaceDir, service } = await makeEnv({ maxCheckpoints: 2 })
     try {
       await writeFile(workspaceDir, 'a.txt', 'v1')
@@ -635,22 +676,202 @@ describe('CheckpointService retention', () => {
       await writeFile(workspaceDir, 'a.txt', 'v3')
       const third = await service.createCheckpoint(workspaceDir)
 
-      // 第三个创建后触发清理：最旧 first 被驱逐（second 仍被 third 引用，受链保护）
+      // 第三个创建后触发保留策略清理。链 A→B→C 中 A、B 均被后继引用为 base——
+      // 驱逐会破坏增量链（resolveChainState overlay/files 交叉校验 fail-closed），
+      // 必须跳过（H1：链完整性优先于数量上限，保留策略退化为尽力而为）。
       const listed = await service.listCheckpoints(workspaceDir)
-      expect(listed.total).toBe(2)
       const ids = listed.items.map(item => item.id)
-      expect(ids).not.toContain(first!.checkpointId)
+      expect(ids).toContain(first!.checkpointId)
       expect(ids).toContain(second!.checkpointId)
       expect(ids).toContain(third!.checkpointId)
+
+      // 剩余节点（全部）都可 preview + restore（回归：驱逐前 second/third 全部 fail-closed）
+      for (const item of listed.items) {
+        const preview = await service.previewRestore(workspaceDir, item.id)
+        expect(preview.preview.success).toBe(true)
+        const restored = await service.restoreCheckpoint(workspaceDir, item.id, preview.previewToken!)
+        expect(restored.success).toBe(true)
+      }
+      // 恢复顺序 = 列表序（新→旧）：最后恢复的是最旧节点 → 工作区 = 第一份状态（v1）
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('v1')
+
+      // manifest 未被误删；blob 仍在池中（未被驱逐路径减引用）
       const wsId = service.conversationIdFor(workspaceDir)
       await expect(
         fs.access(path.join(service.checkpointsDir, wsId, 'manifests', `${first!.checkpointId}.json`)),
-      ).rejects.toThrow()
-      // 被驱逐的 blob 只减引用不物理删除（GC 负责）
+      ).resolves.toBeUndefined()
       expect(await listBlobHashes(blobsDirOf(service, workspaceDir))).toHaveLength(3)
     } finally {
       service.dispose()
       await cleanup(workspaceDir)
+    }
+  })
+
+  test('eviction still reclaims childless checkpoints (corrupt predecessor) without breaking the chain', async () => {
+    const { workspaceDir, dataRoot, service } = await makeEnv({ maxCheckpoints: 1 })
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'v1')
+      const first = await service.createCheckpoint(workspaceDir)
+
+      // 破坏 first 的 manifest（等价断链）——换新服务实例（无内存缓存）重新解析
+      const wsId = service.conversationIdFor(workspaceDir)
+      service.dispose()
+      await fs.rm(path.join(service.checkpointsDir, wsId, 'manifests', `${first!.checkpointId}.json`), { force: true })
+      const service2 = makeService(dataRoot, { maxCheckpoints: 1 })
+      await service2.initialize()
+      try {
+        await writeFile(workspaceDir, 'a.txt', 'v2')
+        const second = await service2.createCheckpoint(workspaceDir)
+        expect(second).not.toBeNull()
+        expect(second!.type).toBe('full') // 父链损坏 → 从完整备份开始
+
+        // 驱逐触发：first 无后继（second 是 full，不引用它）→ 被驱逐；链完整
+        const listed = await service2.listCheckpoints(workspaceDir)
+        expect(listed.total).toBe(1)
+        expect(listed.items[0]!.id).toBe(second!.checkpointId)
+        await expect(
+          fs.access(path.join(service2.checkpointsDir, wsId, 'manifests', `${first!.checkpointId}.json`)),
+        ).rejects.toThrow()
+
+        // 剩余节点可 preview/restore
+        const preview = await service2.previewRestore(workspaceDir, second!.checkpointId)
+        expect(preview.preview.success).toBe(true)
+        const restored = await service2.restoreCheckpoint(workspaceDir, second!.checkpointId, preview.previewToken!)
+        expect(restored.success).toBe(true)
+        expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('v2')
+      } finally {
+        service2.dispose()
+      }
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+})
+
+describe('CheckpointService failed create (ghost record prevention, H2)', () => {
+  test('incrementRefs failure after manifest write leaves no ghost record in records.json', async () => {
+    // H2：记录提交前 incrementRefs 失败 → catch 回滚 manifest；记录从未提交 → 无幽灵记录
+    const spy = vi
+      .spyOn(BlobStore.prototype, 'incrementRefs')
+      .mockRejectedValue(new Error('injected incrementRefs failure'))
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'payload')
+      const result = await service.createCheckpoint(workspaceDir)
+      expect(result).toBeNull()
+
+      // records.json 无残留（无指向已删 manifest 的幽灵记录；文件不存在 = 从未提交，更强）
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8').catch(() => '[]'))
+      expect(recordsRaw).toEqual([])
+      // manifest 已回滚（不可见）
+      const wsId = service.conversationIdFor(workspaceDir)
+      expect(await fs.readdir(path.join(service.checkpointsDir, wsId, 'manifests')).catch(() => [])).toEqual([])
+    } finally {
+      spy.mockRestore()
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService create cancellation mapping (L4)', () => {
+  test('createCheckpoint maps cancelled lock wait to the canonical cancellation error', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      const controller = new AbortController()
+      controller.abort()
+      // 参照 restore/delete/gc：取消归一为 CHECKPOINT_LOCK_CANCELLED_MESSAGE（不记 error 日志）
+      await expect(service.createCheckpoint(workspaceDir, { signal: controller.signal })).rejects.toThrow(
+        'Checkpoint operation was cancelled',
+      )
+      // 无残留记录/manifest（records.json 不存在 = 从未提交）
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8').catch(() => '[]'))
+      expect(recordsRaw).toEqual([])
+      const wsId = service.conversationIdFor(workspaceDir)
+      expect(await fs.readdir(path.join(service.checkpointsDir, wsId, 'manifests')).catch(() => [])).toEqual([])
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService records.json corruption (L6)', () => {
+  test('corrupt records.json is preserved as .corrupt-<ts> evidence and treated as empty', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      const recordsFile = path.join(service.checkpointsDir, 'records.json')
+      const corrupt = '{"not":"an array"'
+      await fs.writeFile(recordsFile, corrupt, 'utf-8')
+
+      // 损坏读取：返回空列表（不抛错）
+      const listed = await service.listCheckpoints(workspaceDir)
+      expect(listed.total).toBe(0)
+
+      // 证据保留：原内容被改名 .corrupt-<ts>（不静默丢弃可能含全部记录的文件）
+      const names = await fs.readdir(service.checkpointsDir)
+      const evidence = names.filter(name => name.startsWith('records.json.corrupt-'))
+      expect(evidence.length).toBeGreaterThan(0)
+      expect(await fs.readFile(path.join(service.checkpointsDir, evidence[0]!), 'utf-8')).toBe(corrupt)
+
+      // 之后可正常创建（写入全新 records.json）
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      expect((await service.listCheckpoints(workspaceDir)).total).toBe(1)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService restore idempotent deletion (M2)', () => {
+  test('unlink ENOENT is treated as success (idempotent delete), not delete_failed', async () => {
+    const workspaceDir = await createTempDir('dsh-checkpoint-ws-')
+    const dataRoot = await createTempDir('dsh-checkpoint-data-')
+    // 自定义 writer：unlink 恒抛 ENOENT（模拟删除目标在恢复前已被移除）
+    const nodeWriter = createNodeFsRestoreWorkspaceWriter()
+    const writer: RestoreWorkspaceWriter = {
+      ...nodeWriter,
+      async unlink() {
+        throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+      },
+    }
+    const service = new CheckpointService(
+      {
+        dataRoot,
+        maxCheckpoints: -1,
+        excludeProfiles: {},
+        excludePatterns: [],
+        maxFileSizeBytes: 50 * 1024 * 1024,
+        blobGracePeriodDays: 7,
+        restoreProtectionPoint: false,
+      },
+      writer,
+    )
+    await service.initialize()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      // 快照后新建文件：恢复时确认删除（unlink 目标已不存在 → ENOENT）
+      await writeFile(workspaceDir, 'extra.txt', 'untracked')
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId, { deleteUntrackedFiles: true })
+      expect(preview.preview.success).toBe(true)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!, {
+        deleteUntrackedFiles: true,
+      })
+      // ENOENT 幂等成功，不整次失败（修复前：delete_failed → success=false）
+      expect(restored.success).toBe(true)
+      expect(restored.deleted).toBe(1)
+      expect(restored.failures).toBeUndefined()
+      // 快照文件仍正常恢复
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('snapshot')
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
     }
   })
 })
