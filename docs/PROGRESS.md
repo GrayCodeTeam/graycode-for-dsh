@@ -174,7 +174,7 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - **收尾已完成**：会话导入接入 DSH session 公开 API（确定性 seed、幂等、失败可重跑，标题/分支图/
   子代理转录仍走 artifact 随附）；checkpoint 增量链跨目录回溯（沿 backupSourceCheckpointId 逐级
   解析，环/缺失/损坏隔离）；domainNotes 并入导入报告；settings 直写 DSH 已落地（见下节）
-- 未完成：复杂 scope 映射待用户确认
+- 复杂 scope 映射（D-1/D-2/D-4a/D-5b/D-6）已交付（见下「Phase 5 复杂 scope 映射」节）
 
 ### Phase 5 收尾：渠道配置导入直写 DSH — 已落地
 
