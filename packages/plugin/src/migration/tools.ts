@@ -27,6 +27,8 @@ interface ScanArgs {
 interface ApplyArgs {
   sourceDir: string
   confirmToken: string
+  /** B1：用户显式授权后一键迁移渠道 apiKey 到 DSH credentials（默认 false） */
+  migrateCredentials?: boolean
 }
 
 const scanParameters = {
@@ -38,6 +40,13 @@ const applyParameters = {
   confirmToken: {
     type: 'string',
     description: 'migration_scan 返回的 planToken（apply 二次确认；源目录变化后需重新 scan）。',
+  },
+  migrateCredentials: {
+    type: 'boolean',
+    description:
+      '设为 true 时，把旧渠道明文 apiKey 一键写入 DSH credentials（引用名 GRAYCODE_<TYPE>_<ID>_API_KEY）。' +
+      '默认 false（凭据不迁移，只生成引用占位 + 重新录入清单）。注意：旧 key 可能已过期/轮换，' +
+      '写入前请确认授权；写入后立即从内存丢弃，明文绝不进入报告/日志/建议文件。',
   },
 } as const
 
@@ -137,7 +146,8 @@ export function createMigrationTools(
       '把旧 Gray Code 数据目录导入 DSH（需 confirmToken 二次确认）。' +
       '按域提交点逐域提交（conversations → checkpoints → memory → settings），' +
       '每域完成后记录提交点；幂等：同输入重复 apply 第二次全部 already-imported，' +
-      '不生成副本。源目录只读。凭据不迁移（settings 生成建议配置 + 重新录入清单）。' +
+      '不生成副本。源目录只读。凭据默认不迁移（settings 生成建议配置 + 重新录入清单）；' +
+      '设置 migrateCredentials=true 可在用户显式授权后把旧渠道 apiKey 一键写入 DSH credentials。' +
       'apply 全程持跨进程文件锁，并发 apply 会等待或超时。',
     parameters: applyParameters,
     output: {
@@ -146,8 +156,11 @@ export function createMigrationTools(
     },
     async execute(args, exec) {
       assertReaderAllowed(options, 'migration_apply')
-      const { sourceDir, confirmToken } = args as ApplyArgs
-      const { report } = await service.apply(sourceDir, confirmToken, { signal: exec.signal })
+      const { sourceDir, confirmToken, migrateCredentials } = args as ApplyArgs
+      const { report } = await service.apply(sourceDir, confirmToken, {
+        signal: exec.signal,
+        credentialsAuthorized: migrateCredentials === true,
+      })
       return toToolResult(report)
     },
   })

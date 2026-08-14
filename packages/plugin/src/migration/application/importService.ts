@@ -39,6 +39,7 @@ import type {
   PlanOutput,
   SourceInventory,
   TargetWriterPort,
+  ValidateOptions,
   ValidatedObject,
 } from './ports.ts'
 
@@ -89,6 +90,7 @@ export class LegacyImportService {
   private async scanWithPlan(
     sourceDir: string,
     signal?: AbortSignal,
+    parseOptions?: ValidateOptions,
   ): Promise<{ run: ImportRun; report: MigrationReport; plan: PlanOutput }> {
     this.assertNotCancelled(signal)
     let run = createImportRun({
@@ -130,7 +132,7 @@ export class LegacyImportService {
 
     // Validate（版本/路径/完整性；单对象损坏隔离）
     run = updateStep(run, 'validate', { status: 'running' })
-    const validated = await this.deps.validator.validateAll(sourceDir, inventory.entries)
+    const validated = await this.deps.validator.validateAll(sourceDir, inventory.entries, parseOptions)
     const validCount = validated.filter(v => v.valid).length
     run = updateStep(run, 'validate', {
       status: 'complete',
@@ -158,19 +160,31 @@ export class LegacyImportService {
 
   // ─── 用例 2：apply（二次确认 + 逐域提交点） ─────────────────────────
 
-  async apply(sourceDir: string, confirmToken: string, options: { signal?: AbortSignal } = {}): Promise<ScanResult> {
+  async apply(
+    sourceDir: string,
+    confirmToken: string,
+    options: { signal?: AbortSignal; credentialsAuthorized?: boolean } = {},
+  ): Promise<ScanResult> {
     this.assertNotCancelled(options.signal)
     // H1c：apply 全程持跨进程文件锁（防并发 apply 重复写目标）；finally 保证释放
     const release = await this.acquireApplyLock(options.signal)
     try {
-      return await this.applyInner(sourceDir, confirmToken, options.signal)
+      return await this.applyInner(sourceDir, confirmToken, options.signal, options.credentialsAuthorized)
     } finally {
       await release()
     }
   }
 
-  private async applyInner(sourceDir: string, confirmToken: string, signal?: AbortSignal): Promise<ScanResult> {
-    const { run: plannedRun, report: scanReport, plan } = await this.scanWithPlan(sourceDir, signal)
+  private async applyInner(
+    sourceDir: string,
+    confirmToken: string,
+    signal?: AbortSignal,
+    credentialsAuthorized = false,
+  ): Promise<ScanResult> {
+    const { run: plannedRun, report: scanReport, plan } = await this.scanWithPlan(sourceDir, signal, {
+      // B1：apply 授权模式才在内存中收集明文 apiKey（默认 false = 脱敏，现状不变）
+      collectSecrets: credentialsAuthorized,
+    })
     if (scanReport.planToken !== confirmToken) {
       throw new MigrationError(
         MIGRATION_ERROR_CODES.CONFIRM_TOKEN_MISMATCH,
@@ -189,6 +203,8 @@ export class LegacyImportService {
 
     const objects = plan.objects
     let anyCommitted = false
+    // B2：settings 域写时结果（脱敏）收集，最终合流进 report.settingsSummary.writeResult
+    const settingsWriteSummaries: Record<string, unknown>[] = []
 
     for (const domain of WRITE_STEPS) {
       const writer: TargetWriterPort = this.deps.writers[domain]
@@ -226,6 +242,7 @@ export class LegacyImportService {
         this.assertNotCancelled(signal)
         try {
           const result = await writer.write({ runId: run.id, object: obj, sourceDir })
+          if (domain === 'settings' && result.summary) settingsWriteSummaries.push(result.summary)
           const entry: LedgerEntry = {
             key,
             sourceFingerprint: run.sourceFingerprint,
@@ -285,6 +302,20 @@ export class LegacyImportService {
       ...scanReport,
       run,
       counts: summarizeCounts(objects),
+      ...(settingsWriteSummaries.length > 0
+        ? {
+            settingsSummary: {
+              // scanReport.settingsSummary 是 scan 阶段的脱敏解析摘要；writeResult 补写时结果
+              ...(scanReport.settingsSummary !== undefined
+                ? (scanReport.settingsSummary as Record<string, unknown>)
+                : {}),
+              writeResult:
+                settingsWriteSummaries.length === 1
+                  ? settingsWriteSummaries[0]
+                  : { results: settingsWriteSummaries },
+            },
+          }
+        : {}),
     }
     return { run, report }
   }
@@ -482,6 +513,7 @@ export class LegacyImportService {
     validated: readonly ValidatedObject[],
   ): MigrationReport {
     const settingsObject = plan.objects.find(o => o.objectType === 'settings')
+    const settingsSummary = settingsObject?.data ? sanitizeSettingsSummary(settingsObject.data) : undefined
     return {
       run,
       source: {
@@ -501,9 +533,21 @@ export class LegacyImportService {
         ...(o.skipReason ? { skipReason: o.skipReason } : {}),
       })),
       skips: plan.skips,
-      ...(settingsObject?.data ? { settingsSummary: settingsObject.data } : {}),
+      ...(settingsSummary !== undefined ? { settingsSummary } : {}),
     }
   }
+}
+
+/**
+ * settings 摘要净化：剥掉授权模式下可能携带的明文凭据负载
+ * （credentialSecrets 只允许在 apply 写路径的内存中短暂存在，
+ * 绝不进入机器报告；防御性剥离，即使未来有调用方误传也不泄漏）。
+ */
+function sanitizeSettingsSummary(data: unknown): unknown {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data
+  const out: Record<string, unknown> = { ...(data as Record<string, unknown>) }
+  delete out.credentialSecrets
+  return out
 }
 
 function domainOfObjectType(objectType: string): TargetDomain {
