@@ -1,0 +1,6 @@
+# graycode-for-dsh bundle patch: insert the Gray Code settings plugin row.
+# Loader rows carry no load order semantics (activation is service-driven);
+# `connection` and `settings` dependencies are declared in the plugin code.
+- insert:
+    - id: graycode
+      name: graycode-for-dsh
