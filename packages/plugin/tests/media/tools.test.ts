@@ -260,6 +260,25 @@ describeSharp('media 工具层（成功路径，依赖 sharp）', () => {
     }
   })
 
+  test('resize：目标尺寸超过 50MP 输出像素护栏 → OUTPUT_TOO_LARGE（不执行 sharp）', async () => {
+    const { ws, tools } = await setup()
+    try {
+      await writeBytes(ws, 'a.png', png1x1Bytes())
+      const result = (await tools.get('resize_image')!.execute(
+        { image_path: 'a.png', width: 10000, height: 5001 },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.failedCount).toBe(1)
+      expect(result.results[0]?.code).toBe(MediaErrorCode.OUTPUT_TOO_LARGE)
+      expect(result.results[0]?.error).toContain('50MP')
+      // 未产生任何输出文件（护栏在 sharp 展开前拒绝）
+      await expect(fs.stat(path.join(ws, 'media-output'))).rejects.toThrow()
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
   test('rotate：format 转换 png → jpeg，输出 .jpg', async () => {
     const { ws, tools } = await setup()
     try {

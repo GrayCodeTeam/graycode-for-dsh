@@ -51,6 +51,18 @@ describe('normalizeEntryPath', () => {
     expectInvalidPath('a/b\x01c')
   })
 
+  it('拒绝 Windows 保留设备名（含目录内与扩展名形态，不区分大小写）', () => {
+    expectInvalidPath('con')
+    expectInvalidPath('CON.txt')
+    expectInvalidPath('dir/nul')
+    expectInvalidPath('dir/NUL.md')
+    expectInvalidPath('aux')
+    expectInvalidPath('prn/log')
+    expectInvalidPath('com1')
+    expectInvalidPath('lpt9/serial.txt')
+    expectInvalidPath('a/b/COM3')
+  })
+
   it('assertSafeEntryPath 为 normalizeEntryPath 的断言形式', () => {
     expect(assertSafeEntryPath('x/y.md')).toBe('x/y.md')
     try {

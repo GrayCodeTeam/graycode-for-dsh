@@ -269,6 +269,17 @@ async function executeResizeTask(
 
   if (signal?.aborted) return cancelledResult(index, task)
 
+  // 输出像素预检：目标尺寸超 50MP 直接拒绝（与 rotate 的 OUTPUT_TOO_LARGE 护栏同源，
+  // 防止目标尺寸过大时 sharp 展开超大内存缓冲）
+  if (exceedsOutputPixelLimit(task.width, task.height)) {
+    return failResult(
+      index,
+      task,
+      MediaErrorCode.OUTPUT_TOO_LARGE,
+      `resized image would be too large (${task.width}x${task.height} = ${task.width * task.height} pixels, limit 50MP); choose a smaller target size`,
+    )
+  }
+
   let resized: Uint8Array
   try {
     // 老版同款：拉伸填充整个目标尺寸（不保持宽高比），Lanczos3 高质量
