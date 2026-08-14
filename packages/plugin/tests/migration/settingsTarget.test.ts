@@ -102,6 +102,8 @@ function readSuggested(importsRoot: string, runId: string): {
     conflictSkippedRoutes: string[]
     skippedChannels: string[]
     credentialRefs: string[]
+    migratedCredentialRefs: string[]
+    credentialMigrationErrors?: string[]
     credentialStates?: Record<string, boolean>
     rejectionMessage?: string
   }
@@ -287,5 +289,134 @@ describe('mapper 产出可被真实 dsh-llm-pi-ai 服务（集成探针）', () 
     expect(ids).toContain('google')
     expect(ids).toContain('openai')
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+describe('B1 凭据一键迁移（ctx.credentials.set）', () => {
+  /** 授权模式解析：保留明文 apiKey（仅内存） */
+  function makeAuthorizedParsed(): ReturnType<typeof parseSettingsExport> {
+    const parsed = parseSettingsExport(SETTINGS_RAW, 'graycode-settings.json', { collectSecrets: true })
+    if (!parsed.ok) throw new Error('fixture parse failed')
+    return parsed
+  }
+
+  function makeAuthorizedInput(): WriteTargetInput {
+    const object: PlannedObject = {
+      domain: 'settings',
+      objectType: 'settings',
+      legacyId: 'graycode-settings.json',
+      sourceHash: 'h',
+      outcome: 'import',
+      data: makeAuthorizedParsed(),
+    }
+    return { runId: 'run_1', object, sourceDir: '/tmp/src' }
+  }
+
+  function makeCredentialsMock(): {
+    credentials: { describe(ref: string): Promise<{ configured: boolean; writable: boolean }>; set(ref: string, value: string): Promise<void> }
+    setCalls: Array<{ ref: string; value: string }>
+  } {
+    const setCalls: Array<{ ref: string; value: string }> = []
+    return {
+      setCalls,
+      credentials: {
+        async describe(ref: string): Promise<{ configured: boolean; writable: boolean }> {
+          return { configured: false, writable: true }
+        },
+        async set(ref: string, value: string): Promise<void> {
+          setCalls.push({ ref, value })
+        },
+      },
+    }
+  }
+
+  test('授权模式：明文 apiKey 写入 ctx.credentials.set（引用名 GRAYCODE_<TYPE>_<ID>_API_KEY）', async () => {
+    const importsRoot = makeTempRoot()
+    try {
+      const mock = makeSettingsMock()
+      const creds = makeCredentialsMock()
+      const writer = createSettingsTargetWriter({
+        importsRoot,
+        ctx: { settings: mock.settings, credentials: creds.credentials } as DshHostContextLike,
+      })
+      const result = await writer.write(makeAuthorizedInput())
+
+      // 只有带明文 key 且可映射的渠道被迁移（ch-gemini）；ch-gpt 无 key 不迁移
+      expect(creds.setCalls).toEqual([
+        { ref: 'GRAYCODE_GEMINI_CH_GEMINI_API_KEY', value: 'sk-secret' },
+      ])
+
+      const suggested = readSuggested(importsRoot, 'run_1')
+      expect(suggested.dshWrite.migratedCredentialRefs).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+      // 明文绝不进入建议文件
+      const suggestedRaw = fs.readFileSync(path.join(importsRoot, 'run_1', 'settings.suggested.json'), 'utf-8')
+      expect(suggestedRaw).not.toContain('sk-secret')
+      expect(suggestedRaw).not.toContain('credentialSecrets')
+
+      // B2：写时结果进入 write() 返回的 summary（脱敏）
+      expect(result.summary).toBeDefined()
+      const dshWrite = (result.summary! as { dshWrite: Record<string, unknown> }).dshWrite
+      expect(dshWrite.mode).toBe('direct')
+      expect(dshWrite.migratedCredentialRefs).toEqual(['GRAYCODE_GEMINI_CH_GEMINI_API_KEY'])
+      expect(JSON.stringify(result.summary)).not.toContain('sk-secret')
+
+      // notes 报告已迁移 ref（无明文）
+      expect((result.notes ?? []).join('\n')).toContain('凭据已一键迁移到 DSH credentials')
+      expect((result.notes ?? []).join('\n')).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+    } finally {
+      fs.rmSync(importsRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('未授权（默认脱敏模式）：set 不被调用，只生成引用占位', async () => {
+    const importsRoot = makeTempRoot()
+    try {
+      const mock = makeSettingsMock()
+      const creds = makeCredentialsMock()
+      const writer = createSettingsTargetWriter({
+        importsRoot,
+        ctx: { settings: mock.settings, credentials: creds.credentials } as DshHostContextLike,
+      })
+      await writer.write(makeInput()) // 默认 makeParsed（无 credentialSecrets）
+      expect(creds.setCalls).toHaveLength(0)
+      const suggested = readSuggested(importsRoot, 'run_1')
+      expect(suggested.dshWrite.migratedCredentialRefs).toEqual([])
+      expect((suggested.dshWrite.credentialRefs as string[])).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+    } finally {
+      fs.rmSync(importsRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('set 失败：失败隔离（write 不抛出），ref 保留「需重录」状态并记录', async () => {
+    const importsRoot = makeTempRoot()
+    try {
+      const mock = makeSettingsMock()
+      const setCalls: Array<{ ref: string; value: string }> = []
+      const credentials = {
+        async describe(ref: string): Promise<{ configured: boolean; writable: boolean }> {
+          return { configured: false, writable: true }
+        },
+        async set(ref: string, value: string): Promise<void> {
+          setCalls.push({ ref, value })
+          throw new Error('credentials store unavailable')
+        },
+      }
+      const writer = createSettingsTargetWriter({
+        importsRoot,
+        ctx: { settings: mock.settings, credentials } as DshHostContextLike,
+      })
+      const result = await writer.write(makeAuthorizedInput()) // 不抛出
+      expect(setCalls).toHaveLength(1)
+      const suggested = readSuggested(importsRoot, 'run_1')
+      expect(suggested.dshWrite.migratedCredentialRefs).toEqual([])
+      expect(suggested.dshWrite.credentialMigrationErrors).toEqual(['GRAYCODE_GEMINI_CH_GEMINI_API_KEY'])
+      // 凭据引用仍在（需重录清单）
+      expect(suggested.dshWrite.credentialRefs).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+      expect((result.notes ?? []).join('\n')).toContain('凭据迁移失败')
+      // 失败信息不含明文
+      expect(JSON.stringify(suggested)).not.toContain('sk-secret')
+    } finally {
+      fs.rmSync(importsRoot, { recursive: true, force: true })
+    }
   })
 })

@@ -518,4 +518,107 @@ describe('settings 脱敏', () => {
       fs.rmSync(sourceDir, { recursive: true, force: true })
     }
   })
+
+  test('B1 apply 授权模式：明文 apiKey 写入 mock credentials，report 仍无明文且合流 writeResult（B2）', async () => {
+    const sourceDir = makeLegacyRoot({ withSettings: true })
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-target-'))
+    try {
+      const migrationRoot = path.join(dataRoot, 'migration')
+      const importsRoot = path.join(migrationRoot, 'imports')
+      const memoryService = new MemoryService({ dataRoot })
+      const setCalls: Array<{ ref: string; value: string }> = []
+      const credentials = {
+        async describe(ref: string): Promise<{ configured: boolean; writable: boolean }> {
+          return { configured: false, writable: true }
+        },
+        async set(ref: string, value: string): Promise<void> {
+          setCalls.push({ ref, value })
+        },
+      }
+      const service = new LegacyImportService({
+        inventory: new DefaultInventoryReader(),
+        validator: new DefaultValidator(),
+        planner: new DefaultPlanner(),
+        writers: {
+          conversations: createConversationTargetWriter({ importsRoot }),
+          snapshots: createNoopWriter('snapshots'),
+          checkpoints: createCheckpointTargetWriter({ dataRoot }),
+          memory: createMemoryTargetWriter(memoryService),
+          settings: createSettingsTargetWriter({ importsRoot, ctx: { credentials } }),
+        },
+        ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
+        runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
+        targetProfile: 'test-profile',
+      })
+      const scan = await service.scan(sourceDir)
+      const applied = await service.apply(sourceDir, scan.report.planToken, { credentialsAuthorized: true })
+      expect(applied.run.status).toBe('complete')
+
+      // 授权后明文 apiKey 写入 DSH credentials（引用名 GRAYCODE_<TYPE>_<ID>_API_KEY）
+      expect(setCalls).toEqual([{ ref: 'GRAYCODE_GEMINI_CH_GEMINI_API_KEY', value: 'sk-super-secret-1234567890' }])
+
+      // B2：写时结果合流进 report.settingsSummary.writeResult（脱敏）
+      const summary = applied.report.settingsSummary as {
+        writeResult: { dshWrite: { mode: string; migratedCredentialRefs: string[] } }
+      }
+      expect(summary.writeResult.dshWrite.mode).toBe('suggested-only')
+      expect(summary.writeResult.dshWrite.migratedCredentialRefs).toEqual(['GRAYCODE_GEMINI_CH_GEMINI_API_KEY'])
+
+      // 报告/机器 JSON 全程无明文 secret（含授权模式）
+      const machineJson = JSON.stringify(applied.report)
+      expect(machineJson).not.toContain('sk-super-secret-1234567890')
+      expect(machineJson).not.toContain('credentialSecrets')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
+
+  test('B1 未授权（缺省）：set 不被调用，凭据保持重录清单', async () => {
+    const sourceDir = makeLegacyRoot({ withSettings: true })
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-target-'))
+    try {
+      const migrationRoot = path.join(dataRoot, 'migration')
+      const importsRoot = path.join(migrationRoot, 'imports')
+      const memoryService = new MemoryService({ dataRoot })
+      let setCalls = 0
+      const credentials = {
+        async describe(ref: string): Promise<{ configured: boolean; writable: boolean }> {
+          return { configured: false, writable: true }
+        },
+        async set(_ref: string, _value: string): Promise<void> {
+          setCalls += 1
+        },
+      }
+      const service = new LegacyImportService({
+        inventory: new DefaultInventoryReader(),
+        validator: new DefaultValidator(),
+        planner: new DefaultPlanner(),
+        writers: {
+          conversations: createConversationTargetWriter({ importsRoot }),
+          snapshots: createNoopWriter('snapshots'),
+          checkpoints: createCheckpointTargetWriter({ dataRoot }),
+          memory: createMemoryTargetWriter(memoryService),
+          settings: createSettingsTargetWriter({ importsRoot, ctx: { credentials } }),
+        },
+        ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
+        runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
+        targetProfile: 'test-profile',
+      })
+      const scan = await service.scan(sourceDir)
+      const applied = await service.apply(sourceDir, scan.report.planToken)
+      expect(applied.run.status).toBe('complete')
+      expect(setCalls).toBe(0)
+      const summary = applied.report.settingsSummary as {
+        writeResult: { dshWrite: { migratedCredentialRefs: string[] } }
+      }
+      expect(summary.writeResult.dshWrite.migratedCredentialRefs).toEqual([])
+      // 重录清单仍在
+      const scanSummary = scan.report.settingsSummary as { credentialReentryRequired: string[] }
+      expect(scanSummary.credentialReentryRequired).toContain('ch-gemini')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
 })

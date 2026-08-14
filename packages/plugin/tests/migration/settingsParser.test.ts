@@ -184,3 +184,48 @@ describe('渠道解析与 provider 支持', () => {
     expect(parsed.errorCode).toBe('SETTINGS_UNSUPPORTED_VERSION')
   })
 })
+
+describe('B1 凭据一键迁移：collectSecrets 授权模式', () => {
+  const RAW = JSON.stringify({
+    version: '1.0',
+    graycodeVersion: '1.5.4',
+    channelConfigs: [
+      { id: 'ch-gemini', type: 'gemini', apiKey: 'sk-live-gemini-1', model: 'gemini-2.5-flash', enabled: true },
+      { id: 'ch-gpt', type: 'openai', apiKey: 'sk-live-openai-2', model: 'gpt-4o', enabled: true },
+      // 空 key / 占位符 key 不进入收集（无明文可迁移）
+      { id: 'ch-empty', type: 'anthropic', apiKey: '', enabled: true },
+      { id: 'ch-placeholder', type: 'openai-responses', apiKey: REDACTED_PLACEHOLDER, enabled: true },
+    ],
+  })
+
+  test('默认模式（无授权）不收集明文 apiKey（现状不变量）', () => {
+    const parsed = parseSettingsExport(RAW, 'graycode-settings.json')
+    expect(parsed.ok).toBe(true)
+    expect(parsed.credentialSecrets).toBeUndefined()
+    const json = JSON.stringify(parsed)
+    expect(json).not.toContain('sk-live-gemini-1')
+    expect(json).not.toContain('sk-live-openai-2')
+  })
+
+  test('collectSecrets=true 收集有明文 apiKey 的渠道（仅内存；占位符/空值跳过）', () => {
+    const parsed = parseSettingsExport(RAW, 'graycode-settings.json', { collectSecrets: true })
+    expect(parsed.ok).toBe(true)
+    expect(parsed.credentialSecrets).toEqual([
+      { channelId: 'ch-gemini', apiKey: 'sk-live-gemini-1' },
+      { channelId: 'ch-gpt', apiKey: 'sk-live-openai-2' },
+    ])
+    // 无明文渠道不进入收集
+    const ids = parsed.credentialSecrets!.map(s => s.channelId)
+    expect(ids).not.toContain('ch-empty')
+    expect(ids).not.toContain('ch-placeholder')
+  })
+
+  test('collectSecrets=true 时脱敏字段仍保持（channels 内不含明文）', () => {
+    const parsed = parseSettingsExport(RAW, 'graycode-settings.json', { collectSecrets: true })
+    const channelJson = JSON.stringify(parsed.channels)
+    expect(channelJson).not.toContain('sk-live-gemini-1')
+    expect(channelJson).not.toContain('sk-live-openai-2')
+    // 但整对象 JSON 里 credentialSecrets 携带明文——只允许在 apply 写路径内存中短暂存在
+    expect(JSON.stringify(parsed)).toContain('sk-live-gemini-1')
+  })
+})
