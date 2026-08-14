@@ -113,6 +113,34 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
     expect(lineCount).toBeGreaterThan(0)
   })
 
+  it('滚动后继续追加不损坏行边界（保留尾行可解析）', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    const journal = new ProjectionJournal({ journalPath, maxFileLines: 8 })
+    for (let i = 1; i <= 12; i++) {
+      await journal.record(`k-${i}`, i)
+    }
+    // 滚动已发生；再追加 3 条 —— 若无尾随换行，滚动后的第 9 行会与新条目
+    // 合并成一条无法解析的脏行，滚动边界前后的记录永久丢失。
+    for (let i = 13; i <= 15; i++) {
+      await journal.record(`k-${i}`, i)
+    }
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const content = await fs.readFile(journalPath, 'utf8')
+    // 滚动后保留的每条非空行必须能独立 JSON.parse —— 若无尾随换行，滚动后的
+    // 最后一条记录会与新追加条目合并成一条无法解析的脏行（回归：k-9 之后丢行）。
+    const lines = content.split('\n').filter(Boolean)
+    const kinds = lines.map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(kinds.length).toBe(lines.length)
+    // 滚动边界之后新追加的记录完整保留，文件尾部是最后一条
+    expect(kinds).toContain('k-13')
+    expect(kinds.at(-1)).toBe('k-15')
+    // 文件回放（新实例）同样不丢滚动边界后的记录
+    const fresh = new ProjectionJournal({ journalPath })
+    const replay = await fresh.replay()
+    expect(replay.map(e => e.kind)).toContain('k-13')
+  })
+
   it('clear 清空内存与 sidecar', async () => {
     const dir = await tmpDir()
     const journalPath = path.join(dir, 'projections.jsonl')

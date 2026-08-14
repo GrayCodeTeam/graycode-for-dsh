@@ -144,7 +144,7 @@ export class ProjectionJournal {
       const count = lines.at(-1) === '' ? lines.length - 1 : lines.length
       if (count <= this.maxFileLines) return
       const keep = lines.slice(-Math.floor(this.maxFileLines / 2))
-      await fs.writeFile(this.journalPath, keep.join('\n'), 'utf8')
+      await fs.writeFile(this.journalPath, keep.join('\n') + '\n', 'utf8')
     } catch {
       // 滚动失败保持现状
     }
