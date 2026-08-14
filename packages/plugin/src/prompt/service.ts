@@ -24,7 +24,9 @@ import {
   type BuiltinModeId,
   type PromptEntry,
   type PromptEntryRole,
+  type PromptErrorCodeValue,
   type PromptMode,
+  type PromptModeKind,
   type PromptModeStore,
 } from './domain/promptTypes.ts'
 import { normalizeTemplate } from './domain/template.ts'
@@ -317,18 +319,25 @@ function copyWithNewIds(mode: PromptMode): PromptMode {
 }
 
 /**
- * Validate + normalize one imported entry (tolerates partial shapes).
+ * Validate + normalize one entry record (shared by store load and import).
  *
  * Legacy (Gray Code 1.5.4) entries express the history insertion point via
  * `type: 'chat_history'` (role stays system/user/assistant); the new role
  * model has a dedicated `chat_history` role, so the type is mapped directly
  * (a warning records the mapping). Legacy fields without a new-format
  * equivalent (e.g. the display `name`) are silently dropped and reported
- * through `warnings`.
+ * through `warnings` (store load passes a throwaway array).
+ *
+ * @param errorCode - INVALID_PAYLOAD for import payloads, STORAGE_CORRUPT
+ *   for persisted store records (parseStore).
  */
-function parseImportedEntry(raw: unknown, warnings: string[]): PromptEntry {
+function parseEntryRecord(
+  raw: unknown,
+  errorCode: PromptErrorCodeValue,
+  warnings: string[],
+): PromptEntry {
   if (typeof raw !== 'object' || raw === null) {
-    throw new PromptError('imported promptEntries must be an array of objects', PromptErrorCode.INVALID_PAYLOAD)
+    throw new PromptError('prompt entry must be an object', errorCode)
   }
   const record = raw as Record<string, unknown>
   let role = record.role
@@ -336,22 +345,19 @@ function parseImportedEntry(raw: unknown, warnings: string[]): PromptEntry {
     role = 'chat_history'
     warnings.push('entry mapped legacy type:chat_history to role:chat_history')
   } else if (typeof role !== 'string' || !(BUILTIN_ROLE as readonly string[]).includes(role)) {
-    throw new PromptError(
-      `imported entry role must be one of ${BUILTIN_ROLE.join('/')}`,
-      PromptErrorCode.INVALID_PAYLOAD,
-    )
+    throw new PromptError(`entry role must be one of ${BUILTIN_ROLE.join('/')}`, errorCode)
   }
   const content = record.content
   if (typeof content !== 'string') {
-    throw new PromptError('imported entry content must be a string', PromptErrorCode.INVALID_PAYLOAD)
+    throw new PromptError('entry content must be a string', errorCode)
   }
   const fakeThought = record.fakeThought
   if (fakeThought !== undefined && typeof fakeThought !== 'string') {
-    throw new PromptError('imported entry fakeThought must be a string', PromptErrorCode.INVALID_PAYLOAD)
+    throw new PromptError('entry fakeThought must be a string', errorCode)
   }
   const order = record.order
   if (order !== undefined && (typeof order !== 'number' || !Number.isFinite(order))) {
-    throw new PromptError('imported entry order must be a finite number', PromptErrorCode.INVALID_PAYLOAD)
+    throw new PromptError('entry order must be a finite number', errorCode)
   }
   const dropped = LEGACY_ENTRY_DROPPED_FIELDS.filter(field => record[field] !== undefined)
   if (dropped.length > 0) {
@@ -367,6 +373,90 @@ function parseImportedEntry(raw: unknown, warnings: string[]): PromptEntry {
   }
 }
 
+interface ParseModeOptions {
+  /** Error code for malformed records: INVALID_PAYLOAD (import) / STORAGE_CORRUPT (store load). */
+  errorCode: PromptErrorCodeValue
+  /** Ids already claimed by earlier modes; colliding ids are regenerated (import). */
+  existingIds: ReadonlySet<string> | undefined
+  /** Import surfaces legacy-field notes here; store load passes a throwaway array. */
+  warnings: string[]
+  /** Import forces kind:'custom'; store load preserves a valid persisted kind. */
+  forceCustomKind: boolean
+  /**
+   * Store load requires the full persisted shape: id / template / promptEntries
+   * are identity-bearing and every write path emits them, so a missing field
+   * is corruption (STORAGE_CORRUPT). Import tolerates partial payloads.
+   */
+  requireFullShape: boolean
+}
+
+/**
+ * Validate + normalize one mode record. Shared by import (parseImportedMode)
+ * and store load (parseStore): template / prefix / suffix / entries run
+ * through the same checks and normalization so both paths stay consistent.
+ * Import regenerates missing/colliding ids and forces kind:'custom'; store
+ * load treats ids as persisted identity and keeps the persisted kind so
+ * builtin protection survives a reload.
+ */
+function parseModeRecord(raw: unknown, options: ParseModeOptions): PromptMode {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new PromptError('prompt mode must be an object', options.errorCode)
+  }
+  const record = raw as Record<string, unknown>
+  const name = record.name
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    throw new PromptError('mode name must be a non-empty string', options.errorCode)
+  }
+  const template = record.template
+  if (template !== undefined && typeof template !== 'string') {
+    throw new PromptError('mode template must be a string', options.errorCode)
+  }
+  if (options.requireFullShape && template === undefined) {
+    throw new PromptError('mode template is required', options.errorCode)
+  }
+  const customPrefix = record.customPrefix
+  const customSuffix = record.customSuffix
+  if (customPrefix !== undefined && typeof customPrefix !== 'string') {
+    throw new PromptError('mode customPrefix must be a string', options.errorCode)
+  }
+  if (customSuffix !== undefined && typeof customSuffix !== 'string') {
+    throw new PromptError('mode customSuffix must be a string', options.errorCode)
+  }
+  const rawEntries = record.promptEntries
+  if (options.requireFullShape && rawEntries === undefined) {
+    throw new PromptError('mode promptEntries is required', options.errorCode)
+  }
+  const entries = rawEntries !== undefined ? rawEntries : []
+  if (!Array.isArray(entries)) {
+    throw new PromptError('mode promptEntries must be an array', options.errorCode)
+  }
+  const rawId = record.id
+  let id: string
+  if (typeof rawId === 'string' && rawId.length > 0) {
+    id = rawId
+    if (options.existingIds?.has(id)) id = newModeId()
+  } else if (options.requireFullShape) {
+    throw new PromptError('mode id must be a non-empty string', options.errorCode)
+  } else {
+    id = newModeId()
+  }
+  const dropped = LEGACY_MODE_DROPPED_FIELDS.filter(field => record[field] !== undefined)
+  if (dropped.length > 0) {
+    options.warnings.push(`mode "${name.trim()}": dropped legacy field(s): ${dropped.join(', ')}`)
+  }
+  return {
+    id,
+    name: name.trim(),
+    // Imported modes are always custom (builtin ids are host-seeded identity);
+    // store load preserves the persisted kind so builtin protection survives.
+    kind: options.forceCustomKind ? 'custom' : record.kind === 'builtin' ? 'builtin' : 'custom',
+    template: normalizeTemplate(template ?? ''),
+    customPrefix: customPrefix !== undefined ? normalizeTemplate(customPrefix) : undefined,
+    customSuffix: customSuffix !== undefined ? normalizeTemplate(customSuffix) : undefined,
+    promptEntries: entries.map(entry => parseEntryRecord(entry, options.errorCode, options.warnings)),
+  }
+}
+
 /**
  * Validate + normalize one imported mode; ids colliding with existing ones
  * (or with earlier modes of the same payload) are regenerated. Legacy
@@ -374,48 +464,13 @@ function parseImportedEntry(raw: unknown, warnings: string[]): PromptEntry {
  * and reported through `warnings`.
  */
 function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>, warnings: string[]): PromptMode {
-  if (typeof raw !== 'object' || raw === null) {
-    throw new PromptError('imported mode must be an object', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  const record = raw as Record<string, unknown>
-  const name = record.name
-  if (typeof name !== 'string' || name.trim().length === 0) {
-    throw new PromptError('imported mode name must be a non-empty string', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  const template = record.template
-  if (template !== undefined && typeof template !== 'string') {
-    throw new PromptError('imported mode template must be a string', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  const customPrefix = record.customPrefix
-  const customSuffix = record.customSuffix
-  if (customPrefix !== undefined && typeof customPrefix !== 'string') {
-    throw new PromptError('imported mode customPrefix must be a string', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  if (customSuffix !== undefined && typeof customSuffix !== 'string') {
-    throw new PromptError('imported mode customSuffix must be a string', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  const rawEntries = record.promptEntries
-  const entries = rawEntries !== undefined ? rawEntries : []
-  if (!Array.isArray(entries)) {
-    throw new PromptError('imported mode promptEntries must be an array', PromptErrorCode.INVALID_PAYLOAD)
-  }
-  const rawId = record.id
-  let id = typeof rawId === 'string' && rawId.length > 0 ? rawId : newModeId()
-  if (existingIds.has(id)) id = newModeId()
-  const dropped = LEGACY_MODE_DROPPED_FIELDS.filter(field => record[field] !== undefined)
-  if (dropped.length > 0) {
-    warnings.push(`mode "${name.trim()}": dropped legacy field(s): ${dropped.join(', ')}`)
-  }
-  return {
-    id,
-    name: name.trim(),
-    // Imported modes are always custom: builtin ids are host-seeded identity.
-    kind: 'custom',
-    template: normalizeTemplate(template ?? ''),
-    customPrefix: customPrefix !== undefined ? normalizeTemplate(customPrefix) : undefined,
-    customSuffix: customSuffix !== undefined ? normalizeTemplate(customSuffix) : undefined,
-    promptEntries: entries.map(entry => parseImportedEntry(entry, warnings)),
-  }
+  return parseModeRecord(raw, {
+    errorCode: PromptErrorCode.INVALID_PAYLOAD,
+    existingIds,
+    warnings,
+    forceCustomKind: true,
+    requireFullShape: false,
+  })
 }
 
 /**
@@ -506,7 +561,36 @@ export class PromptSettingsService {
       )
     }
     const currentModeId = typeof record.currentModeId === 'string' ? record.currentModeId : (BUILTIN_MODE_IDS[0] as string)
-    return { version: PROMPT_MODE_STORE_VERSION, currentModeId, modes: record.modes as PromptMode[] }
+    // BUG-02: per-mode validation + normalization instead of a blind cast — a
+    // mode missing `template` or carrying `promptEntries: null` used to
+    // surface as a bare TypeError at the first read point (deepCopyMode /
+    // promptInjector.getState → agent/created). Invalid records now fail
+    // loudly with STORAGE_CORRUPT; ids are store identity and must be unique.
+    const modes: PromptMode[] = []
+    const seenIds = new Set<string>()
+    for (const [index, rawMode] of record.modes.entries()) {
+      let mode: PromptMode
+      try {
+        mode = parseModeRecord(rawMode, {
+          errorCode: PromptErrorCode.STORAGE_CORRUPT,
+          existingIds: undefined,
+          warnings: [],
+          forceCustomKind: false,
+          requireFullShape: true,
+        })
+      } catch (error) {
+        throw new PromptError(
+          `prompt modes store mode #${index} is corrupt: ${error instanceof Error ? error.message : String(error)}`,
+          PromptErrorCode.STORAGE_CORRUPT,
+        )
+      }
+      if (seenIds.has(mode.id)) {
+        throw new PromptError(`prompt modes store has duplicate mode id "${mode.id}"`, PromptErrorCode.STORAGE_CORRUPT)
+      }
+      seenIds.add(mode.id)
+      modes.push(mode)
+    }
+    return { version: PROMPT_MODE_STORE_VERSION, currentModeId, modes }
   }
 
   /** Atomic persist (tmp + rename with Windows retry). */

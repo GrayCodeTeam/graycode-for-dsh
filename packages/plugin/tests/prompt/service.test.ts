@@ -283,6 +283,90 @@ describe('存储与事件', () => {
     await expect(service.listModes()).rejects.toMatchObject({ code: PromptErrorCode.STORAGE_CORRUPT })
   })
 
+  test('BUG-02：store 中 mode 缺 template → 读取抛 STORAGE_CORRUPT（而非渲染期裸 TypeError）', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'code',
+        modes: [{ id: 'code', name: 'code', kind: 'builtin', promptEntries: [] }],
+      }),
+      'utf8',
+    )
+    const service = new PromptSettingsService({ dataRoot: root })
+    await expect(service.getCurrentMode()).rejects.toMatchObject({ code: PromptErrorCode.STORAGE_CORRUPT })
+    await expect(service.listModes()).rejects.toMatchObject({ code: PromptErrorCode.STORAGE_CORRUPT })
+  })
+
+  test('BUG-02：store 中 mode 的 promptEntries:null → STORAGE_CORRUPT（而非裸 TypeError）', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'code',
+        modes: [{ id: 'code', name: 'code', kind: 'builtin', template: 't', promptEntries: null }],
+      }),
+      'utf8',
+    )
+    const service = new PromptSettingsService({ dataRoot: root })
+    await expect(service.listModes()).rejects.toMatchObject({ code: PromptErrorCode.STORAGE_CORRUPT })
+  })
+
+  test('BUG-02：store 中条目元素损坏（null）→ STORAGE_CORRUPT', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'code',
+        modes: [{ id: 'code', name: 'code', kind: 'builtin', template: 't', promptEntries: [null] }],
+      }),
+      'utf8',
+    )
+    const service = new PromptSettingsService({ dataRoot: root })
+    await expect(service.listModes()).rejects.toMatchObject({ code: PromptErrorCode.STORAGE_CORRUPT })
+  })
+
+  test('BUG-02：合法 store 逐 mode 归一化加载——kind 保留（builtin 仍受保护）、模板/条目归一化', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'design',
+        modes: [
+          { id: 'code', name: 'code', kind: 'builtin', template: 'Code tpl', promptEntries: [] },
+          { id: 'design', name: 'design', kind: 'builtin', template: 'Design tpl', promptEntries: [] },
+          {
+            id: 'm1',
+            name: 'Custom',
+            kind: 'custom',
+            template: 't\n',
+            customPrefix: 'pre',
+            customSuffix: 'suf',
+            promptEntries: [{ id: 'e1', role: 'user', order: 0, enabled: true, content: 'c\n' }],
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const service = await serviceOf(root)
+    // 归一化（与 parseImportedMode 共用清洗逻辑）
+    expect((await service.getMode('m1'))?.template).toBe('t')
+    expect((await service.getMode('m1'))?.promptEntries[0]?.content).toBe('c')
+    expect((await service.getMode('m1'))?.customPrefix).toBe('pre')
+    // kind 保留：builtin 仍受保护（不能被删除）
+    await expect(service.deleteMode('code')).rejects.toMatchObject({ code: PromptErrorCode.BUILTIN_IMMUTABLE })
+    // currentModeId 保持
+    expect((await service.getCurrentMode()).id).toBe('design')
+  })
+
   test('变更事件：setCurrentMode 发 mode-changed；create/delete 发 modes-changed', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)

@@ -10,6 +10,7 @@ import {
   renderModeSectionText,
 } from '../../src/prompt/domain/entries.ts'
 import { fingerprint } from '../../src/prompt/domain/fingerprint.ts'
+import { unavailablePlaceholderText } from '../../src/prompt/domain/template.ts'
 import type { PromptEntry } from '../../src/prompt/domain/promptTypes.ts'
 
 function entry(overrides: Partial<PromptEntry> & Pick<PromptEntry, 'id' | 'role'>): PromptEntry {
@@ -199,6 +200,43 @@ describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
       {},
     )
     expect(text).toBe('PREFIX\n\nTpl\n\nsys\n\nbody\n\nSUFFIX')
+  })
+
+  test('BUG-01：customPrefix/customSuffix 与 body 同路径渲染清洗（B3-P2 无非法 {{...}} 残留）', () => {
+    const text = renderModeSectionText(
+      {
+        template: 'Body {{$TOOLS}}',
+        customPrefix: 'PREFIX {{$TOOLS}} {{Foo}} {{a-b}}',
+        customSuffix: '{{Bar}} SUFFIX',
+        promptEntries: [],
+      },
+      {},
+    )
+    // 非法引用（大写/带 $/连字符）全部替换为确定性说明文本：
+    // 产物无任何 {{...}} 组，DSH 装配器不会报 malformed prompt variable reference
+    expect(text).not.toMatch(/\{\{/)
+    expect(text).toContain('PREFIX')
+    expect(text).toContain('SUFFIX')
+    expect(text).toContain(unavailablePlaceholderText('TOOLS'))
+    expect(text).toContain(unavailablePlaceholderText('Foo'))
+    expect(text).toContain(unavailablePlaceholderText('a-b'))
+    expect(text).toContain(unavailablePlaceholderText('Bar'))
+  })
+
+  test('BUG-01：placeholderValues 同样作用于 customPrefix/customSuffix；DSH 安全小写变量保留', () => {
+    const text = renderModeSectionText(
+      {
+        template: 'tpl',
+        customPrefix: 'P {{$ENVIRONMENT}} {{graycode_prompt_mode}}',
+        customSuffix: '{{$MEMORY}} S',
+        promptEntries: [],
+      },
+      { placeholderValues: { ENVIRONMENT: 'env-value', MEMORY: 'mem-value' } },
+    )
+    expect(text).toContain('P env-value {{graycode_prompt_mode}}')
+    expect(text).toContain('mem-value S')
+    expect(text).not.toContain('{{$ENVIRONMENT}}')
+    expect(text).not.toContain('{{$MEMORY}}')
   })
 })
 

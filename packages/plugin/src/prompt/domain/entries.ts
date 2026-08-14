@@ -178,12 +178,20 @@ export function renderModeSectionText(
   const values = options.placeholderValues ?? {}
   const body = renderPromptTemplate(assembled.systemText, values)
   const paragraphs = assembled.contextParagraphs.map(paragraph => renderPromptTemplate(paragraph, values))
+  // BUG-01: customPrefix/customSuffix must take the same render path as the
+  // body/paragraphs — a raw `{{$TOOLS}}`/`{{Foo}}` in them would otherwise
+  // survive into the final section text and trip the DSH assembler's strict
+  // variable-name validation (B3-P2), aborting the whole turn. The renderer
+  // replaces every unresolvable reference with a deterministic notice and
+  // preserves only DSH-safe lowercase variables (e.g. `{{graycode_prompt_mode}}`).
+  const prefix = mode.customPrefix !== undefined ? renderPromptTemplate(mode.customPrefix, values) : ''
+  const suffix = mode.customSuffix !== undefined ? renderPromptTemplate(mode.customSuffix, values) : ''
 
   const parts: string[] = []
-  if (mode.customPrefix && mode.customPrefix.length > 0) parts.push(mode.customPrefix)
+  if (prefix.length > 0) parts.push(prefix)
   if (body.length > 0) parts.push(body)
   parts.push(...paragraphs)
-  if (mode.customSuffix && mode.customSuffix.length > 0) parts.push(mode.customSuffix)
+  if (suffix.length > 0) parts.push(suffix)
   // Old Gray cleaned the whole assembled output; keep the same post-processing
   // so prefix/suffix internal blank runs never leak 3+ consecutive newlines.
   return cleanupEmptyLines(parts.join('\n\n'))
