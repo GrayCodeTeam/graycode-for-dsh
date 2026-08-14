@@ -4,10 +4,20 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // value imports; the host's module table serves the platform modules):
 //   - dsh-client-locale/client   → `ctx.locale` (+ the `locale/change` event)
 //   - dsh-client-ui-layout/client → SlotMap['shell.overlay'] declaration
+//   - dsh-client-ui-settings/client → SlotMap['settings.section'] declaration
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { GrayCodeBadge } from './GrayCodeBadge.tsx'
 import { GRAYCODE_NS, graycodeDictionaries, graycodeJaPlaceholder } from './locales.ts'
+import {
+  GRAYCODE_SETTINGS_NS,
+  graycodeSettingsDictionaries,
+  graycodeSettingsJaPlaceholder,
+} from './settings/locales.ts'
+import { GrayCodeSettingsSection, type GrayCodeSettingsSectionInjected } from './settings/GrayCodeSettingsSection.tsx'
+import { createGrayCodeStore } from './settings/store.ts'
 import { createWorkflowNodeDefinition } from './workflowNode/definition.ts'
 import {
   GRAYCODE_WORKFLOW_NS,
@@ -108,7 +118,7 @@ export { createNotificationBus, createFixtureNotificationSource } from './notifi
 export { notificationsFromWindow } from './notifications/fold.ts'
 
 /** Required client services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'conversationEvents']
+export const inject = ['slots', 'locale', 'conversationEvents', 'connection']
 
 /**
  * Client plugin body (browser half of @graycode/dsh-client):
@@ -128,7 +138,13 @@ export const inject = ['slots', 'locale', 'conversationEvents']
  * - contributes the "Gray Code loaded" marker into the additive
  *   `shell.overlay` list slot once ui-layout declares it (`ctx.slots.inject`
  *   defers the registration until the declaration exists; the returned
- *   disposer is tied to the declaration lifetime).
+ *   disposer is tied to the declaration lifetime);
+ * - registers the `settings.graycode` locale namespace and contributes the
+ *   Gray Code settings panel into the native `settings.section` slot (id
+ *   `graycode`, order 200) once ui-settings declares it — panel data flows
+ *   over the plugin's `/graycode` Connection RPC channel, never through
+ *   `ctx.settingsScope` (third-party namespaces answer `settings-not-exposed`;
+ *   see settings/README.md).
  *
  * Rendering the workflow card has no programmatic mount in the rc.6 host
  * surface available here — see the re-export above and workflowNode/README.md.
@@ -203,5 +219,39 @@ export function apply(ctx: ClientContext): void {
     ctx.slots.register(
       { name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS },
       GrayCodeBadge,
+    ))
+
+  // Gray Code settings panel: native settings section (slot `settings.section`,
+  // id `graycode`). The panel's data does NOT ride ctx.settingsScope — the
+  // api-proxy namespace allowlist answers `settings-not-exposed` for a
+  // third-party namespace — so reads/writes flow over the plugin's own
+  // `/graycode` Connection RPC channel (see settings/README.md).
+  const disposeSettingsLocale = ctx.locale.register(GRAYCODE_SETTINGS_NS, graycodeSettingsDictionaries)
+  ctx.effect(() => disposeSettingsLocale)
+  const disposeSettingsLocaleJa = ctx.locale.register(GRAYCODE_SETTINGS_NS, 'ja', graycodeSettingsJaPlaceholder)
+  ctx.effect(() => disposeSettingsLocaleJa)
+
+  // Store + locale face assembled once per fiber; the component receives them
+  // through the slot registration's inject face and never touches ctx itself.
+  const connection = ctx.get('connection') as ConnectionHandle
+  const store = createGrayCodeStore(connection)
+  const localeFace = ctx.locale as unknown as GrayCodeSettingsSectionInjected['locale']
+  const t = ctx.locale.bind(GRAYCODE_SETTINGS_NS) as GrayCodeSettingsSectionInjected['t']
+  // The host config document may change outside the panel (settings file
+  // edits, another tab); the connection reset is the only lifecycle the panel
+  // subscribes to — the panel also refreshes on every open-render anyway.
+  ctx.effect(() => ctx.on('connection/reset', () => { void store.refresh() }))
+
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.section',
+        id: 'graycode',
+        order: 200,
+        label: () => t('nav'),
+        locale: GRAYCODE_SETTINGS_NS,
+        inject: (): GrayCodeSettingsSectionInjected => ({ t, store, locale: localeFace }),
+      },
+      GrayCodeSettingsSection,
     ))
 }

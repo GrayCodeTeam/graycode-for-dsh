@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { apply, inject } from '../src/client/index.ts'
 import { GRAYCODE_NS, graycodeDictionaries, graycodeJaPlaceholder } from '../src/client/locales.ts'
+import {
+  GRAYCODE_SETTINGS_NS,
+  graycodeSettingsDictionaries,
+  graycodeSettingsJaPlaceholder,
+} from '../src/client/settings/locales.ts'
 import { createWorkflowNodeDefinition } from '../src/client/workflowNode/definition.ts'
 import {
   GRAYCODE_WORKFLOW_NS,
@@ -12,6 +17,7 @@ import {
 /** Minimal client-context double covering exactly what apply() touches. */
 function makeFakeCtx() {
   const localeRegister = vi.fn(() => () => {})
+  const localeBind = vi.fn(() => (key: string) => key)
   const slotInject = vi.fn((_key: string, callback: () => unknown) => {
     callback()
     return () => {}
@@ -21,23 +27,27 @@ function makeFakeCtx() {
   // 'chat' view target is owned by the host's ui-conversation — apply() must
   // never touch this registry (a second 'chat' builder would collide).
   const conversationViewsRegister = vi.fn(() => () => {})
+  const connectionCall = vi.fn(async () => ({ ok: true, value: {} }))
+  const on = vi.fn(() => () => {})
   const effect = vi.fn((execute: () => unknown) => {
     execute()
     return () => {}
   })
   const ctx = {
-    locale: { register: localeRegister },
+    locale: { register: localeRegister, bind: localeBind },
     slots: { inject: slotInject, register: slotRegister },
     conversationEvents: { register: conversationEventsRegister },
     conversationViews: { register: conversationViewsRegister },
+    get: vi.fn(() => ({ rpc: { call: connectionCall } })),
+    on,
     effect,
   } as unknown as ClientContext
-  return { ctx, localeRegister, slotInject, slotRegister, conversationEventsRegister, conversationViewsRegister, effect }
+  return { ctx, localeRegister, localeBind, slotInject, slotRegister, conversationEventsRegister, conversationViewsRegister, connectionCall, on, effect }
 }
 
 describe('@graycode/dsh-client browser half apply()', () => {
   it('declares the required client services', () => {
-    expect(inject).toEqual(['slots', 'locale', 'conversationEvents'])
+    expect(inject).toEqual(['slots', 'locale', 'conversationEvents', 'connection'])
   })
 
   it('registers the graycode locale namespace (typed zh/en + ja placeholder)', () => {
@@ -57,12 +67,12 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Eleven namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = twenty-two registrations. Covers the base `graycode` ns,
+    // Twelve namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = twenty-four registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
-    // activity heatmap surface (C6), the notifications surface (C4) and the
-    // migration scope-map surface (D-1/D-2).
-    expect(localeRegister).toHaveBeenCalledTimes(22)
+    // activity heatmap surface (C6), the notifications surface (C4), the
+    // migration scope-map surface (D-1/D-2) and the settings panel ns.
+    expect(localeRegister).toHaveBeenCalledTimes(24)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -76,6 +86,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.activityHeatmap',
       'graycode.notifications',
       'graycode.scopeMap',
+      'settings.graycode',
     ]) {
       // Each namespace is registered exactly twice: dict + ja placeholder.
       expect(namespaces.filter((n) => n === ns)).toHaveLength(2)
@@ -100,8 +111,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (11 × dict + ja placeholder) = 1 + 22.
-    expect(effect).toHaveBeenCalledTimes(23)
+    // every locale namespace (12 × dict + ja placeholder) plus the
+    // connection/reset refresh subscription = 1 + 24 + 1.
+    expect(effect).toHaveBeenCalledTimes(26)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -132,6 +144,35 @@ describe('@graycode/dsh-client browser half apply()', () => {
       expect.objectContaining({ name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS }),
       expect.any(Function),
     )
+  })
+
+  it('registers the settings.graycode locale namespace (typed zh/en + ja placeholder)', () => {
+    const { ctx, localeRegister } = makeFakeCtx()
+    apply(ctx)
+    expect(localeRegister).toHaveBeenCalledWith(GRAYCODE_SETTINGS_NS, graycodeSettingsDictionaries)
+    expect(localeRegister).toHaveBeenCalledWith(GRAYCODE_SETTINGS_NS, 'ja', graycodeSettingsJaPlaceholder)
+  })
+
+  it('waits for settings.section and registers the Gray Code section entry (id graycode, order 200)', () => {
+    const { ctx, slotInject, slotRegister } = makeFakeCtx()
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('settings.section', expect.any(Function))
+    const sectionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'settings.section')
+    expect(sectionCall).toBeDefined()
+    const options = sectionCall?.[0] as { id?: string; order?: number; locale?: string; label?: () => string }
+    expect(options.id).toBe('graycode')
+    expect(options.order).toBe(200)
+    expect(options.locale).toBe(GRAYCODE_SETTINGS_NS)
+    expect(typeof options.label).toBe('function')
+    expect(options.label?.()).toBe('nav')
+  })
+
+  it('wires the config store to ctx.connection and refreshes on connection/reset', () => {
+    const { ctx, connectionCall, on } = makeFakeCtx()
+    apply(ctx)
+    expect(ctx.get).toHaveBeenCalledWith('connection')
+    expect(on).toHaveBeenCalledWith('connection/reset', expect.any(Function))
+    expect(connectionCall).not.toHaveBeenCalled()
   })
 })
 

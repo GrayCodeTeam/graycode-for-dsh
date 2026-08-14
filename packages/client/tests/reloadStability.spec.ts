@@ -254,7 +254,7 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The eleven locale namespaces the entry registers (dict + ja placeholder each). */
+/** The twelve locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
@@ -267,6 +267,7 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.activityHeatmap',
   'graycode.notifications',
   'graycode.scopeMap',
+  'settings.graycode',
 ]
 
 /**
@@ -324,10 +325,17 @@ function createFiberHarness() {
   })
 
   const ctx = {
-    locale: { register: localeRegister },
+    locale: {
+      register: localeRegister,
+      // Real bind is stable per namespace; the harness memoizes per ns so the
+      // label thunk keeps a stable translation seat across apply() calls.
+      bind: vi.fn((_ns: string) => (key: string) => key),
+    },
     slots: { inject: slotInject, register: slotRegister },
     conversationEvents: { register: conversationEventsRegister },
     conversationViews: { register: vi.fn(() => () => {}) },
+    get: vi.fn(() => ({ rpc: { call: vi.fn(async () => ({ ok: true, value: {} })) } })),
+    on: vi.fn(() => () => {}),
     effect,
   } as unknown as ClientContext
 
@@ -350,6 +358,19 @@ function createFiberHarness() {
   }
 }
 
+/**
+ * Slot registration options are compared structurally; the settings section's
+ * `label` is a fresh thunk per apply() call, so functions are normalized to a
+ * marker before comparing across fibers (their identity is not part of the
+ * registration contract).
+ */
+function plainSlotOptions(calls: Array<Array<unknown>>): unknown[][] {
+  return calls.map((call) => [
+    JSON.parse(JSON.stringify(call[0], (_key, value) => (typeof value === 'function' ? '<fn>' : value))),
+    call[1],
+  ])
+}
+
 describe('HMR mount/unmount idempotency of apply()', () => {
   it('apply() is a pure function of ctx (no module-level mutable state across fibers)', () => {
     const first = createFiberHarness()
@@ -364,7 +385,7 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     expect(second.slotInject.mock.calls.map((call) => call[0])).toEqual(
       first.slotInject.mock.calls.map((call) => call[0]),
     )
-    expect(second.slotRegister.mock.calls).toEqual(first.slotRegister.mock.calls)
+    expect(plainSlotOptions(second.slotRegister.mock.calls)).toEqual(plainSlotOptions(first.slotRegister.mock.calls))
   })
 
   it('a second apply on the SAME live fiber registers twice (host must unload first)', () => {
@@ -427,13 +448,14 @@ describe('HMR mount/unmount idempotency of apply()', () => {
   it('slot injection lifetime follows the shell.overlay declaration, not the fiber', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
-    expect(harness.overlayEntries).toHaveLength(1)
+    // Two injections: the shell.overlay marker plus the settings.section entry.
+    expect(harness.overlayEntries).toHaveLength(2)
     // Declaration teardown calls the inject disposer (apply() leaves it to the
     // declaration lifetime by design — see the index.ts comment).
     const injectDisposer = harness.slotInject.mock.results[0]?.value as () => void
     expect(typeof injectDisposer).toBe('function')
     injectDisposer()
-    expect(harness.overlayEntries).toHaveLength(0)
+    expect(harness.overlayEntries).toHaveLength(1)
 
     // Fiber unload alone does NOT remove the injection while the declaration
     // lives — documented declaration-lifetime semantics.
@@ -441,6 +463,6 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     apply(other.ctx)
     other.unload()
     expect(other.definitions).toHaveLength(0)
-    expect(other.overlayEntries).toHaveLength(1)
+    expect(other.overlayEntries).toHaveLength(2)
   })
 })
