@@ -3,10 +3,11 @@ import z from '@deepseek-ai/schemastery'
 import { CheckpointService } from './service.ts'
 import { createCheckpointToolDefinitions } from './tools.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
+import { createDshFsRestoreWorkspaceWriter } from './domain/RestoreWorkspaceWriter.ts'
 
 export const name = 'graycode-checkpoints'
 
-export const inject = ['agents'] as const
+export const inject = ['agents', 'fs'] as const
 
 /**
  * Workspace checkpoint domain: full/incremental snapshots with exclusion
@@ -42,7 +43,9 @@ export const Config: z<Config> = z.object({
 })
 
 export function apply(ctx: Context, config: Config): () => void {
-  const service = new CheckpointService(config)
+  // P0-08：恢复向用户 workspace 写文件必须经 DSH fs 路径——注入 ctx.fs（writeText 原子写、
+  // 经过 fs/write-intent 策略缝、可携带 sandboxPolicy）；插件私有 blob root 仍由服务 node fs 管理。
+  const service = new CheckpointService(config, createDshFsRestoreWorkspaceWriter(ctx.fs))
   void service.initialize()
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createCheckpointToolDefinitions(service))

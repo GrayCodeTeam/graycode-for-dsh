@@ -12,8 +12,12 @@
  * - 旧格式存档是相对路径（`relative/path`），单根工作区时自动按第一个根目录解析
  *
  * 本模块不依赖 CheckpointManager，是独立的纯文件系统逻辑。
+ *
+ * P0-08：向用户 workspace 的写操作全部经 {@link RestoreWorkspaceWriter} 端口（注入
+ * `ctx.fs` 的 DSH 实现走 `writeText`，见 RestoreWorkspaceWriter.ts）；引擎对插件私有
+ * blob root 的只读访问（哈希校验、blob 读取）仍走 node fs。缺省（未注入 writer）时
+ * 回退 node fs 直写实现，语义与改造前一致。
  */
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import {
     parseWorkspaceScopedPath,
@@ -26,6 +30,10 @@ import {
     throwIfAborted
 } from './checkpointConcurrency.ts';
 import { hashFileStreaming } from './fileHashing.ts';
+import {
+    createNodeFsRestoreWorkspaceWriter,
+    type RestoreWorkspaceWriter
+} from './RestoreWorkspaceWriter.ts';
 
 export type RestoreFailureReason = 'missing_in_chain' | 'hash_mismatch' | 'copy_failed' | 'delete_failed';
 
@@ -133,6 +141,12 @@ export interface RestoreEngineOptions {
     signal?: AbortSignal;
     /** 进度回调（CPF-11）：processed 已处理文件数，total 本次待处理文件数 */
     onProgress?: (processed: number, total: number) => void;
+    /**
+     * 用户 workspace 写入端口（P0-08）：缺省回退 node fs 直写实现（兼容/测试）；
+     * 生产路径由 index.ts 注入 `createDshFsRestoreWorkspaceWriter(ctx.fs)`，
+     * 文本文件经 DSH `writeText` 写入（原子、自动建父目录、可携带 sandboxPolicy）。
+     */
+    workspaceWriter?: RestoreWorkspaceWriter;
 }
 
 interface FileIndexEntry {
@@ -458,6 +472,8 @@ export async function restoreWorkspaceSnapshot(
     currentEmptyDirs: string[]
 ): Promise<RestoreEngineResult> {
     const { checkpointsDir, roots } = options;
+    // P0-08：所有用户 workspace 写操作统一走该端口；未注入时回退 node fs 直写实现
+    const workspaceWriter = options.workspaceWriter ?? createNodeFsRestoreWorkspaceWriter();
 
     const failures: RestoreFailure[] = [];
     const modifiedPaths: string[] = [];
@@ -495,15 +511,16 @@ export async function restoreWorkspaceSnapshot(
             return;
         }
 
-        let destination: string;
+        let resolved: { absolutePath: string; root: RuntimeWorkspaceRoot; relativePath: string };
         try {
-            destination = (await resolveScopedPath(scopedKey, roots)).absolutePath;
+            resolved = await resolveScopedPath(scopedKey, roots);
         } catch {
             failures.push({ path: scopedKey, reason: 'copy_failed' });
             processed += 1;
             options.onProgress?.(processed, progressTotal);
             return;
         }
+        const destination = resolved.absolutePath;
 
         try {
             // 校验备份内容与目标哈希一致（共享流式哈希实现，CP-DUP-1）。
@@ -520,16 +537,13 @@ export async function restoreWorkspaceSnapshot(
                 }
             }
 
-            await fs.mkdir(path.dirname(destination), { recursive: true });
-            await fs.copyFile(indexEntry.backupPath, destination);
-            // 内容寻址布局：blob 不可变，mode 由 manifest 记录，恢复后 best-effort 应用
-            if (indexEntry.mode !== undefined) {
-                try {
-                    await fs.chmod(destination, indexEntry.mode & 0o777);
-                } catch {
-                    // mode 应用失败不视为恢复失败（内容已正确恢复）
-                }
-            }
+            // P0-08：向用户 workspace 写文件必须经 DSH fs 路径（文本 → writeText，
+            // 二进制 → GAP 回退）；引擎不再直接 node fs 直写用户 workspace。
+            await workspaceWriter.writeFile(destination, indexEntry.backupPath, {
+                mode: indexEntry.mode,
+                signal: options.signal,
+                workspaceRoot: resolved.root.fsPath
+            });
             restored += 1;
             modifiedPaths.push(destination);
         } catch (error) {
@@ -564,7 +578,7 @@ export async function restoreWorkspaceSnapshot(
                 return;
             }
             try {
-                await fs.unlink(absolutePath);
+                await workspaceWriter.unlink(absolutePath);
                 deleted += 1;
                 deletedPaths.push(absolutePath);
             } catch {
@@ -582,7 +596,7 @@ export async function restoreWorkspaceSnapshot(
         throwIfAborted(options.signal);
         try {
             const absolutePath = (await resolveScopedPath(scopedKey, roots)).absolutePath;
-            await fs.mkdir(absolutePath, { recursive: true });
+            await workspaceWriter.mkdir(absolutePath);
         } catch {
             // 空目录恢复失败不视为整体失败（不影响文件内容）
         }
@@ -596,7 +610,7 @@ export async function restoreWorkspaceSnapshot(
             throwIfAborted(options.signal);
             try {
                 const absolutePath = (await resolveScopedPath(scopedKey, roots)).absolutePath;
-                await fs.rmdir(absolutePath);
+                await workspaceWriter.rmdir(absolutePath);
             } catch {
                 // 目录非空或不存在：忽略
             }

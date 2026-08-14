@@ -57,6 +57,7 @@ import {
     type RestoreChainEntry,
     type RestoreTargetState
 } from './domain/CheckpointRestoreEngine.ts';
+import type { RestoreWorkspaceWriter } from './domain/RestoreWorkspaceWriter.ts';
 import {
     createRuntimeWorkspaceRoots,
     createWorkspaceScopedPath,
@@ -243,6 +244,12 @@ export class CheckpointService {
     private readonly lockManager = new CheckpointOperationLockManager();
     private readonly deletionService: CheckpointDeletionService;
     private readonly store: RecordStoreImpl;
+    /**
+     * 用户 workspace 写入端口（P0-08）：恢复向用户 workspace 写文件必须经 DSH fs 路径。
+     * 由 index.ts 注入 `createDshFsRestoreWorkspaceWriter(ctx.fs)`；未注入（测试/兼容）
+     * 时引擎回退 node fs 直写实现（语义与改造前一致）。插件私有 blob root 不受影响。
+     */
+    private readonly workspaceWriter?: RestoreWorkspaceWriter;
 
     /** 恢复门闸：previewId → 绑定（checkpointId+workspace+manifestHash+基线摘要；进程内有效） */
     private readonly previewTokens = new Map<string, PreviewTokenBinding>();
@@ -256,8 +263,9 @@ export class CheckpointService {
      */
     recordsWriteChain: Promise<unknown> = Promise.resolve();
 
-    constructor(config: CheckpointServiceConfig) {
+    constructor(config: CheckpointServiceConfig, workspaceWriter?: RestoreWorkspaceWriter) {
         this.config = config;
+        this.workspaceWriter = workspaceWriter;
         this.checkpointsDir = path.join(config.dataRoot, 'checkpoints');
         this.recordsFile = path.join(this.checkpointsDir, 'records.json');
         this.store = new RecordStoreImpl(this);
@@ -941,7 +949,8 @@ export class CheckpointService {
                             protectedScopedPaths,
                             deletableScopedPaths,
                             deleteUntrackedFiles: options?.deleteUntrackedFiles === true,
-                            signal: options?.signal
+                            signal: options?.signal,
+                            workspaceWriter: this.workspaceWriter
                         },
                         chainEntries,
                         targetState as RestoreTargetState,

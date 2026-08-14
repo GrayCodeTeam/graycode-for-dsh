@@ -15,7 +15,10 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { CheckpointService } from '../../src/checkpoints/service.ts'
+import { Context } from '@deepseek-ai/cordis'
+import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
+import { CheckpointService, type CheckpointServiceConfig } from '../../src/checkpoints/service.ts'
+import { createDshFsRestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
 import { computeForcedKeepIds } from '../../src/checkpoints/domain/CheckpointDeletionService.ts'
 import { BlobStore, BLOB_HASH_PATTERN } from '../../src/checkpoints/domain/BlobStore.ts'
 import * as fileHashing from '../../src/checkpoints/domain/fileHashing.ts'
@@ -675,6 +678,57 @@ describe('CheckpointService isolation across workspaces', () => {
     } finally {
       service.dispose()
       await cleanup(wsA, wsB)
+    }
+  })
+})
+
+describe('CheckpointService restore writes via DSH fs (P0-08)', () => {
+  test('restoreCheckpoint writes workspace files through ctx.fs.writeText (real LocalFileSystem)', async () => {
+    const workspaceDir = await createTempDir('dsh-checkpoint-ws-')
+    const dataRoot = await createTempDir('dsh-checkpoint-data-')
+    const ctx = new Context()
+    const fiber = await ctx.plugin(LocalFileSystem, { cwd: workspaceDir })
+    try {
+      const config: CheckpointServiceConfig = {
+        dataRoot,
+        maxCheckpoints: -1,
+        excludeProfiles: {},
+        excludePatterns: [],
+        maxFileSizeBytes: 50 * 1024 * 1024,
+        blobGracePeriodDays: 7,
+      }
+      // 生产接线方式（index.ts）：服务注入基于 ctx.fs 的 DSH workspace writer
+      const service = new CheckpointService(config, createDshFsRestoreWorkspaceWriter(ctx.fs))
+      await service.initialize()
+
+      await writeFile(workspaceDir, 'a.txt', 'original')
+      await writeFile(workspaceDir, 'keep.txt', 'untracked')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+
+      await writeFile(workspaceDir, 'a.txt', 'modified')
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.previewToken).toBeTruthy()
+
+      const spy = vi.spyOn(ctx.fs, 'writeText')
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect(restored.restored).toBe(1)
+
+      // 恢复写盘经过 DSH fs：writeText 收到目标/内容/sandboxPolicy
+      expect(spy).toHaveBeenCalledTimes(1)
+      const call = spy.mock.calls[0]!
+      expect(call[0]).toMatchObject({ displayPath: path.join(workspaceDir, 'a.txt') })
+      expect(call[1]).toBe('original')
+      expect(call[4]).toEqual({ mode: 'workspace-write', workspaceRoot: workspaceDir })
+      // 落盘结果正确；门闸/删除语义不变（未跟踪文件保留）
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('original')
+      await expect(fs.access(path.join(workspaceDir, 'keep.txt'))).resolves.toBeUndefined()
+
+      service.dispose()
+    } finally {
+      await fiber.dispose()
+      await cleanup(workspaceDir, dataRoot)
     }
   })
 })

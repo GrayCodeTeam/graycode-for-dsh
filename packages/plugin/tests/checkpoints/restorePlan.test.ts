@@ -13,13 +13,19 @@
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import {
   computeRestorePlan,
   restoreWorkspaceSnapshot,
   type RestoreChainEntry,
   type RestoreTargetState,
 } from '../../src/checkpoints/domain/CheckpointRestoreEngine.ts'
+import {
+  createDshFsRestoreWorkspaceWriter,
+  type RestoreWorkspaceWriter,
+} from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
 import {
   createRuntimeWorkspaceRoots,
   createWorkspaceScopedPath,
@@ -311,6 +317,192 @@ describe('restore plan (adapted from CheckpointRestoreEngine.test.ts)', () => {
       expect(plan.skipped).toBe(1)
       expect(plan.added.length + plan.modified.length).toBe(2)
     } finally {
+      await cleanup(ctx.workspaceDir, path.dirname(ctx.checkpointsDir))
+    }
+  })
+})
+
+/** 挂载真实 LocalFileSystem（DSH ctx.fs；与 tests/e2e/harness.ts 组合方式一致） */
+async function mountLocalFileSystem(cwd: string): Promise<{
+  ctx: Context
+  dispose: () => Promise<void>
+}> {
+  const ctx = new Context()
+  const fiber = await ctx.plugin(LocalFileSystem, { cwd })
+  return { ctx, dispose: () => fiber.dispose() }
+}
+
+describe('restore via DSH fs workspace writer (P0-08)', () => {
+  test('engine routes every workspace mutation through the injected writer (no node fs bypass)', async () => {
+    const ctx = await setupContext()
+    try {
+      await writeFile(ctx.workspaceDir, 'src/main.ts', 'changed')
+      await writeFile(ctx.workspaceDir, 'extra.txt', 'should be deleted')
+
+      const chain = [await createFullBlobBackup(ctx, 'cp_full', {
+        'src/main.ts': 'original',
+        'src/lib.ts': 'lib',
+      })]
+      const target: RestoreTargetState = {
+        fileHashes: {
+          [scoped(ctx, 'src/main.ts')]: sha256('original'),
+          [scoped(ctx, 'src/lib.ts')]: sha256('lib'),
+        },
+        emptyDirs: [scoped(ctx, 'docs')],
+      }
+      const current = await collectCurrentState(ctx)
+
+      // no-op writer：若引擎绕过 writer 直写 workspace，文件会真实出现 → 用「文件不存在」
+      // 证明所有写操作（写文件/删文件/建空目录）都经过注入的 writer。
+      const writeFileSpy = vi.fn(async () => {})
+      const unlinkSpy = vi.fn(async () => {})
+      const mkdirSpy = vi.fn(async () => {})
+      const rmdirSpy = vi.fn(async () => {})
+      const writer: RestoreWorkspaceWriter = {
+        writeFile: writeFileSpy,
+        unlink: unlinkSpy,
+        mkdir: mkdirSpy,
+        rmdir: rmdirSpy,
+      }
+
+      const result = await restoreWorkspaceSnapshot(
+        { checkpointsDir: ctx.checkpointsDir, blobsDir: ctx.blobsDir, roots: ctx.roots, workspaceWriter: writer },
+        chain,
+        target,
+        current.hashes,
+        current.emptyDirs,
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.restored).toBe(2)
+      // 写文件：目标绝对路径 + 源 blob 路径 + workspaceRoot 沙箱策略根
+      expect(writeFileSpy).toHaveBeenCalledTimes(2)
+      expect(writeFileSpy).toHaveBeenCalledWith(
+        path.join(ctx.workspaceDir, 'src', 'main.ts'),
+        path.join(ctx.blobsDir, sha256('original')),
+        expect.objectContaining({ workspaceRoot: ctx.roots[0]!.fsPath }),
+      )
+      expect(writeFileSpy).toHaveBeenCalledWith(
+        path.join(ctx.workspaceDir, 'src', 'lib.ts'),
+        path.join(ctx.blobsDir, sha256('lib')),
+        expect.objectContaining({ workspaceRoot: ctx.roots[0]!.fsPath }),
+      )
+      // 删除文件 / 空目录重建同样经 writer
+      expect(unlinkSpy).toHaveBeenCalledWith(path.join(ctx.workspaceDir, 'extra.txt'))
+      expect(mkdirSpy).toHaveBeenCalledWith(path.join(ctx.workspaceDir, 'docs'))
+      // 引擎没有绕过 writer：本应由恢复创建/删除的路径未被直写
+      // （src/main.ts 是 fixture 预置文件，恢复后仍保持原内容 'changed'）
+      expect(await readWorkspaceFile(ctx, 'src/main.ts')).toBe('changed')
+      await expect(fs.access(path.join(ctx.workspaceDir, 'src', 'lib.ts'))).rejects.toThrow()
+      await expect(fs.access(path.join(ctx.workspaceDir, 'extra.txt'))).resolves.toBeUndefined()
+      await expect(fs.access(path.join(ctx.workspaceDir, 'docs'))).rejects.toThrow()
+    } finally {
+      await cleanup(ctx.workspaceDir, path.dirname(ctx.checkpointsDir))
+    }
+  })
+
+  test('text files are restored through ctx.fs.writeText (real LocalFileSystem)', async () => {
+    const ctx = await setupContext()
+    const mounted = await mountLocalFileSystem(ctx.workspaceDir)
+    try {
+      await writeFile(ctx.workspaceDir, 'src/main.ts', 'changed')
+      await writeFile(ctx.workspaceDir, 'extra.txt', 'should be deleted')
+
+      const chain = [await createFullBlobBackup(ctx, 'cp_full', {
+        'src/main.ts': 'original',
+        'src/lib.ts': 'lib',
+      })]
+      const target: RestoreTargetState = {
+        fileHashes: {
+          [scoped(ctx, 'src/main.ts')]: sha256('original'),
+          [scoped(ctx, 'src/lib.ts')]: sha256('lib'),
+        },
+        emptyDirs: [scoped(ctx, 'docs')],
+      }
+      const current = await collectCurrentState(ctx)
+
+      const spy = vi.spyOn(mounted.ctx.fs, 'writeText')
+      const result = await restoreWorkspaceSnapshot(
+        {
+          checkpointsDir: ctx.checkpointsDir,
+          blobsDir: ctx.blobsDir,
+          roots: ctx.roots,
+          workspaceWriter: createDshFsRestoreWorkspaceWriter(mounted.ctx.fs),
+        },
+        chain,
+        target,
+        current.hashes,
+        current.emptyDirs,
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.restored).toBe(2)
+      // 内容经 DSH writeText 写入（spy 命中 = 写盘经过 DSH fs）
+      expect(spy).toHaveBeenCalledTimes(2)
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ displayPath: path.join(ctx.workspaceDir, 'src', 'main.ts') }),
+        'original',
+        undefined,
+        undefined,
+        { mode: 'workspace-write', workspaceRoot: ctx.roots[0]!.fsPath },
+      )
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ displayPath: path.join(ctx.workspaceDir, 'src', 'lib.ts') }),
+        'lib',
+        undefined,
+        undefined,
+        { mode: 'workspace-write', workspaceRoot: ctx.roots[0]!.fsPath },
+      )
+      // 落盘结果逐字节正确
+      expect(await readWorkspaceFile(ctx, 'src/main.ts')).toBe('original')
+      expect(await readWorkspaceFile(ctx, 'src/lib.ts')).toBe('lib')
+      // 删除（GAP：node fs 直删）与空目录重建（GAP：node fs 直建）
+      await expect(fs.access(path.join(ctx.workspaceDir, 'extra.txt'))).rejects.toThrow()
+      await expect(fs.access(path.join(ctx.workspaceDir, 'docs'))).resolves.toBeUndefined()
+    } finally {
+      await mounted.dispose()
+      await cleanup(ctx.workspaceDir, path.dirname(ctx.checkpointsDir))
+    }
+  })
+
+  test('binary blob falls back to node fs copy (GAP: no DSH writeBytes API), byte-exact', async () => {
+    const ctx = await setupContext()
+    const mounted = await mountLocalFileSystem(ctx.workspaceDir)
+    try {
+      const binaryContent = Buffer.from([0xff, 0x01, 0x02, 0x00, 0xfe, 0x80]) // 非 UTF-8 字节
+      const binaryHash = crypto.createHash('sha256').update(binaryContent).digest('hex')
+      await fs.writeFile(path.join(ctx.blobsDir, binaryHash), binaryContent)
+      const binScoped = scoped(ctx, 'bin.dat')
+      const chain: RestoreChainEntry[] = [{
+        checkpointId: 'cp_bin',
+        backupDir: 'cp_bin',
+        fileHashes: { [binScoped]: binaryHash },
+        blobHashes: { [binScoped]: binaryHash },
+      }]
+      const target: RestoreTargetState = { fileHashes: { [binScoped]: binaryHash }, emptyDirs: [] }
+
+      const spy = vi.spyOn(mounted.ctx.fs, 'writeText')
+      const result = await restoreWorkspaceSnapshot(
+        {
+          checkpointsDir: ctx.checkpointsDir,
+          blobsDir: ctx.blobsDir,
+          roots: ctx.roots,
+          workspaceWriter: createDshFsRestoreWorkspaceWriter(mounted.ctx.fs),
+        },
+        chain,
+        target,
+        {},
+        [],
+      )
+
+      expect(result.success).toBe(true)
+      expect(result.restored).toBe(1)
+      // 二进制未走 writeText（GAP 回退 node fs copyFile），内容逐字节一致
+      expect(spy).not.toHaveBeenCalled()
+      const written = await fs.readFile(path.join(ctx.workspaceDir, 'bin.dat'))
+      expect(Buffer.compare(written, binaryContent)).toBe(0)
+    } finally {
+      await mounted.dispose()
       await cleanup(ctx.workspaceDir, path.dirname(ctx.checkpointsDir))
     }
   })
