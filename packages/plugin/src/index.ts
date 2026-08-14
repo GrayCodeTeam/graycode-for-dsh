@@ -12,6 +12,7 @@ import * as stagedDiff from './stagedDiff/adapters/dsh/index.ts'
 import * as activity from './activity/index.ts'
 import * as media from './media/index.ts'
 import * as file from './file/index.ts'
+import * as todo from './todo/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -40,6 +41,8 @@ export interface Config {
   media: media.Config
   /** File domain: generic file editing tools (delete_code, C7). */
   file: file.Config
+  /** Todo domain: incremental todo_update adapter (C3). */
+  todo: todo.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -55,6 +58,7 @@ export const Config: z<Config> = z.object({
   activity: activity.Config,
   media: media.Config,
   file: file.Config,
+  todo: todo.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -78,4 +82,6 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(media, { ...config.media })
   // File domain: Config has no dataRoot (no persistence under the plugin root).
   ctx.plugin(file, { ...config.file })
+  // Todo domain: Config has no dataRoot (no persistence under the plugin root).
+  ctx.plugin(todo, { ...config.todo })
 }
