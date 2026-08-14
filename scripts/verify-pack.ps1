@@ -283,6 +283,42 @@ foreach ($tgzFile in $tarballs) {
     }
   }
 
+  # bundle patch rows must be installable at runtime. `dsh plugin add` installs
+  # the bundle's declared dependencies into the profile; every row name the
+  # patch inserts (cordis:include loader entry) is imported from that
+  # node_modules. A row without a matching `dependencies` entry boots into
+  # ERR_MODULE_NOT_FOUND even though pack/verify pass on content alone.
+  # (Regression guard for the graycode-client row missing from the bundle deps.)
+  if ($manifestName -and $m.dsh -and $m.dsh.bundle -and $m.dsh.bundle.patch) {
+    $patchRel = 'package/' + ($m.dsh.bundle.patch -replace '^\./', '')
+    $patchRaw = (& tar -xOf $tgzFile.FullName $patchRel 2>$null) -join "`n"
+    if (-not $patchRaw) {
+      $violations.Add("bundle patch '$($m.dsh.bundle.patch)' missing from tarball")
+    } else {
+      $rowNames = @()
+      $inInsert = $false
+      foreach ($line in ($patchRaw -split "`r?`n")) {
+        if (-not $inInsert) {
+          if ($line -match '^\s*-\s*insert\s*:\s*$') { $inInsert = $true }
+          continue
+        }
+        if ($line -match '^[^\s]') { $inInsert = $false; continue }  # next top-level op
+        if ($line -match '^\s+-\s+name\s*:\s*["'']?([^"''\s#]+)') { $rowNames += $matches[1] }
+        elseif ($line -match '^\s+name\s*:\s*["'']?([^"''\s#]+)') { $rowNames += $matches[1] }
+      }
+      $depNames = @($m.dependencies.PSObject.Properties.Name)
+      $peerNames = @($m.peerDependencies.PSObject.Properties.Name)
+      foreach ($row in ($rowNames | Sort-Object -Unique)) {
+        if ($row -in $depNames) { continue }
+        if ($row -in $peerNames) {
+          Warn "$($tgzFile.Name): patch row '$row' is only a peerDependency - confirm pnpm auto-installs it in the profile"
+        } else {
+          $violations.Add("patch row '$row' is not declared in the bundle dependencies (profile boot fails: ERR_MODULE_NOT_FOUND)")
+        }
+      }
+    }
+  }
+
   $violationCount = $violations.Count
   foreach ($v in $violations) { Fail "$($tgzFile.Name): $v" }
 

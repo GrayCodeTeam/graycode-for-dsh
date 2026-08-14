@@ -85,6 +85,11 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 - 绝对路径：POSIX `/` 开头、盘符（`C:\` / `C:/`）、UNC；以及内嵌盘符路径。
 - 路径穿越（`..` 段）与 `package/` 根之外的多余条目（能抓住“整仓被打包”的脏 tarball）。
 - `package/package.json` 的 name/version 与工作区清单一致。
+- **bundle patch 依赖一致性**（`dsh.bundle.patch` 行）：解析 tarball 内 patch
+  YAML 的 `insert` 行，断言每个行 `name` 都是 bundle 自身 `dependencies` 的成员。
+  缺失会以 `ERR_MODULE_NOT_FOUND` 在 profile 启动时失败（实测回归：`graycode-client`
+  行曾未声明依赖，`pack`/内容检查全绿但全新 profile 无法 boot）——该检查把
+  “patch 行必须可安装”前移到打包门禁。
 - 摘要：条目数、tgz 大小、未压缩大小、README/LICENSE 是否存在。
 
 预期 tarball 集合 = `packages/*` 下所有非 private 包（自动发现）；出现
@@ -96,12 +101,11 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 
 1. **`@graycode/*` 未发布 → bundle tarball 无法 clean-room 安装**（见上）。
    发布（或提供私有 registry）后 CI gate 自动转硬。
-2. **两个包的 tarball 都缺 README**（LICENSE 均从仓库根带入，已确认存在）：
-   - `packages/bundle/package.json` 的 `files` 声明了 `README.md`，但
-     `packages/bundle/` 下没有该文件（tarball 只有 cordis.patch.yml、LICENSE、package.json）；
-   - `packages/plugin/package.json` 的 `files` 声明了 `README.md`，同样缺失。
-   建议：在 `packages/bundle/`、`packages/plugin/` 各补 `README.md`（或从 `files`
-   移除声明）。verify-pack 会持续以 WARN 提示。
+2. **bundle 依赖发布状态（2026-08 更新）**：bundle tarball 依赖
+   `@graycode/dsh-plugin@^0.1.0` 与 `@graycode/dsh-client@^0.1.0` 必须从 npm
+   registry 解析；`@graycode/*` 尚未发布，`dsh plugin add` 必然
+   `ERR_PNPM_FETCH_404`。这正是该 gate 要抓的条件——包发布后此步骤自动变绿，
+   届时把 `continue-on-error` 改为 `false` 即成为硬性门槛。
 3. **monorepo pack 输出位置**：`pnpm pack` 在 workspace 根执行时，所有 tarball
    写到**调用方 cwd（仓库根）**，不是 `packages/*/` 下。根 `pack` 脚本已改为
    `pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin pack`，
