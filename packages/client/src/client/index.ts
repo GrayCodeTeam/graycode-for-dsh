@@ -54,6 +54,11 @@ import {
   graycodeNotificationsDictionaries,
   graycodeNotificationsJaPlaceholder,
 } from './notifications/locales.ts'
+import {
+  GRAYCODE_SCOPE_MAP_NS,
+  graycodeScopeMapDictionaries,
+  graycodeScopeMapJaPlaceholder,
+} from './scopeMap/locales.ts'
 import { NotificationCenter } from './notifications/NotificationCenter.tsx'
 import { BrowserNotificationPresenter } from './notifications/presenter.ts'
 import { createNotificationBus } from './notifications/source.ts'
@@ -89,6 +94,8 @@ export { SettingsContributionPanel } from './settingsContribution/SettingsContri
 export type { SettingsContributionPanelProps } from './settingsContribution/SettingsContributionPanel.tsx'
 export { ActivityHeatmapPanel } from './activityHeatmap/ActivityHeatmapPanel.tsx'
 export type { ActivityHeatmapPanelProps } from './activityHeatmap/ActivityHeatmapPanel.tsx'
+export { ScopeMapPanel } from './scopeMap/ScopeMapPanel.tsx'
+export type { ScopeMapPanelProps } from './scopeMap/ScopeMapPanel.tsx'
 
 // C4 notifications surface: rc.6 has no host→client push channel, so the
 // surface ships as a mountable center + fold/presenter/source factories (the
@@ -176,6 +183,10 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => disposeActivityHeatmap)
   const disposeActivityHeatmapJa = ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
   ctx.effect(() => disposeActivityHeatmapJa)
+  const disposeScopeMap = ctx.locale.register(GRAYCODE_SCOPE_MAP_NS, graycodeScopeMapDictionaries)
+  ctx.effect(() => disposeScopeMap)
+  const disposeScopeMapJa = ctx.locale.register(GRAYCODE_SCOPE_MAP_NS, 'ja', graycodeScopeMapJaPlaceholder)
+  ctx.effect(() => disposeScopeMapJa)
 
   // C4 notifications locale namespace (own ns, same pattern as the other
   // Phase 4 surfaces).

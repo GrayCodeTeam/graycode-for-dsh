@@ -57,11 +57,12 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Ten namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = twenty registrations. Covers the base `graycode` ns,
+    // Eleven namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = twenty-two registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
-    // activity heatmap surface (C6) and the notifications surface (C4).
-    expect(localeRegister).toHaveBeenCalledTimes(20)
+    // activity heatmap surface (C6), the notifications surface (C4) and the
+    // migration scope-map surface (D-1/D-2).
+    expect(localeRegister).toHaveBeenCalledTimes(22)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -74,6 +75,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.settingsContribution',
       'graycode.activityHeatmap',
       'graycode.notifications',
+      'graycode.scopeMap',
     ]) {
       // Each namespace is registered exactly twice: dict + ja placeholder.
       expect(namespaces.filter((n) => n === ns)).toHaveLength(2)
@@ -98,8 +100,8 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (10 × dict + ja placeholder) = 1 + 20.
-    expect(effect).toHaveBeenCalledTimes(21)
+    // every locale namespace (11 × dict + ja placeholder) = 1 + 22.
+    expect(effect).toHaveBeenCalledTimes(23)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
