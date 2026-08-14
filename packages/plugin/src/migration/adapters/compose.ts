@@ -24,6 +24,7 @@ import {
   type SessionPersistenceLike,
 } from './storage/conversationTarget.ts'
 import { createNoopWriter } from './storage/noopTarget.ts'
+import type { DshHostContextLike } from './storage/settingsTarget.ts'
 import { MemoryService } from '../../memory/service.ts'
 
 export interface MigrationServiceOptions {
@@ -49,23 +50,35 @@ export function createMigrationService(options: MigrationServiceOptions): Legacy
   const sessionPersistence = (options.ctx as { sessionPersistence?: SessionPersistenceLike } | undefined)
     ?.sessionPersistence
 
-  return new LegacyImportService({
-    inventory: new DefaultInventoryReader(),
-    validator: new DefaultValidator(),
-    planner: new DefaultPlanner(),
-    writers: {
-      conversations: createConversationTargetWriter({
-        importsRoot,
-        sessions: options.ctx?.sessions,
-        persistence: sessionPersistence,
-      }),
-      snapshots: createNoopWriter('snapshots'),
-      checkpoints: createCheckpointTargetWriter({ dataRoot: options.dataRoot }),
-      memory: createMemoryTargetWriter(memoryService),
-      settings: createSettingsTargetWriter({ importsRoot }),
+  return new LegacyImportService(
+    {
+      inventory: new DefaultInventoryReader(),
+      validator: new DefaultValidator(),
+      planner: new DefaultPlanner(),
+      writers: {
+        conversations: createConversationTargetWriter({
+          importsRoot,
+          sessions: options.ctx?.sessions,
+          persistence: sessionPersistence,
+        }),
+        snapshots: createNoopWriter('snapshots'),
+        checkpoints: createCheckpointTargetWriter({ dataRoot: options.dataRoot }),
+        // H1b：memory 目标侧去重台账（ledger.put 失败后重跑不重复追加）
+        memory: createMemoryTargetWriter(memoryService, { journalPath: path.join(migrationRoot, 'applied.json') }),
+        settings: createSettingsTargetWriter({
+          importsRoot,
+          // ctx.settings/ctx.credentials 的类型增强来自 dsh-settings/dsh-credentials（devDep，
+          // src 不直接依赖）→ 此处按 settingsTarget 的结构化子集显式收窄
+          ctx: options.ctx as DshHostContextLike | undefined,
+        }),
+      },
+      ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
+      runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
+      targetProfile: options.targetProfile ?? 'default',
     },
-    ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
-    runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
-    targetProfile: options.targetProfile ?? 'default',
-  })
+    {
+      // H1c：apply 跨进程文件锁（<dataRoot>/migration/.locks/apply.lock）
+      lockFile: path.join(migrationRoot, '.locks', 'apply.lock'),
+    },
+  )
 }
