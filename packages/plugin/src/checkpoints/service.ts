@@ -232,10 +232,45 @@ function generateOperationId(): string {
     return `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Windows rename-overwrite retry（镜像 prompt/branches/stagedDiff/activity/
+ * memory/sessionState 各侧边存储的模式）：瞬态 EPERM/EACCES/EBUSY 带退避重试；
+ * 重试耗尽且目标存在（EEXIST/EPERM）时先删旧文件再补一次 rename。
+ */
+async function renameStoreOverwrite(tmpPath: string, storePath: string): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+        try {
+            await fs.rename(tmpPath, storePath);
+            return;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY' && code !== 'EEXIST') {
+                throw error;
+            }
+            if (attempt >= 4) {
+                if (code === 'EEXIST' || code === 'EPERM') {
+                    try {
+                        await fs.unlink(storePath);
+                    } catch {
+                        // 最终 rename 会浮出真实错误（目标已不存在时）
+                    }
+                    await fs.rename(tmpPath, storePath);
+                    return;
+                }
+                throw error;
+            }
+            await new Promise(resolve => setTimeout(resolve, 30 * attempt));
+        }
+    }
+}
+
 /** 工作区目录 → uri（与源测试/远端工作区序列化同形：file:// 前缀 + posix 分隔符） */
 function cwdToUri(cwd: string): string {
     return `file:///${cwd.replace(/\\/g, '/')}`;
 }
+
+/** 恢复门闸令牌上限（进程内 Map；超过后按插入序驱逐最旧，防止长会话无界增长） */
+const MAX_PREVIEW_TOKENS = 128;
 
 /**
  * 检查点服务
@@ -1133,6 +1168,12 @@ export class CheckpointService {
             .update(`${binding.checkpointId}\n${binding.workspaceFingerprint}`)
             .digest('hex')
             .slice(0, 32);
+        // 令牌只在成功恢复时清除（restoreCheckpoint）：长会话内反复 preview 不同
+        // (checkpoint, workspace) 组合会累积条目——按 Map 插入序驱逐最旧，防止无界增长。
+        if (this.previewTokens.size >= MAX_PREVIEW_TOKENS) {
+            const oldest = this.previewTokens.keys().next().value;
+            if (oldest !== undefined) this.previewTokens.delete(oldest);
+        }
         this.previewTokens.set(previewId, { previewId, ...binding });
         return previewId;
     }
@@ -1978,12 +2019,12 @@ class RecordStoreImpl implements CheckpointRecordMetadataStore {
         }
     }
 
-    /** 原子写回：写 tmp + rename */
+    /** 原子写回：写 tmp + rename（Windows 上带重试，镜像 prompt/branches/sessionState 模式） */
     private async writeAllRecords(records: CheckpointRecord[]): Promise<void> {
         await fs.mkdir(path.dirname(this.service.recordsFile), { recursive: true });
         const tmpPath = `${this.service.recordsFile}.tmp`;
         await fs.writeFile(tmpPath, JSON.stringify(records, null, 2), 'utf-8');
-        await fs.rename(tmpPath, this.service.recordsFile);
+        await renameStoreOverwrite(tmpPath, this.service.recordsFile);
     }
 
     /** 链内原子更新（串行化；updater 返回原引用 = 无变更跳过写回） */
