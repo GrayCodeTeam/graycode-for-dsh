@@ -1,0 +1,187 @@
+/**
+ * GrayCode - subagents 薄适配层：ctx.subagents seam 守卫安装器（G1/G2/G3）
+ *
+ * 探明结论（依据 dsh-subagent@0.1.0-rc.6 的 .d.ts，见 docs/SUBAGENTS_VERIFICATION.md）：
+ * - `ctx.subagents`（SubagentRuntime extends Service）把模型侧 send_message/report 的
+ *   实际投递收敛到两个公开方法：followup（父→子，仅精确 live 直接父授权）与
+ *   reportFrom（子→直接父，「调用方不可命名收件人」）。base 层 tool 包在本仓库
+ *   node_modules 未安装，故「工具层包装」不可行；事件面（subagent/start/end）只
+ *   描述生命周期、不含消息内容。**seam 方法本身是唯一可拦截点**：本安装器以
+ *   「实例方法遮蔽（own property 覆盖原型方法）」包装 followup/reportFrom/start/
+ *   startContinuable，保存原方法、dispose 时恢复。
+ * - G1：hop 计数器包在 followup/reportFrom 外层，threadId 由 subagent_id（childId /
+ *   child.id）派生，同线程超 maxHopDepth（默认 5，老 Gray MAX_HOP_DEPTH）拒绝投递并抛
+ *   HopDepthExceededError；subagent/start 重置线程预算、subagent/end 清理。
+ * - G2：reportFrom 不支持任意寻址（能力边界），sendToAgent 仅当 target 解析为调用方
+ *   持久化直接父（含 'main' 且父为 root）时走 reportFrom，否则抛 UnsupportedAddressingError
+ *   （fail-closed，不硬写 hack）。
+ * - G3：start/startContinuable 委派前经 listChildren 统计父会话运行中子代理数，超
+ *   subagents.maxConcurrent（默认 2）拒绝新委派并抛 MaxConcurrentSubagentsError；计数
+ *   本身失败时抛 ConcurrencyCheckError（fail-closed）。
+ */
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import { resolveChildToParentTarget } from '../../domain/addressing.ts'
+import { shouldAllowDelegation } from '../../domain/concurrencyPolicy.ts'
+import {
+  ConcurrencyCheckError,
+  HopDepthExceededError,
+  MaxConcurrentSubagentsError,
+  UnsupportedAddressingError,
+} from '../../domain/errors.ts'
+import { ThreadHopCounter } from '../../domain/hopPolicy.ts'
+import type { SubagentReportOptionsLike, SubagentsSeamLike } from './seamTypes.ts'
+
+/** 生命周期事件端口（生产 = ctx.on；测试 = fake bus）。 */
+export interface SubagentLifecycleEventsPort {
+  on(event: string, listener: (info: { id: SessionId }) => void): () => void
+}
+
+export interface SubagentsGuardOptions {
+  /** G1：每子线程 hop 上限（老 Gray MAX_HOP_DEPTH=5；0 = 不限/关闭熔断）。 */
+  maxHopDepth: number
+  /** G3：每父会话运行中子代理上限（老 Gray subagents.maxConcurrent 默认 2；0 = 不限）。 */
+  maxConcurrent: number
+  /** G3：运行中数量计数端口（默认经 countRunningChildrenViaList 接 listChildren）。 */
+  countRunning?: (parentSessionId: SessionId) => Promise<number>
+  /** G2：判断会话是否主会话（root），用于把 'main' 映射到直接父。 */
+  isRootSession?: (sessionId: string) => boolean
+  /** 告警日志端口。 */
+  logger?: { warn(message: string): void }
+}
+
+export interface SubagentsGuard {
+  /** 被守卫后的 seam（方法已被包装，经它调用即受 G1/G3 约束）。 */
+  readonly seam: SubagentsSeamLike
+  /**
+   * G2：子→父消息（老 Gray agent_send_message 方向）。target 解析为调用方持久化
+   * 直接父（含 'main' 且父为 root）时经 reportFrom 投递；其余任意寻址 fail-closed。
+   */
+  sendToAgent(
+    origin: Agent,
+    target: string,
+    content: readonly ContentBlock[],
+    options: SubagentReportOptionsLike,
+  ): Promise<MessageId>
+  /** 恢复原方法、注销事件、移除重复安装守卫（幂等）。 */
+  dispose(): void
+}
+
+/** 重复安装守卫：同一 seam 实例只包装一次（HMR 双 apply 兜底）。 */
+const guardedSeams = new WeakSet<object>()
+
+/** G2 投递器（两种安装路径共用）。 */
+function makeSendToAgent(
+  seam: SubagentsSeamLike,
+  isRootSession: ((sessionId: string) => boolean) | undefined,
+): SubagentsGuard['sendToAgent'] {
+  return (origin, target, content, options) => {
+    const callerSessionId = String(origin?.id ?? origin?.session?.id ?? '')
+    const parentSessionId = origin?.session?.header?.parentSession
+    const parentIsRoot = parentSessionId !== undefined && (isRootSession?.(String(parentSessionId)) ?? false)
+    const resolved = resolveChildToParentTarget(
+      target,
+      callerSessionId,
+      parentSessionId !== undefined ? String(parentSessionId) : undefined,
+      parentIsRoot,
+    )
+    if (resolved.kind === 'unsupported') {
+      throw new UnsupportedAddressingError(resolved.target, resolved.origin)
+    }
+    // 走已包装的 seam.reportFrom：G1 hop 守卫随之生效。
+    return seam.reportFrom(origin, content, options)
+  }
+}
+
+export function installSubagentsGuards(
+  seam: SubagentsSeamLike,
+  options: SubagentsGuardOptions,
+  events?: SubagentLifecycleEventsPort,
+): SubagentsGuard {
+  if (guardedSeams.has(seam as object)) {
+    options.logger?.warn('graycode-subagents: seam already guarded — skipping re-install (HMR double-apply guard)')
+    return { seam, sendToAgent: makeSendToAgent(seam, options.isRootSession), dispose: () => {} }
+  }
+  guardedSeams.add(seam as object)
+
+  // 保存原方法（未绑定；调用时 .apply(seam) 保证 this 正确）。
+  const originals = {
+    followup: seam.followup,
+    reportFrom: seam.reportFrom,
+    start: seam.start,
+    startContinuable: seam.startContinuable,
+  }
+
+  const hopCounter = new ThreadHopCounter(options.maxHopDepth)
+  const maxConcurrent = options.maxConcurrent
+  const countRunning = options.countRunning ?? (async () => 0)
+
+  /** G1：同线程 hop 检查（check-then-increment；被拒不消耗预算）。 */
+  const assertHop = (threadId: string): void => {
+    if (options.maxHopDepth <= 0) return
+    const decision = hopCounter.tryAdvance(threadId)
+    if (!decision.allowed) {
+      throw new HopDepthExceededError(threadId, decision.hop, options.maxHopDepth)
+    }
+  }
+
+  /** G3：委派前并发上限检查（fail-closed）。 */
+  const assertUnderLimit = async (parent: Agent): Promise<void> => {
+    if (maxConcurrent <= 0) return
+    const parentSessionId = parent?.id ?? parent?.session?.id
+    if (!parentSessionId) {
+      throw new ConcurrencyCheckError(new Error('delegating parent has no session id'))
+    }
+    let running: number
+    try {
+      running = await countRunning(parentSessionId)
+    } catch (error) {
+      throw new ConcurrencyCheckError(error)
+    }
+    if (!shouldAllowDelegation(running, maxConcurrent)) {
+      throw new MaxConcurrentSubagentsError(String(parentSessionId), running, maxConcurrent)
+    }
+  }
+
+  // G1：消息方向（父→子 / 子→父）都进同一 hop 计数器（threadId = subagent_id 派生）。
+  // 注意：包装必须 async——原 seam 方法为异步契约（调用方 await），同步 throw 会绕过
+  // 调用方的 rejected-promise 处理路径；同步错误在此转为 rejected promise。
+  seam.followup = async (parent, childId, content, opts) => {
+    assertHop(String(childId))
+    return originals.followup.apply(seam, [parent, childId, content, opts])
+  }
+  seam.reportFrom = async (child, content, opts) => {
+    assertHop(String(child?.id ?? child?.session?.id ?? ''))
+    return originals.reportFrom.apply(seam, [child, content, opts])
+  }
+  // G3：两个委派入口（one-shot start / continuable startContinuable）都限并发。
+  seam.start = async (name, request) => {
+    await assertUnderLimit(request.parent)
+    return originals.start.apply(seam, [name, request])
+  }
+  seam.startContinuable = async (spec) => {
+    await assertUnderLimit(spec.request.parent)
+    return originals.startContinuable.apply(seam, [spec])
+  }
+
+  // G1：新子代理激活（subagent/start）→ 线程预算重置；结算（subagent/end）→ 清理。
+  const detachEvents: Array<() => void> = []
+  if (events) {
+    detachEvents.push(events.on('subagent/start', (info) => hopCounter.reset(String(info.id))))
+    detachEvents.push(events.on('subagent/end', (info) => hopCounter.clear(String(info.id))))
+  }
+
+  const sendToAgent = makeSendToAgent(seam, options.isRootSession)
+
+  const dispose = (): void => {
+    guardedSeams.delete(seam as object)
+    seam.followup = originals.followup
+    seam.reportFrom = originals.reportFrom
+    seam.start = originals.start
+    seam.startContinuable = originals.startContinuable
+    for (const detach of detachEvents.splice(0)) detach()
+  }
+
+  return { seam, sendToAgent, dispose }
+}

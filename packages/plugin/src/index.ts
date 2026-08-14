@@ -13,6 +13,7 @@ import * as activity from './activity/index.ts'
 import * as media from './media/index.ts'
 import * as file from './file/index.ts'
 import * as todo from './todo/index.ts'
+import * as subagents from './subagents/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -43,6 +44,8 @@ export interface Config {
   file: file.Config
   /** Todo domain: incremental todo_update adapter (C3). */
   todo: todo.Config
+  /** Subagents thin adapter (C1): hop circuit breaker / addressing / maxConcurrent guards. */
+  subagents: subagents.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -59,6 +62,7 @@ export const Config: z<Config> = z.object({
   media: media.Config,
   file: file.Config,
   todo: todo.Config,
+  subagents: subagents.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -84,4 +88,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(file, { ...config.file })
   // Todo domain: Config has no dataRoot (no persistence under the plugin root).
   ctx.plugin(todo, { ...config.todo })
+  // Subagents thin adapter (C1): guards installed over the DSH `ctx.subagents` seam
+  // (inject waits for `agents` + `subagents` services; absent seam degrades to a warn).
+  ctx.plugin(subagents, { ...config.subagents })
 }
