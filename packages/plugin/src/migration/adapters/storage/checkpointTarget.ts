@@ -144,6 +144,36 @@ async function readLegacyCheckpointForChain(
   return parsed.corrupt ? null : parsed
 }
 
+/**
+ * resolvePathInsideRoot 的不跟随实现（H2）：逐段 lstat，拒绝任何符号链接。
+ * 防止 manifest 声明的 scoped 路径经 symlink 读取源目录之外的文件/环链；
+ * 路径越界（`..`/绝对路径）仍由 resolvePathInsideRoot 拒绝。
+ * 语义与 checkpoints 域 resolveSafePathInsideRoot 等价，在 migration 内实现
+ * （避免跨域实现细节耦合）。
+ */
+async function resolvePathInsideRootNoSymlink(rootPath: string, relativePath: string): Promise<string> {
+  const normalized = normalizeSafeCheckpointPath(relativePath)
+  const target = resolvePathInsideRoot(rootPath, normalized)
+  let current = path.resolve(rootPath)
+  for (const segment of normalized.split('/')) {
+    current = path.join(current, segment)
+    let st
+    try {
+      st = await fs.lstat(current)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // 段缺失：交由调用方 lstat 处理（备份文件缺失 / 增量链回溯）
+        break
+      }
+      throw err
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(`checkpoint 路径含符号链接，拒绝读取: ${relativePath}`)
+    }
+  }
+  return target
+}
+
 export function createCheckpointTargetWriter(options: { dataRoot: string }): TargetWriterPort {
   return {
     kind: 'checkpoints',
@@ -183,6 +213,17 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
       const manifests = new CheckpointManifestRepository(workspaceDir)
       await blobs.initialize()
 
+      // 引用计数幂等（H1b）：manifest 已存在 ⟹ 此前某次 write 已完整执行
+      // writeManifest → incrementRefs。ledger.put 失败后重跑时不再重复累加
+      // blob 引用（blobRefs 以 manifests 为权威源，缺失可由 GC 调和自愈）。
+      // 损坏 manifest 按不存在处理（writeManifest 原子写失败 ⇒ refs 未增）。
+      let manifestAlreadyExists = false
+      try {
+        manifestAlreadyExists = (await manifests.loadManifest(parsed.checkpointId)) !== null
+      } catch {
+        manifestAlreadyExists = false
+      }
+
       const opId = `migrate-${input.runId}`
       const files: Record<string, CheckpointManifestFileEntry> = {}
       const hashes: string[] = []
@@ -208,15 +249,15 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
         const scopedPath = safeRelative.startsWith(`${workspaceId}/`) ? safeRelative : `${workspaceId}/${safeRelative}`
         let srcPath: string
         try {
-          srcPath = resolvePathInsideRoot(backupDir, scopedPath)
-        } catch {
+          srcPath = await resolvePathInsideRootNoSymlink(backupDir, scopedPath)
+        } catch (err) {
           skippedFiles += 1
-          notes.push(`路径越界跳过: ${scopedKey}`)
+          notes.push(`路径越界/符号链接跳过: ${scopedKey} — ${(err as Error).message}`)
           continue
         }
         let stat
         try {
-          stat = await fs.stat(srcPath)
+          stat = await fs.lstat(srcPath)
         } catch {
           // 本目录无物理文件：若条目带 backupSourceCheckpointId，沿增量链跨目录回溯
           if (!entry.backupSourceCheckpointId) {
@@ -237,17 +278,17 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
             continue
           }
           try {
-            srcPath = resolvePathInsideRoot(
+            srcPath = await resolvePathInsideRootNoSymlink(
               path.join(input.sourceDir, 'checkpoints', resolved.sourceCheckpointId),
               resolved.sourceKey,
             )
-          } catch {
+          } catch (err) {
             skippedFiles += 1
-            notes.push(`路径越界跳过（增量链）: ${scopedKey}`)
+            notes.push(`路径越界/符号链接跳过（增量链）: ${scopedKey} — ${(err as Error).message}`)
             continue
           }
           try {
-            stat = await fs.stat(srcPath)
+            stat = await fs.lstat(srcPath)
           } catch {
             skippedFiles += 1
             notes.push(`增量链回溯失败（物理文件缺失）: ${scopedKey} @ ${resolved.sourceCheckpointId}`)
@@ -262,8 +303,7 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
           skippedFiles += 1
           notes.push(`非普通文件跳过: ${scopedKey}`)
           continue
-        }
-        try {
+        }        try {
           const expectedHash = SHA256_RE.test(entry.hash) ? entry.hash : undefined
           const result = await blobs.stageAndCommit(opId, srcPath, expectedHash, entry.size)
           files[scopedPath] = { hash: result.hash, size: result.size, mode: stat.mode }
@@ -295,7 +335,10 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
         ...(parsed.partial === true ? { partial: true } : {}),
       }
       await manifests.writeManifest(parsed.checkpointId, manifest)
-      await blobs.incrementRefs(hashes)
+      // H1b：首次写入才累加引用；重跑（manifest 已存在）不重复 incrementRefs
+      if (!manifestAlreadyExists) {
+        await blobs.incrementRefs(hashes)
+      }
 
       notes.push(
         `blob 数: ${hashes.length}（复用由 BlobStore 判定）；备份文件缺失跳过: ${skippedFiles}；增量链回溯: ${chainResolvedFiles}`,

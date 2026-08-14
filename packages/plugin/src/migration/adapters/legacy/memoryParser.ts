@@ -80,6 +80,10 @@ export function parseMemoryLog(buf: Buffer): ParsedMemoryLog {
 
 /** 解析 TREE/<blockSize> 摘要文件（每条 TREE_REC 字节；损坏行跳过） */
 export function parseMemoryTree(buf: Buffer, blockSize: number): ParsedMemoryTree {
+  // M7 兜底：非法块大小（非整数/0/负数）返回空摘要，绝不产出 lo=hi 幻影块
+  if (!Number.isInteger(blockSize) || blockSize < 1) {
+    return { blockSize, summaries: [] }
+  }
   const raw = parseRecords(buf, TREE_REC)
   const summaries = raw.map((entry, slot) => ({
     ...entry,

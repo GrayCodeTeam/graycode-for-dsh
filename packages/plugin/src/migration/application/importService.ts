@@ -32,6 +32,8 @@ import {
   type TargetDomain,
   type VerifyResult,
 } from '../domain/types.ts'
+import * as fs from 'fs/promises'
+import * as path from 'path'
 import type {
   ImportServiceDeps,
   PlanOutput,
@@ -48,6 +50,14 @@ export interface ScanResult {
 export interface ImportServiceOptions {
   runIdFactory?: () => string
   now?: () => string
+  /** apply 跨进程文件锁路径（<dataRoot>/migration/.locks/apply.lock）；缺省 = 不加文件锁 */
+  lockFile?: string
+  /** 锁获取总超时（毫秒；缺省 5 分钟） */
+  lockTimeoutMs?: number
+  /** 锁轮询间隔（毫秒；缺省 100） */
+  lockPollMs?: number
+  /** 陈旧锁判定（毫秒；缺省 60 秒） */
+  lockStaleMs?: number
 }
 
 const WRITE_STEPS: readonly TargetDomain[] = DOMAIN_ORDER
@@ -70,15 +80,17 @@ export class LegacyImportService {
 
   // ─── 用例 1：scan（dry-run） ─────────────────────────
 
-  async scan(sourceDir: string): Promise<ScanResult> {
-    const { run, report } = await this.scanWithPlan(sourceDir)
+  async scan(sourceDir: string, options: { signal?: AbortSignal } = {}): Promise<ScanResult> {
+    const { run, report } = await this.scanWithPlan(sourceDir, options.signal)
     return { run, report }
   }
 
   /** scan 内部实现：额外返回完整计划（含 data 负载，apply 消费） */
   private async scanWithPlan(
     sourceDir: string,
+    signal?: AbortSignal,
   ): Promise<{ run: ImportRun; report: MigrationReport; plan: PlanOutput }> {
+    this.assertNotCancelled(signal)
     let run = createImportRun({
       id: this.runId(),
       sourceDir,
@@ -114,6 +126,7 @@ export class LegacyImportService {
       sourceCount: inventory.entries.length,
       targetCount: 0,
     })
+    this.assertNotCancelled(signal)
 
     // Validate（版本/路径/完整性；单对象损坏隔离）
     run = updateStep(run, 'validate', { status: 'running' })
@@ -124,9 +137,11 @@ export class LegacyImportService {
       sourceCount: validated.length,
       targetCount: validCount,
     })
+    this.assertNotCancelled(signal)
 
     // Plan（workspace/冲突映射）
     run = updateStep(run, 'plan', { status: 'running' })
+    this.assertNotCancelled(signal)
     const ledger = await this.deps.ledger.getAll()
     const plan = await this.deps.planner.plan({ inventory, validated, ledger })
     run = updateStep(run, 'plan', {
@@ -135,6 +150,7 @@ export class LegacyImportService {
       targetCount: plan.objects.filter(o => o.outcome === 'import').length,
     })
     run = transitionImportRun(run, { type: 'plan-complete' })
+    this.assertNotCancelled(signal)
     await this.deps.runStore.save(run)
 
     return { run, report: this.buildReport(sourceDir, run, plan, validated), plan }
@@ -142,14 +158,26 @@ export class LegacyImportService {
 
   // ─── 用例 2：apply（二次确认 + 逐域提交点） ─────────────────────────
 
-  async apply(sourceDir: string, confirmToken: string): Promise<ScanResult> {
-    const { run: plannedRun, report: scanReport, plan } = await this.scanWithPlan(sourceDir)
+  async apply(sourceDir: string, confirmToken: string, options: { signal?: AbortSignal } = {}): Promise<ScanResult> {
+    this.assertNotCancelled(options.signal)
+    // H1c：apply 全程持跨进程文件锁（防并发 apply 重复写目标）；finally 保证释放
+    const release = await this.acquireApplyLock(options.signal)
+    try {
+      return await this.applyInner(sourceDir, confirmToken, options.signal)
+    } finally {
+      await release()
+    }
+  }
+
+  private async applyInner(sourceDir: string, confirmToken: string, signal?: AbortSignal): Promise<ScanResult> {
+    const { run: plannedRun, report: scanReport, plan } = await this.scanWithPlan(sourceDir, signal)
     if (scanReport.planToken !== confirmToken) {
       throw new MigrationError(
         MIGRATION_ERROR_CODES.CONFIRM_TOKEN_MISMATCH,
         'confirmToken 与最近一次 scan 的 planToken 不一致：请先运行 migration_scan 审阅 dry-run 报告，再原样传入其 planToken。',
       )
     }
+    this.assertNotCancelled(signal)
 
     let run = transitionImportRun(plannedRun, { type: 'apply-begin' })
     run = appendNote(run, `apply 开始（confirmToken 校验通过，${this.now()}）`)
@@ -195,6 +223,7 @@ export class LegacyImportService {
           continue
         }
         // outcome === 'import'（含 disabled-draft 对象：以草稿形态导入）
+        this.assertNotCancelled(signal)
         try {
           const result = await writer.write({ runId: run.id, object: obj, sourceDir })
           const entry: LedgerEntry = {
@@ -235,7 +264,7 @@ export class LegacyImportService {
     run = updateStep(run, 'verify', { status: 'running' })
     let verify: VerifyResult
     try {
-      verify = await this.verify(sourceDir)
+      verify = await this.verify(sourceDir, signal)
     } catch (err) {
       verify = { ok: false, checked: 0, mismatches: 0, missingTargets: 0, issues: [(err as Error).message] }
     }
@@ -249,6 +278,7 @@ export class LegacyImportService {
     const outcome = deriveApplyOutcome(run)
     run = transitionImportRun(run, { type: 'apply-finish', outcome })
     run = appendNote(run, `apply 结束：${outcome}（${this.now()}）`)
+    this.assertNotCancelled(signal)
     await this.deps.runStore.save(run)
 
     const report: MigrationReport = {
@@ -261,7 +291,8 @@ export class LegacyImportService {
 
   // ─── 用例 3：verify ─────────────────────────
 
-  async verify(sourceDir: string): Promise<VerifyResult> {
+  async verify(sourceDir: string, signal?: AbortSignal): Promise<VerifyResult> {
+    this.assertNotCancelled(signal)
     const ledger = await this.deps.ledger.getAll()
     if (ledger.length === 0) {
       return { ok: true, checked: 0, mismatches: 0, missingTargets: 0, issues: ['台账为空（尚无导入记录）'] }
@@ -319,6 +350,110 @@ export class LegacyImportService {
 
   async rerun(sourceDir: string, confirmToken: string): Promise<ScanResult> {
     return this.apply(sourceDir, confirmToken)
+  }
+
+  // ─── 跨进程文件锁（H1c） ─────────────────────────
+
+  /**
+   * apply 全程文件锁：`wx` 原子创建锁文件即持有（跨进程互斥）；
+   * 陈旧锁检测（createdAt/mtime 超时即打破）+ 获取超时 + 取消支持。
+   * 未配置 lockFile 时返回空 release（不加锁）。
+   */
+  private async acquireApplyLock(signal?: AbortSignal): Promise<() => Promise<void>> {
+    const lockFile = this.options.lockFile
+    if (!lockFile) return async () => {}
+    const timeoutMs = this.options.lockTimeoutMs ?? 5 * 60 * 1000
+    const pollMs = this.options.lockPollMs ?? 100
+    const staleMs = this.options.lockStaleMs ?? 60 * 1000
+    await fs.mkdir(path.dirname(lockFile), { recursive: true })
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      this.assertNotCancelled(signal)
+      let handle
+      try {
+        handle = await fs.open(lockFile, 'wx')
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code === 'EEXIST') {
+          if (await this.tryBreakStaleApplyLock(lockFile, staleMs)) continue
+        } else if (code !== 'EPERM' && code !== 'EACCES' && code !== 'ENOENT') {
+          throw err
+        }
+        if (Date.now() >= deadline) {
+          throw new MigrationError(
+            MIGRATION_ERROR_CODES.LOCK_TIMEOUT,
+            `等待迁移 apply 文件锁超时（${timeoutMs}ms，另一进程/实例正在 apply）: ${lockFile}`,
+          )
+        }
+        await this.sleep(pollMs, signal)
+        continue
+      }
+      try {
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`, 'utf-8')
+      } catch {
+        await handle.close().catch(() => {})
+        await fs.unlink(lockFile).catch(() => {})
+        continue
+      }
+      let released = false
+      return async () => {
+        if (released) return
+        released = true
+        // Windows：先 close 句柄再 unlink（句柄未释放时 unlink 可能 EPERM）
+        await handle.close().catch(() => {})
+        await fs.unlink(lockFile).catch(() => {})
+      }
+    }
+  }
+
+  /** 陈旧锁检测与打破（createdAt 元数据优先，缺失回退 mtime） */
+  private async tryBreakStaleApplyLock(lockFile: string, staleMs: number): Promise<boolean> {
+    let stale = false
+    try {
+      const raw = await fs.readFile(lockFile, 'utf-8')
+      const parsed = JSON.parse(raw) as { createdAt?: number }
+      if (typeof parsed.createdAt === 'number') {
+        stale = Date.now() - parsed.createdAt > staleMs
+      } else {
+        const stat = await fs.stat(lockFile)
+        stale = Date.now() - stat.mtimeMs > staleMs
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true
+      return false
+    }
+    if (!stale) return false
+    try {
+      await fs.unlink(lockFile)
+      return true
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT'
+    }
+  }
+
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise(resolve => {
+      if (signal?.aborted) {
+        resolve()
+        return
+      }
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }, ms)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  /** M4：exec.signal 取消检查（scan/apply 各阶段与每个对象写入前） */
+  private assertNotCancelled(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw new MigrationError(MIGRATION_ERROR_CODES.OPERATION_CANCELLED, 'migration 操作已取消（exec.signal aborted）')
+    }
   }
 
   // ─── 报告构造 ─────────────────────────

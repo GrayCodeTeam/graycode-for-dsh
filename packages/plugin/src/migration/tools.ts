@@ -115,17 +115,18 @@ export function createMigrationTools(
     name: 'migration_scan',
     description:
       '扫描旧 Gray Code 1.5.4 数据目录（dry-run）：清单 → 校验 → 计划 → 报告。' +
-      '绝不写盘、不修改源目录。返回人类可读 Markdown 与机器可读 JSON（凭据已脱敏），' +
+      '不修改源目录（源目录只读；审计 run 记录写入 DSH 数据根 <dataRoot>/migration/runs，' +
+      '供追溯）。返回人类可读 Markdown 与机器可读 JSON（凭据已脱敏），' +
       '并附 planToken 供 migration_apply 二次确认。apply 前必须先运行本工具审计报告。',
     parameters: scanParameters,
     output: {
       schema: outputSchema,
       render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       assertReaderAllowed(options, 'migration_scan')
       const { sourceDir } = args as ScanArgs
-      const { report } = await service.scan(sourceDir)
+      const { report } = await service.scan(sourceDir, { signal: exec.signal })
       return toToolResult(report)
     },
   })
@@ -136,16 +137,17 @@ export function createMigrationTools(
       '把旧 Gray Code 数据目录导入 DSH（需 confirmToken 二次确认）。' +
       '按域提交点逐域提交（conversations → checkpoints → memory → settings），' +
       '每域完成后记录提交点；幂等：同输入重复 apply 第二次全部 already-imported，' +
-      '不生成副本。源目录只读。凭据不迁移（settings 生成建议配置 + 重新录入清单）。',
+      '不生成副本。源目录只读。凭据不迁移（settings 生成建议配置 + 重新录入清单）。' +
+      'apply 全程持跨进程文件锁，并发 apply 会等待或超时。',
     parameters: applyParameters,
     output: {
       schema: outputSchema,
       render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       assertReaderAllowed(options, 'migration_apply')
       const { sourceDir, confirmToken } = args as ApplyArgs
-      const { report } = await service.apply(sourceDir, confirmToken)
+      const { report } = await service.apply(sourceDir, confirmToken, { signal: exec.signal })
       return toToolResult(report)
     },
   })

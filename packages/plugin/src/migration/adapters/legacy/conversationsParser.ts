@@ -15,6 +15,12 @@
 
 import { MIGRATION_ERROR_CODES } from '../../domain/types.ts'
 
+/** segmented 输入规模上限（M3）：超限按对象级 error 隔离（HISTORY_LIMIT_EXCEEDED） */
+export const MAX_SEGMENTED_SEGMENTS = 10_000
+export const MAX_SEGMENTED_TOTAL_MESSAGES = 1_000_000
+/** 段内单行 JSON 上限（10MB）：超限按记录级跳过（与损坏行同口径，不中断会话） */
+export const MAX_SEGMENT_LINE_BYTES = 10 * 1024 * 1024
+
 export interface ParsedSubAgent {
   runId: string
   valid: boolean
@@ -107,7 +113,15 @@ export function parseSegmentedHistory(
     if (segments.length === 0) {
       return { valid: false, history: [], errorCode: MIGRATION_ERROR_CODES.INDEX_INCONSISTENT }
     }
+    if (segments.length > MAX_SEGMENTED_SEGMENTS) {
+      // M3：段数量超限 → 会话级 error（对象级隔离），不整体崩溃
+      return { valid: false, history: [], errorCode: MIGRATION_ERROR_CODES.HISTORY_LIMIT_EXCEEDED }
+    }
     const total = typeof index.totalMessages === 'number' ? index.totalMessages : -1
+    if (total > MAX_SEGMENTED_TOTAL_MESSAGES) {
+      // M3：totalMessages 超限 → 会话级 error（对象级隔离）
+      return { valid: false, history: [], errorCode: MIGRATION_ERROR_CODES.HISTORY_LIMIT_EXCEEDED }
+    }
     let sum = 0
     let expectStart = 0
     for (const segment of segments) {
@@ -130,6 +144,7 @@ export function parseSegmentedHistory(
     }
 
     const history: unknown[] = []
+    let skippedOversizedLines = 0
     for (const segment of segments) {
       let content: string
       try {
@@ -141,6 +156,11 @@ export function parseSegmentedHistory(
       for (const line of content.split('\n')) {
         const trimmed = line.trim()
         if (!trimmed) continue
+        if (Buffer.byteLength(trimmed, 'utf-8') > MAX_SEGMENT_LINE_BYTES) {
+          // M3：单行超限按记录级跳过（与损坏行同口径），不中断会话
+          skippedOversizedLines += 1
+          continue
+        }
         try {
           history.push(JSON.parse(trimmed))
         } catch {

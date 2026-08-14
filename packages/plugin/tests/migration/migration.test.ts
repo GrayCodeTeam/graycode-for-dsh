@@ -23,6 +23,7 @@ import { createCheckpointTargetWriter } from '../../src/migration/adapters/stora
 import { createSettingsTargetWriter } from '../../src/migration/adapters/storage/settingsTarget.ts'
 import { createConversationTargetWriter } from '../../src/migration/adapters/storage/conversationTarget.ts'
 import { createNoopWriter } from '../../src/migration/adapters/storage/noopTarget.ts'
+import type { SettingsProviderLike } from '../../src/migration/adapters/storage/settingsTarget.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import { renderMarkdownReport } from '../../src/migration/domain/report.ts'
 
@@ -120,7 +121,22 @@ function makeLegacyRoot(options: SampleOptions = {}): string {
           proxy: { host: '127.0.0.1' },
         },
         channelConfigs: [
-          { id: 'ch-gemini', type: 'gemini', name: 'Gemini', apiKey, model: 'gemini-2.5-flash' },
+          {
+            id: 'ch-gemini',
+            type: 'gemini',
+            name: 'Gemini',
+            apiKey,
+            model: 'gemini-2.5-flash',
+            url: 'https://example.invalid/v1',
+            timeout: 120000,
+            retryEnabled: true,
+            retryCount: 3,
+            retryInterval: 2000,
+            toolMode: 'function_call',
+            models: [{ id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1048576, maxOutputTokens: 8192 }],
+            options: { stream: true, temperature: 0.7 },
+            optionsEnabled: { temperature: true },
+          },
           { id: 'ch-custom', type: 'ollama', name: 'Ollama', apiKey: '', model: 'llama3' },
         ],
         mcpServers: [
@@ -379,11 +395,16 @@ describe('settings 脱敏', () => {
         disabledDraftChannels: string[]
         deduplicatedSkills: number
         machineKeysSkipped: string[]
+        unmigratedChannelFields?: Record<string, string[]>
       }
       expect(summary.credentialReentryRequired).toContain('ch-gemini')
       expect(summary.credentialReentryRequired).toContain('mcp:mcp-demo')
       // ollama 不受支持 → disabled draft
       expect(summary.disabledDraftChannels.some(s => s.includes('ch-custom'))).toBe(true)
+      // 无 DSH 配置面等价的字段进不迁移清单（temperature/stream/toolMode）
+      expect(summary.unmigratedChannelFields?.['ch-gemini']).toEqual(
+        expect.arrayContaining(['options.temperature', 'options.stream', 'toolMode']),
+      )
       // limcode 键映射 + machine 键跳过 + skill 同名同 hash 去重
       expect(summary.machineKeysSkipped).toContain('proxy')
       expect(summary.deduplicatedSkills).toBe(1)
@@ -413,6 +434,88 @@ describe('settings 脱敏', () => {
       }
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('apply 时 settings 直写 DSH llm-pi-ai：merge 不覆盖已有 route，凭据引用生成', async () => {
+    const sourceDir = makeLegacyRoot({ withSettings: true })
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-target-'))
+    try {
+      const migrationRoot = path.join(dataRoot, 'migration')
+      const importsRoot = path.join(migrationRoot, 'imports')
+      const memoryService = new MemoryService({ dataRoot })
+      // mock ctx.settings：llm-pi-ai 已注册，用户已有 openai route
+      const providers: Record<string, unknown> = { openai: { apiKeyEnv: 'EXISTING_OPENAI_KEY' } }
+      const mutateOps: Array<{ op: string; path: string[] }> = []
+      const mockSettings: SettingsProviderLike = {
+        get(ns: string): unknown {
+          return ns === 'llm-pi-ai' ? { providers: { ...providers } } : undefined
+        },
+        async mutate(_ns, ops) {
+          for (const op of ops) {
+            mutateOps.push({ op: op.op, path: [...op.path] })
+            if (op.op === 'set' && op.path[0] === 'providers' && op.path[1] !== undefined) {
+              providers[op.path[1]] = op.value
+            }
+          }
+        },
+      }
+      const service = new LegacyImportService({
+        inventory: new DefaultInventoryReader(),
+        validator: new DefaultValidator(),
+        planner: new DefaultPlanner(),
+        writers: {
+          conversations: createConversationTargetWriter({ importsRoot }),
+          snapshots: createNoopWriter('snapshots'),
+          checkpoints: createCheckpointTargetWriter({ dataRoot }),
+          memory: createMemoryTargetWriter(memoryService),
+          settings: createSettingsTargetWriter({ importsRoot, ctx: { settings: mockSettings } }),
+        },
+        ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
+        runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
+        targetProfile: 'test-profile',
+      })
+      const scan = await service.scan(sourceDir)
+      const applied = await service.apply(sourceDir, scan.report.planToken)
+      expect(applied.run.status).toBe('complete')
+
+      // gemini 渠道 → route google 已写入（profile 只含可映射字段 + 凭据引用占位）
+      expect(providers.google).toMatchObject({
+        apiKeyEnv: 'GRAYCODE_GEMINI_CH_GEMINI_API_KEY',
+        baseURL: 'https://example.invalid/v1',
+        timeoutMs: 120000,
+        retryPolicy: { mode: 'normal', maxRetries: 3, backoff: { initialDelayMs: 2000 } },
+        models: [{ id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1048576, maxTokens: 8192 }],
+      })
+      expect(providers.google).not.toHaveProperty('api')
+      // 用户已有 openai route 未被覆盖（merge 语义）
+      expect(providers.openai).toEqual({ apiKeyEnv: 'EXISTING_OPENAI_KEY' })
+      expect(mutateOps.map(o => o.path.join('.'))).toEqual(['providers.google'])
+
+      // 审计备注携带直写信息与凭据引用
+      const notes = applied.run.notes.join('\n')
+      expect(notes).toContain('llm-pi-ai.providers')
+      expect(notes).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+
+      // 建议文件记录 dshWrite.direct 与渠道映射
+      const suggested = JSON.parse(
+        fs.readFileSync(path.join(importsRoot, applied.run.id, 'settings.suggested.json'), 'utf-8'),
+      ) as {
+        dshWrite: { mode: string; writtenRoutes: string[]; credentialRefs: string[] }
+        channels: Array<{ id: string; route?: string; credentialRef?: string; unmigratedFields?: string[] }>
+      }
+      expect(suggested.dshWrite.mode).toBe('direct')
+      expect(suggested.dshWrite.writtenRoutes.some((r: string) => r.includes('google'))).toBe(true)
+      expect(suggested.dshWrite.credentialRefs).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+      const geminiEntry = suggested.channels.find(c => c.id === 'ch-gemini')
+      expect(geminiEntry?.route).toBe('google')
+      expect(geminiEntry?.credentialRef).toBe('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
+      expect(geminiEntry?.unmigratedFields).toEqual(
+        expect.arrayContaining(['options.temperature', 'options.stream', 'toolMode']),
+      )
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(sourceDir, { recursive: true, force: true })
     }
   })
 })

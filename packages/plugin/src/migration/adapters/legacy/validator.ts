@@ -10,10 +10,11 @@
 
 import * as fs from 'fs/promises'
 import * as path from 'path'
-import { sha256Hex } from '../../domain/idempotency.ts'
+import { sha256Hex, sha256HexParts } from '../../domain/idempotency.ts'
 import type { ValidatePort, ValidatedObject } from '../../application/ports.ts'
 import type { InventoryEntry } from '../../application/ports.ts'
 import { MIGRATION_ERROR_CODES, type ObjectType } from '../../domain/types.ts'
+import { MAX_SOURCE_FILE_BYTES } from './inventory.ts'
 import {
   parseConversationMeta,
   parseLegacyHistory,
@@ -26,7 +27,18 @@ import { parseLegacyCheckpointManifest } from './checkpointManifestParser.ts'
 import { parseMemoryLog, parseMemoryTree, parseMemoryScope } from './memoryParser.ts'
 import { parseSettingsExport } from './settingsParser.ts'
 
+export interface DefaultValidatorOptions {
+  /** 单文件读取规模上限（M3；测试可注入小值） */
+  maxFileBytes?: number
+}
+
 export class DefaultValidator implements ValidatePort {
+  private readonly maxFileBytes: number
+
+  constructor(options: DefaultValidatorOptions = {}) {
+    this.maxFileBytes = options.maxFileBytes ?? MAX_SOURCE_FILE_BYTES
+  }
+
   async validateAll(sourceDir: string, entries: readonly InventoryEntry[]): Promise<ValidatedObject[]> {
     const out: ValidatedObject[] = []
     for (const entry of entries) {
@@ -38,33 +50,43 @@ export class DefaultValidator implements ValidatePort {
   private async validateOne(sourceDir: string, entry: InventoryEntry): Promise<ValidatedObject> {
     const base = { objectType: entry.objectType, legacyId: entry.legacyId, sourceHash: '' }
 
-    // 读取构成文件（确定性顺序：文件路径排序）；缺失 → 对象级错误
+    // 读取构成文件（确定性顺序：文件路径排序）；缺失/超限 → 对象级错误（M3）
     const contents = new Map<string, Buffer>()
     const readFailures: string[] = []
+    const overLimit: string[] = []
     for (const rel of entry.files) {
       try {
-        const buf = await fs.readFile(path.join(sourceDir, ...rel.split('/')))
+        const abs = path.join(sourceDir, ...rel.split('/'))
+        const st = await fs.stat(abs)
+        if (st.size > this.maxFileBytes) {
+          overLimit.push(rel)
+          continue
+        }
+        const buf = await fs.readFile(abs)
         contents.set(rel, buf)
       } catch {
         readFailures.push(rel)
       }
     }
-    if (readFailures.length > 0) {
+    if (readFailures.length > 0 || overLimit.length > 0) {
       return {
         ...base,
-        sourceHash: sha256Hex(`missing:${readFailures.join(',')}`),
+        sourceHash: sha256Hex(`missing:${[...readFailures, ...overLimit].join(',')}`),
         valid: false,
-        errorCode: MIGRATION_ERROR_CODES.SOURCE_READ_ERROR,
-        errorMessage: `源文件读取失败: ${readFailures.join(', ')}`,
+        errorCode: overLimit.length > 0 ? MIGRATION_ERROR_CODES.FILE_TOO_LARGE : MIGRATION_ERROR_CODES.SOURCE_READ_ERROR,
+        errorMessage:
+          overLimit.length > 0
+            ? `源文件超过 ${this.maxFileBytes} 字节上限: ${overLimit.join(', ')}`
+            : `源文件读取失败: ${readFailures.join(', ')}`,
       }
     }
 
-    // 对象内容哈希：按文件路径排序拼接（路径前缀 + 内容）
-    const hash = sha256Hex(
+    // 对象内容哈希：按文件路径排序拼接（路径前缀 + 原始字节，M2：二进制不经过
+    // utf-8 有损转换，直接喂 sha256 流）
+    const hash = sha256HexParts(
       [...contents.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([rel, buf]) => `\n--- ${rel} ---\n${buf.toString('utf-8')}`)
-        .join(''),
+        .flatMap(([rel, buf]) => [`\n--- ${rel} ---\n`, buf]),
     )
 
     switch (entry.objectType) {
@@ -164,11 +186,20 @@ export class DefaultValidator implements ValidatePort {
     const subagents = entry.files
       .filter(f => f.includes('/subagents/') && f.endsWith('.json'))
       .map(f => {
+        // M1：文件名可能是非法百分号编码（URIError 单点崩溃）——隔离为 valid:false
+        let runId = ''
+        let runIdError: string | undefined
+        try {
+          runId = decodeURIComponent(path.basename(f).replace(/\.json$/, ''))
+        } catch {
+          runIdError = 'runId 文件名非法百分号编码'
+        }
         const parsed = parseSubAgentTranscript(contents.get(f)?.toString('utf-8') ?? '')
         return {
-          runId: decodeURIComponent(path.basename(f).replace(/\.json$/, '')),
-          valid: parsed.valid,
+          runId,
+          valid: parsed.valid && runIdError === undefined,
           contents: parsed.contents,
+          ...(runIdError ? { errorMessage: runIdError } : {}),
         }
       })
     const branchesRel = entry.files.find(f => f.endsWith('/branches.json'))
@@ -273,11 +304,18 @@ export class DefaultValidator implements ValidatePort {
   ): ValidatedObject {
     const logRel = entry.files.find(f => f.endsWith('/LOG.txt'))
     const log = parseMemoryLog(logRel ? (contents.get(logRel) ?? Buffer.alloc(0)) : Buffer.alloc(0))
+    // M7：TREE 块大小必须为 ≥1 的 2 的幂（文件名 = 块大小）；非法（0/NaN/非 2 幂）
+    // 跳过该文件并记 issue，避免 blockSize=0 → lo=hi=0 的幻影摘要块。
+    const treeIssues: string[] = []
     const tree = entry.files
       .filter(f => f.includes('/TREE/'))
-      .map(f => {
+      .flatMap(f => {
         const blockSize = Number.parseInt(path.basename(f), 10)
-        return parseMemoryTree(contents.get(f) ?? Buffer.alloc(0), Number.isFinite(blockSize) ? blockSize : 0)
+        if (!Number.isInteger(blockSize) || blockSize < 1 || (blockSize & (blockSize - 1)) !== 0) {
+          treeIssues.push(`TREE 块大小非法（需为 ≥1 的 2 的幂，实际 ${path.basename(f)}），跳过: ${f}`)
+          return []
+        }
+        return [parseMemoryTree(contents.get(f) ?? Buffer.alloc(0), blockSize)]
       })
 
     if (scope === 'global') {
@@ -291,6 +329,7 @@ export class DefaultValidator implements ValidatePort {
           logFormat: log.format,
           entries: log.entries,
           tree,
+          treeIssues,
           configText: entry.files.includes('memory/config')
             ? contents.get('memory/config')?.toString('utf-8') ?? ''
             : undefined,
@@ -313,6 +352,7 @@ export class DefaultValidator implements ValidatePort {
         logFormat: log.format,
         entries: log.entries,
         tree,
+        treeIssues,
       },
     }
   }

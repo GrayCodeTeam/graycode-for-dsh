@@ -15,6 +15,19 @@ export function sha256Hex(input: string | Uint8Array): string {
   return createHash('sha256').update(input).digest('hex')
 }
 
+/**
+ * 多段拼接 sha256 hex：直接按原始字节喂哈希流（不做字符串编码转换）。
+ * 用于对象内容哈希——二进制文件（如含非法 UTF-8 字节的 memory LOG）必须按
+ * 原始字节参与哈希，任何 toString('utf-8') 都是有损转换（M2）。
+ */
+export function sha256HexParts(parts: ReadonlyArray<string | Uint8Array>): string {
+  const hash = createHash('sha256')
+  for (const part of parts) {
+    hash.update(part)
+  }
+  return hash.digest('hex')
+}
+
 /** 幂等键：sourceFingerprint + objectType + legacyId（§7.2.5） */
 export function buildIdempotencyKey(
   sourceFingerprint: string,
