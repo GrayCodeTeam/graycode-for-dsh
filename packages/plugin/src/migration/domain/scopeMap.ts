@@ -15,7 +15,7 @@
  * （migration 错误码 MEMORY_SCOPE_INVALID）。
  *
  * D-4a / D-5b 决策也落在这里（报告事实派生）：
- * - conversation workspaceUri 无法派生 DSH cwd（远程/非 file:// URI）→
+ * - conversation workspaceUri 无法识别为本地绝对路径（远程/非 file:// URI）→
  *   接受降级（cwd 省略、原值随附 artifact），报告汇总不可派生清单；
  * - 会话侧 custom.checkpoints 存档记录 → 报告列出「会话历史存档点清单」
  *   （DSH 侧 checkpoint 与会话无外键，清单供用户检索）。
@@ -101,11 +101,20 @@ export type ResolvedScopeOverride =
 
 /**
  * 从 legacy workspaceUri（file:// 形式）派生 DSH header.cwd（绝对路径）。
- * 仅在派生结果是 POSIX 或 Windows 绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
+ * 仅在派生结果对当前宿主是绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
  * undefined（调用方省略 cwd，避免单个坏 URI 使整个会话创建失败）。
- * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（与当前宿主无关）。
+ * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（Windows 宿主）。
  */
 export function deriveWorkspaceUriCwd(uri: string | undefined): string | undefined {
+  const candidate = deriveWorkspaceUriPath(uri)
+  return candidate !== undefined && path.isAbsolute(candidate) ? candidate : undefined
+}
+
+/**
+ * 解码本地 file workspace URI，并按 URI 自身语法接受 POSIX/Windows 绝对路径。
+ * 报告层用它区分“异平台但有效”和“确实无法映射”的旧工作区标识。
+ */
+function deriveWorkspaceUriPath(uri: string | undefined): string | undefined {
   if (!uri || !uri.startsWith('file://')) return undefined
   let decoded: string
   try {
@@ -168,7 +177,7 @@ export interface ConversationCwdIssue {
 }
 
 /**
- * 收集 workspaceUri 存在但 `deriveWorkspaceUriCwd` 无法派生的会话
+ * 收集 workspaceUri 存在但无法识别为本地绝对路径的会话
  * （vscode-remote:// 等远程标识、损坏 URI）。这些会话迁移后无 header cwd，
  * 原 URI 只随附 artifact——报告透明化列出，供用户知晓归属缺失。
  */
@@ -179,7 +188,7 @@ export function buildConversationCwdIssues(objects: readonly PlannedObject[]): C
     const data = obj.data as { workspaceUri?: unknown } | undefined
     const uri = data?.workspaceUri
     if (typeof uri !== 'string' || uri.length === 0) continue
-    if (deriveWorkspaceUriCwd(uri) !== undefined) continue
+    if (deriveWorkspaceUriPath(uri) !== undefined) continue
     out.push({ legacyId: obj.legacyId, workspaceUri: uri })
   }
   return out.sort((a, b) => a.legacyId.localeCompare(b.legacyId))
