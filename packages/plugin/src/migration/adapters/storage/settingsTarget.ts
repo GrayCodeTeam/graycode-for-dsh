@@ -53,9 +53,10 @@ export interface SettingsProviderLike {
   ): Promise<void>
 }
 
-/** ctx.credentials 的结构化子集（仅 describe 用于信息性上报） */
+/** ctx.credentials 的结构化子集（describe 信息性上报 + set 凭据一键迁移 B1） */
 export interface CredentialsProviderLike {
   describe(ref: string): Promise<{ configured: boolean; writable: boolean }>
+  set(ref: string, value: string): Promise<void>
 }
 
 /** DSH 宿主上下文的结构化子集（compose.ts 注入完整 Context，结构兼容） */
@@ -82,6 +83,10 @@ export interface DshWriteOutcome {
   skippedChannels: string[]
   /** 本次生成的凭据引用（需用户在 DSH credentials 录入值） */
   credentialRefs: string[]
+  /** 凭据一键迁移（B1）：已写入 ctx.credentials 的引用（仅 ref 名，无明文） */
+  migratedCredentialRefs: string[]
+  /** 凭据迁移失败的引用（保留「需重录」状态；失败隔离，不抛出） */
+  credentialMigrationErrors?: string[]
   /** best-effort describe 结果：ref → 是否已配置（credentials 服务不可用时缺省） */
   credentialStates?: Record<string, boolean>
   rejectionMessage?: string
@@ -156,6 +161,8 @@ export function createSettingsTargetWriter(options: SettingsTargetWriterOptions)
           conflictSkippedRoutes: dsh.conflictSkippedRoutes,
           skippedChannels: dsh.skippedChannels,
           credentialRefs: dsh.credentialRefs,
+          migratedCredentialRefs: dsh.migratedCredentialRefs,
+          ...(dsh.credentialMigrationErrors ? { credentialMigrationErrors: dsh.credentialMigrationErrors } : {}),
           ...(dsh.credentialStates ? { credentialStates: dsh.credentialStates } : {}),
           ...(dsh.rejectionMessage ? { rejectionMessage: dsh.rejectionMessage } : {}),
         },
@@ -172,6 +179,20 @@ export function createSettingsTargetWriter(options: SettingsTargetWriterOptions)
       return {
         targetRef: `artifact://settings/${input.runId}/settings.suggested.json`,
         notes,
+        // B2：写时结果（脱敏）供最终报告合流到 settingsSummary.writeResult
+        summary: {
+          dshWrite: {
+            mode: dsh.mode,
+            writtenRoutes: dsh.writtenRoutes,
+            conflictSkippedRoutes: dsh.conflictSkippedRoutes,
+            skippedChannels: dsh.skippedChannels,
+            credentialRefs: dsh.credentialRefs,
+            migratedCredentialRefs: dsh.migratedCredentialRefs,
+            ...(dsh.credentialMigrationErrors ? { credentialMigrationErrors: dsh.credentialMigrationErrors } : {}),
+            ...(dsh.credentialStates ? { credentialStates: dsh.credentialStates } : {}),
+            ...(dsh.rejectionMessage ? { rejectionMessage: dsh.rejectionMessage } : {}),
+          },
+        },
       }
     },
     async probe(targetRef: string): Promise<boolean> {
@@ -202,13 +223,21 @@ async function writeDshProviders(
   const settings = ctx?.settings
   const credentialRefs = collectCredentialRefs(parsed, byChannelId)
   const credentialStates = await probeCredentialStates(ctx, credentialRefs)
+  // B1：凭据一键迁移独立于 settings 直写（授权模式 parsed.credentialSecrets 才有值；
+  // 写入失败隔离，不抛出、不影响其他域；明文只在局部变量中流转，写入后丢弃）
+  const { migratedRefs, failedRefs } = await migrateCredentials(parsed, byChannelId, ctx)
+  const migratedExtra = migratedRefs.length > 0 ? { migratedCredentialRefs: migratedRefs } : {}
+  const failedExtra = failedRefs.length > 0 ? { credentialMigrationErrors: failedRefs } : {}
   const outcomeBase = (extra: Partial<DshWriteOutcome>): DshWriteOutcome => ({
     mode: 'suggested-only',
     writtenRoutes: [],
     conflictSkippedRoutes: [],
     skippedChannels: [],
     credentialRefs,
+    migratedCredentialRefs: migratedRefs,
     ...(Object.keys(credentialStates).length > 0 ? { credentialStates } : {}),
+    ...migratedExtra,
+    ...failedExtra,
     ...extra,
   })
 
@@ -276,8 +305,44 @@ async function writeDshProviders(
     conflictSkippedRoutes,
     skippedChannels,
     credentialRefs,
+    migratedCredentialRefs: migratedRefs,
+    ...migratedExtra,
+    ...failedExtra,
     ...(Object.keys(credentialStates).length > 0 ? { credentialStates } : {}),
   }
+}
+
+/**
+ * B1：凭据一键迁移——把授权模式下解析到的渠道明文 apiKey 写入
+ * `ctx.credentials.set(ref, apiKey)`（引用名 GRAYCODE_<TYPE>_<ID>_API_KEY）。
+ * 只处理有 credentialRef 的渠道（provider 受支持且 enabled）；无 ref 的渠道
+ * （disabled/不受支持）保持「需重录」状态。单 ref 失败隔离：失败项返回清单，
+ * 不抛出、不影响其余迁移与 settings 直写。
+ */
+async function migrateCredentials(
+  parsed: ParsedSettingsExport,
+  byChannelId: ReadonlyMap<string, ChannelMappingResult>,
+  ctx: DshHostContextLike | undefined,
+): Promise<{ migratedRefs: string[]; failedRefs: string[] }> {
+  const credentials = ctx?.credentials
+  const secrets = parsed.credentialSecrets
+  if (!credentials?.set || !secrets || secrets.length === 0) {
+    return { migratedRefs: [], failedRefs: [] }
+  }
+  const migratedRefs: string[] = []
+  const failedRefs: string[] = []
+  for (const secret of secrets) {
+    const mapped = byChannelId.get(secret.channelId)
+    const ref = mapped?.credentialRef
+    if (!ref) continue // 无 route/ref（disabled/不受支持）→ 保持重录清单
+    try {
+      await credentials.set(ref, secret.apiKey)
+      migratedRefs.push(ref)
+    } catch {
+      failedRefs.push(ref)
+    }
+  }
+  return { migratedRefs, failedRefs }
 }
 
 /** best-effort：describe 每个需重录凭据的引用（失败不影响写入） */
@@ -356,7 +421,19 @@ function buildNotes(
     )
   }
   if (dsh.credentialRefs.length > 0) {
-    notes.push(`凭据引用已生成（明文 key 不迁移，请在 DSH credentials 录入值）: ${dsh.credentialRefs.join(', ')}`)
+    if (dsh.migratedCredentialRefs.length > 0) {
+      notes.push(
+        `凭据已一键迁移到 DSH credentials（引用: ${dsh.migratedCredentialRefs.join(', ')}；` +
+          '注意旧 key 可能已过期/轮换，首次调用失败时请重新录入）',
+      )
+    }
+    if (dsh.credentialMigrationErrors && dsh.credentialMigrationErrors.length > 0) {
+      notes.push(`凭据迁移失败（保留「需重录」状态）: ${dsh.credentialMigrationErrors.join(', ')}`)
+    }
+    const pending = dsh.credentialRefs.filter(ref => !dsh.migratedCredentialRefs.includes(ref))
+    if (pending.length > 0) {
+      notes.push(`凭据引用已生成（明文 key 未迁移，请在 DSH credentials 录入值）: ${pending.join(', ')}`)
+    }
   }
   const warnings = [...new Set(mapped.flatMap(m => m.warnings))]
   if (warnings.length > 0) {
