@@ -1,0 +1,234 @@
+/**
+ * Branch 工具层测试：直接调用 createBranchTools 返回的 7 个 execute（不经 ctx.tools
+ * 注册管线），以 stub exec 模拟会话上下文；服务由假适配器 + 真实临时 dataRoot 支撑。
+ */
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { BranchCoordinatorService, createBranchWorkspaceId } from '../../src/branches/service.ts'
+import type { BranchSessionAdapter } from '../../src/branches/service.ts'
+import { BranchErrorCode } from '../../src/branches/domain/types.ts'
+import type { BranchEventView } from '../../src/branches/domain/turnLocator.ts'
+import { createBranchTools } from '../../src/branches/tools.ts'
+
+const ROOT_SESSION = 'root-session'
+
+/** 构造最小事件视图；data 允许携带 content 等额外负载（领域层只读前三个字段） */
+function ev(type: string, seq: number, data: Record<string, unknown> = {}): BranchEventView {
+  return { type, seq, data } as unknown as BranchEventView
+}
+
+/** 根会话事件：两个完整轮次，turn2 的直接用户消息内容为 second question */
+function rootEvents(): BranchEventView[] {
+  return [
+    ev('turn/start', 0, { turn: 1 }),
+    ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'first question' }] }),
+    ev('turn/end', 2, { turn: 1 }),
+    ev('turn/start', 3, { turn: 2 }),
+    ev('user/message', 4, { source: { kind: 'user' }, content: [{ type: 'text', text: 'second question' }] }),
+    ev('turn/end', 5, { turn: 2 }),
+  ]
+}
+
+/** 假适配器：内存会话 + 重发消息记录（与 service.test 同款最小端口） */
+class FakeBranchSessionAdapter implements BranchSessionAdapter {
+  readonly sessions = new Map<string, { events: BranchEventView[]; cwd?: string; agentPreset?: string }>()
+  readonly sentMessages: Array<{ sessionId: string; content: readonly unknown[] }> = []
+
+  addSession(sessionId: string, events: BranchEventView[]): void {
+    this.sessions.set(sessionId, { events })
+  }
+
+  eventsOf(sessionId: string): readonly BranchEventView[] {
+    return this.sessions.get(sessionId)?.events ?? []
+  }
+
+  cwdOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.cwd
+  }
+
+  agentPresetOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agentPreset
+  }
+
+  async forkChild(input: {
+    parent: { id: string; events: readonly BranchEventView[] }
+    boundary: number | undefined
+    childSessionId: string
+    cwd?: string
+    agentPreset?: string
+  }): Promise<{ sessionId: string; agentAttached: boolean }> {
+    const seed =
+      input.boundary === undefined ? [...input.parent.events] : input.parent.events.slice(0, input.boundary + 1)
+    this.sessions.set(input.childSessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
+    return { sessionId: input.childSessionId, agentAttached: false }
+  }
+
+  async sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<void> {
+    this.sentMessages.push(input)
+  }
+}
+
+/** 工具统一返回形状（只取关心的字段） */
+interface ToolOutput extends Record<string, unknown> {
+  success: boolean
+  code?: string
+}
+
+let tmpDir: string
+let dataRoot: string
+let adapter: FakeBranchSessionAdapter
+let service: BranchCoordinatorService
+let tools: Map<string, ToolDefinition>
+let groupId: string
+
+function makeExec(): ToolRunContext {
+  return {
+    agent: { session: { id: ROOT_SESSION, header: { cwd: tmpDir } } },
+    signal: new AbortController().signal,
+  } as unknown as ToolRunContext
+}
+
+async function execute(name: string, args: Record<string, unknown>): Promise<ToolOutput> {
+  const tool = tools.get(name)!
+  return (await tool.execute(args, makeExec())) as ToolOutput
+}
+
+function groupCandidates(result: ToolOutput): Array<{ sessionId: string; deleted: boolean }> {
+  const groups = result.groups as Array<{ candidates: Array<{ sessionId: string; deleted: boolean }> }>
+  return groups[0]!.candidates
+}
+
+beforeAll(async () => {
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-ws-'))
+  dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-data-'))
+  adapter = new FakeBranchSessionAdapter()
+  adapter.addSession(ROOT_SESSION, rootEvents())
+  service = new BranchCoordinatorService({ dataRoot }, adapter)
+  await service.initialize()
+  const group = await service.ensureGroup({ workspaceId: createBranchWorkspaceId(tmpDir), rootSessionId: ROOT_SESSION })
+  groupId = group.id
+  tools = new Map(createBranchTools(service).map(tool => [tool.name, tool]))
+})
+
+afterAll(async () => {
+  service.dispose()
+  await fs.rm(tmpDir, { recursive: true, force: true })
+  await fs.rm(dataRoot, { recursive: true, force: true })
+})
+
+describe('branch tools', () => {
+  it('branch_list returns the group with its root candidate and a turn summary for the active candidate', async () => {
+    const result = await execute('branch_list', {})
+    expect(result.success).toBe(true)
+
+    const groups = result.groups as Array<{
+      groupId: string
+      workspaceId: string
+      rootSessionId: string
+      activeSessionId: string
+      revision: number
+      candidates: Array<{ sessionId: string; kind: string; deleted: boolean }>
+      turns: Array<{ turn: number; closed: boolean; userMessages: number }>
+    }>
+    expect(groups).toHaveLength(1)
+    expect(groups[0]!.groupId).toBe(groupId)
+    expect(groups[0]!.workspaceId).toBe(createBranchWorkspaceId(tmpDir))
+    expect(groups[0]!.rootSessionId).toBe(ROOT_SESSION)
+    expect(groups[0]!.activeSessionId).toBe(ROOT_SESSION)
+    expect(groups[0]!.revision).toBe(1)
+    expect(groups[0]!.candidates).toHaveLength(1)
+    expect(groups[0]!.candidates[0]).toMatchObject({ sessionId: ROOT_SESSION, kind: 'root', deleted: false })
+    expect(groups[0]!.turns).toEqual([
+      { turn: 1, closed: true, userMessages: 1 },
+      { turn: 2, closed: true, userMessages: 1 },
+    ])
+  })
+
+  it('branch_create forks the parent through the last complete turn and reports the new session', async () => {
+    const result = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'created' })
+    expect(result.success).toBe(true)
+    expect(result.sessionId).toBeTruthy()
+    expect(String(result.sessionId)).toMatch(/^branch-/)
+    expect(result.boundary).toBe(5) // 缺省边界 = 最近完整轮次末尾
+    expect(result.kind).toBe('manual')
+    expect(result.parentSessionId).toBe(ROOT_SESSION)
+    expect(result.orphan).toBe(false)
+    expect(result.agentAttached).toBe(false)
+    expect(result.revision).toBe(2)
+  })
+
+  it('branch_reroll replays the original user message into the forked session', async () => {
+    const result = await execute('branch_reroll', { sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.success).toBe(true)
+    expect(result.messageSent).toBe(true)
+    expect(result.targetTurn).toBe(2)
+    expect(result.boundary).toBe(2) // turn/start(2) seq3 - 1
+    expect(result.orphan).toBe(false)
+
+    const sent = adapter.sentMessages.find(m => m.sessionId === result.sessionId)
+    expect(sent).toBeTruthy()
+    expect(sent!.content).toEqual([{ type: 'text', text: 'second question' }])
+  })
+
+  it('branch_reroll with an unknown turn returns an error code instead of throwing', async () => {
+    const result = await execute('branch_reroll', { sessionId: ROOT_SESSION, turn: 99 })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.TARGET_TURN_NOT_FOUND)
+  })
+
+  it('branch_switch moves the active pointer to the created candidate', async () => {
+    const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'switch target' })
+    const result = await execute('branch_switch', { groupId, sessionId: created.sessionId })
+    expect(result.success).toBe(true)
+    expect(result.activeSessionId).toBe(created.sessionId)
+    expect(result.revision).toBeGreaterThan(0)
+  })
+
+  it('branch_delete tombstones a non-active candidate; branch_list reports deleted true', async () => {
+    const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'delete me' })
+    const result = await execute('branch_delete', { groupId, sessionId: created.sessionId })
+    expect(result.success).toBe(true)
+
+    const listed = await execute('branch_list', { groupId })
+    const candidate = groupCandidates(listed).find(c => c.sessionId === created.sessionId)!
+    expect(candidate.deleted).toBe(true)
+  })
+
+  it('branch_delete on the root candidate fails with GRAY_INVALID_INPUT', async () => {
+    const result = await execute('branch_delete', { groupId, sessionId: ROOT_SESSION })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.INVALID_INPUT)
+  })
+
+  it('branch_restore clears the tombstone of a deleted candidate', async () => {
+    const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'restore me' })
+    await execute('branch_delete', { groupId, sessionId: created.sessionId })
+
+    const result = await execute('branch_restore', { groupId, sessionId: created.sessionId })
+    expect(result.success).toBe(true)
+
+    const listed = await execute('branch_list', { groupId })
+    const candidate = groupCandidates(listed).find(c => c.sessionId === created.sessionId)!
+    expect(candidate.deleted).toBe(false)
+  })
+
+  it('branch_edit_retry sends the edited text into the forked session', async () => {
+    const result = await execute('branch_edit_retry', { sessionId: ROOT_SESSION, turn: 2, text: 'edited second question' })
+    expect(result.success).toBe(true)
+    expect(result.messageSent).toBe(true)
+    expect(result.targetTurn).toBe(2)
+
+    const sent = adapter.sentMessages.find(m => m.sessionId === result.sessionId)
+    expect(sent).toBeTruthy()
+    expect(sent!.content).toEqual([{ type: 'text', text: 'edited second question' }])
+  })
+
+  it('branch_list with a nonexistent group id fails with GRAY_BRANCH_GROUP_NOT_FOUND', async () => {
+    const result = await execute('branch_list', { groupId: 'no-such-group' })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('GRAY_BRANCH_GROUP_NOT_FOUND')
+  })
+})

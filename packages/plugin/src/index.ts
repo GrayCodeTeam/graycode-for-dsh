@@ -4,6 +4,9 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import * as workflows from './workflows/index.ts'
 import * as memory from './memory/index.ts'
 import * as checkpoints from './checkpoints/index.ts'
+import * as branches from './branches/index.ts'
+import * as persona from './persona.ts'
+import * as prompt from './prompt/index.ts'
 
 export const name = 'graycode'
 
@@ -18,6 +21,9 @@ export interface Config {
   workflows: workflows.Config
   memory: memory.Config
   checkpoints: checkpoints.Config
+  branches: branches.Config
+  persona: persona.Config
+  prompt: prompt.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -25,6 +31,9 @@ export const Config: z<Config> = z.object({
   workflows: workflows.Config,
   memory: memory.Config,
   checkpoints: checkpoints.Config,
+  branches: branches.Config,
+  persona: persona.Config,
+  prompt: prompt.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -32,4 +41,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(workflows, { ...config.workflows, dataRoot })
   ctx.plugin(memory, { ...config.memory, dataRoot })
   ctx.plugin(checkpoints, { ...config.checkpoints, dataRoot })
+  ctx.plugin(branches, { ...config.branches, dataRoot })
+  ctx.plugin(persona, config.persona)
+  ctx.plugin(prompt, { ...config.prompt, dataRoot })
 }

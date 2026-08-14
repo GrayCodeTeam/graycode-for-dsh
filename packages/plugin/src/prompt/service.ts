@@ -1,0 +1,548 @@
+/**
+ * GrayCode - PromptSettingsService (V2 §6.6.1 / §6.6.2)
+ *
+ * Mode CRUD (list/create/update/rename/duplicate/delete), JSON import/export,
+ * currentModeId persistence and template normalization. The store lives at
+ * `<dataRoot>/prompt/modes.json` (versioned envelope, atomic tmp+rename
+ * writes with the Windows retry pattern of memory/domain/configFile.ts).
+ *
+ * Built-in modes (code/design/plan/ask/review) seed the store on first run;
+ * they cannot be deleted or renamed (their ids are stable identity), but
+ * their templates/entries may be edited like any other mode. The store is
+ * lazy-loaded: every public method awaits the load before touching state, so
+ * the plugin may fire-and-forget construction (same contract as branches).
+ */
+
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+import {
+  BUILTIN_MODE_IDS,
+  PROMPT_MODE_STORE_VERSION,
+  PromptError,
+  PromptErrorCode,
+  type BuiltinModeId,
+  type PromptEntry,
+  type PromptEntryRole,
+  type PromptMode,
+  type PromptModeStore,
+} from './domain/promptTypes.ts'
+import { normalizeTemplate } from './domain/template.ts'
+
+export const PROMPT_STORE_FILE = 'modes.json'
+
+/** Change events emitted to subscribers (the injector re-registers on them). */
+export type PromptChangeEvent = { type: 'mode-changed' } | { type: 'modes-changed' }
+
+export interface PromptSettingsConfig {
+  /** Plugin-private data root; the store lives under `<dataRoot>/prompt/`. */
+  dataRoot: string
+}
+
+const BUILTIN_ROLE: readonly PromptEntryRole[] = ['system', 'user', 'assistant', 'chat_history']
+
+/** Default templates of the five built-in modes (English, short). */
+export const BUILTIN_MODE_TEMPLATES: Record<BuiltinModeId, string> = {
+  code: [
+    'You are in the GrayCode-DSH coding mode.',
+    'Write correct, minimal and idiomatic code that follows the workspace conventions.',
+    'Explain changes briefly unless detail is asked; use the design/progress/review tools when the workflow requires them.',
+  ].join('\n'),
+  design: [
+    'You are in the GrayCode-DSH design mode.',
+    'Start from requirements and constraints; consult the workspace design documents first, then update or create them with the design tools before implementation.',
+  ].join('\n'),
+  plan: [
+    'You are in the GrayCode-DSH planning mode.',
+    'Break the request into ordered steps with explicit prerequisites; keep the progress document current and mark risks and open decisions.',
+  ].join('\n'),
+  ask: [
+    'You are in the GrayCode-DSH ask mode.',
+    'Answer directly and truthfully; when the question touches the workspace, ground the answer in the workspace files and memory before replying.',
+  ].join('\n'),
+  review: [
+    'You are in the GrayCode-DSH review mode.',
+    'Review the given scope for correctness, security and maintainability; record findings with severity through the review tools and give a clear overall decision.',
+  ].join('\n'),
+}
+
+function createBuiltinModes(): PromptMode[] {
+  return BUILTIN_MODE_IDS.map(id => ({
+    id,
+    name: id,
+    kind: 'builtin' as const,
+    template: BUILTIN_MODE_TEMPLATES[id],
+    promptEntries: [],
+  }))
+}
+
+function newModeId(): string {
+  return `mode-${crypto.randomUUID()}`
+}
+
+function newEntryId(): string {
+  return `entry-${crypto.randomUUID()}`
+}
+
+/** Normalize one entry's text fields (content + fakeThought). */
+function normalizeEntry(entry: PromptEntry): PromptEntry {
+  return {
+    ...entry,
+    content: normalizeTemplate(entry.content),
+    fakeThought: entry.fakeThought !== undefined ? normalizeTemplate(entry.fakeThought) : undefined,
+  }
+}
+
+/** Deep-copy a mode preserving entry ids (reads / exports). */
+function deepCopyMode(mode: PromptMode): PromptMode {
+  return {
+    ...mode,
+    promptEntries: mode.promptEntries.map(entry => ({ ...entry })),
+  }
+}
+
+/** Deep-copy a mode with fresh ids for the copy (duplicate/imports). */
+function copyWithNewIds(mode: PromptMode): PromptMode {
+  return {
+    ...mode,
+    promptEntries: mode.promptEntries.map(entry => ({
+      ...entry,
+      id: newEntryId(),
+    })),
+  }
+}
+
+/** Validate + normalize one imported entry (tolerates partial shapes). */
+function parseImportedEntry(raw: unknown): PromptEntry {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new PromptError('imported promptEntries must be an array of objects', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const record = raw as Record<string, unknown>
+  const role = record.role
+  if (typeof role !== 'string' || !(BUILTIN_ROLE as readonly string[]).includes(role)) {
+    throw new PromptError(
+      `imported entry role must be one of ${BUILTIN_ROLE.join('/')}`,
+      PromptErrorCode.INVALID_PAYLOAD,
+    )
+  }
+  const content = record.content
+  if (typeof content !== 'string') {
+    throw new PromptError('imported entry content must be a string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const fakeThought = record.fakeThought
+  if (fakeThought !== undefined && typeof fakeThought !== 'string') {
+    throw new PromptError('imported entry fakeThought must be a string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const order = record.order
+  if (order !== undefined && (typeof order !== 'number' || !Number.isFinite(order))) {
+    throw new PromptError('imported entry order must be a finite number', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  return {
+    id: typeof record.id === 'string' && record.id.length > 0 ? record.id : newEntryId(),
+    role: role as PromptEntryRole,
+    order: typeof order === 'number' ? order : 0,
+    enabled: record.enabled !== false,
+    content: normalizeTemplate(content),
+    fakeThought: fakeThought !== undefined ? normalizeTemplate(fakeThought) : undefined,
+  }
+}
+
+/** Validate + normalize one imported mode; ids collide with existing ones are regenerated. */
+function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>): PromptMode {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new PromptError('imported mode must be an object', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const record = raw as Record<string, unknown>
+  const name = record.name
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    throw new PromptError('imported mode name must be a non-empty string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const template = record.template
+  if (template !== undefined && typeof template !== 'string') {
+    throw new PromptError('imported mode template must be a string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const customPrefix = record.customPrefix
+  const customSuffix = record.customSuffix
+  if (customPrefix !== undefined && typeof customPrefix !== 'string') {
+    throw new PromptError('imported mode customPrefix must be a string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  if (customSuffix !== undefined && typeof customSuffix !== 'string') {
+    throw new PromptError('imported mode customSuffix must be a string', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const rawEntries = record.promptEntries
+  const entries = rawEntries !== undefined ? rawEntries : []
+  if (!Array.isArray(entries)) {
+    throw new PromptError('imported mode promptEntries must be an array', PromptErrorCode.INVALID_PAYLOAD)
+  }
+  const rawId = record.id
+  let id = typeof rawId === 'string' && rawId.length > 0 ? rawId : newModeId()
+  if (existingIds.has(id)) id = newModeId()
+  return {
+    id,
+    name: name.trim(),
+    // Imported modes are always custom: builtin ids are host-seeded identity.
+    kind: 'custom',
+    template: normalizeTemplate(template ?? ''),
+    customPrefix: customPrefix !== undefined ? normalizeTemplate(customPrefix) : undefined,
+    customSuffix: customSuffix !== undefined ? normalizeTemplate(customSuffix) : undefined,
+    promptEntries: entries.map(entry => parseImportedEntry(entry)),
+  }
+}
+
+/**
+ * Windows rename-overwrite retry (mirrors memory/domain/configFile.ts):
+ * transient EPERM/EACCES/EBUSY are retried with backoff; when exhausted and
+ * the target exists (EEXIST/EPERM), unlink the old file and rename once more.
+ */
+export async function renameStoreOverwrite(tmpPath: string, storePath: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await fs.rename(tmpPath, storePath)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY' && code !== 'EEXIST') {
+        throw error
+      }
+      if (attempt >= 4) {
+        if (code === 'EEXIST' || code === 'EPERM') {
+          try {
+            await fs.unlink(storePath)
+          } catch {
+            // The final rename surfaces the real error if the target is gone
+          }
+          await fs.rename(tmpPath, storePath)
+          return
+        }
+        throw error
+      }
+      await new Promise(resolve => setTimeout(resolve, 30 * attempt))
+    }
+  }
+}
+
+export class PromptSettingsService {
+  private readonly rootDir: string
+  private readonly storePath: string
+  private store: PromptModeStore | undefined
+  private loadPromise: Promise<void> | undefined
+  private readonly listeners = new Set<(event: PromptChangeEvent) => void>()
+  /** In-process serialized mutations (keeps single-process writes ordered). */
+  private mutationChain: Promise<unknown> = Promise.resolve()
+
+  constructor(private readonly config: PromptSettingsConfig) {
+    this.rootDir = path.join(config.dataRoot, 'prompt')
+    this.storePath = path.join(this.rootDir, PROMPT_STORE_FILE)
+  }
+
+  /** Lazy load: ENOENT seeds builtins; corrupted stores fail loudly. */
+  private ensureLoaded(): Promise<void> {
+    if (this.loadPromise) return this.loadPromise
+    this.loadPromise = (async () => {
+      try {
+        const raw = await fs.readFile(this.storePath, 'utf8')
+        this.store = this.parseStore(raw)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.store = this.seedStore()
+          await this.persist()
+        } else {
+          throw error
+        }
+      }
+    })()
+    return this.loadPromise
+  }
+
+  private seedStore(): PromptModeStore {
+    return {
+      version: PROMPT_MODE_STORE_VERSION,
+      currentModeId: BUILTIN_MODE_IDS[0] as string,
+      modes: createBuiltinModes(),
+    }
+  }
+
+  private parseStore(raw: string): PromptModeStore {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new PromptError('prompt modes store is not valid JSON', PromptErrorCode.STORAGE_CORRUPT)
+    }
+    const record = parsed as { version?: unknown; currentModeId?: unknown; modes?: unknown }
+    if (record.version !== PROMPT_MODE_STORE_VERSION || !Array.isArray(record.modes)) {
+      throw new PromptError(
+        `prompt modes store has an unsupported shape (expected version ${PROMPT_MODE_STORE_VERSION})`,
+        PromptErrorCode.STORAGE_CORRUPT,
+      )
+    }
+    const currentModeId = typeof record.currentModeId === 'string' ? record.currentModeId : (BUILTIN_MODE_IDS[0] as string)
+    return { version: PROMPT_MODE_STORE_VERSION, currentModeId, modes: record.modes as PromptMode[] }
+  }
+
+  /** Atomic persist (tmp + rename with Windows retry). */
+  private async persist(): Promise<void> {
+    const store = this.store
+    if (!store) {
+      throw new PromptError('prompt modes store is not loaded', PromptErrorCode.STORAGE_CORRUPT)
+    }
+    const tmpPath = `${this.storePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      await fs.mkdir(this.rootDir, { recursive: true })
+      await fs.writeFile(tmpPath, JSON.stringify(store, null, 2), 'utf8')
+      await renameStoreOverwrite(tmpPath, this.storePath)
+    } catch (error) {
+      await fs.rm(tmpPath, { force: true }).catch(() => undefined)
+      throw new PromptError(
+        `prompt modes store write failed: ${error instanceof Error ? error.message : String(error)}`,
+        PromptErrorCode.STORAGE_WRITE_FAILED,
+      )
+    }
+  }
+
+  /** Subscribe to change events; returns an unsubscribe function. */
+  subscribe(listener: (event: PromptChangeEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  private emit(event: PromptChangeEvent): void {
+    for (const listener of this.listeners) listener(event)
+  }
+
+  /** Serialized mutation path shared by every write. */
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.mutationChain.then(operation, operation)
+    this.mutationChain = run.catch(() => undefined)
+    return run
+  }
+
+  // ─── reads ────────────────────────────────────────────
+
+  async listModes(): Promise<PromptMode[]> {
+    await this.ensureLoaded()
+    return (this.store?.modes ?? []).map(mode => deepCopyMode(mode))
+  }
+
+  async getMode(id: string): Promise<PromptMode | undefined> {
+    await this.ensureLoaded()
+    const mode = this.store?.modes.find(m => m.id === id)
+    return mode ? deepCopyMode(mode) : undefined
+  }
+
+  /** Current mode; falls back to the first builtin when unset or unknown. */
+  async getCurrentMode(): Promise<PromptMode> {
+    await this.ensureLoaded()
+    const store = this.store!
+    const current = store.modes.find(mode => mode.id === store.currentModeId)
+    if (current) return deepCopyMode(current)
+    const fallback = store.modes.find(mode => isFirstBuiltin(mode.id))
+    if (fallback) return deepCopyMode(fallback)
+    throw new PromptError('prompt modes store is empty', PromptErrorCode.STORAGE_CORRUPT)
+  }
+
+  /**
+   * Synchronous snapshot of the current mode for the injector's render state;
+   * undefined until the store has been loaded (the plugin calls refresh() once
+   * the lazy load resolves, so agents install then).
+   */
+  currentModeSnapshot(): PromptMode | undefined {
+    if (!this.store) return undefined
+    const current = this.store.modes.find(mode => mode.id === this.store?.currentModeId)
+    if (current) return deepCopyMode(current)
+    const fallback = this.store.modes.find(mode => isFirstBuiltin(mode.id))
+    return fallback ? deepCopyMode(fallback) : undefined
+  }
+
+  // ─── writes ───────────────────────────────────────────
+
+  async setCurrentMode(id: string): Promise<PromptMode> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const mode = store.modes.find(m => m.id === id)
+      if (!mode) {
+        throw new PromptError(`prompt mode "${id}" not found`, PromptErrorCode.MODE_NOT_FOUND)
+      }
+      if (store.currentModeId !== id) {
+        store.currentModeId = id
+        await this.persist()
+        this.emit({ type: 'mode-changed' })
+      }
+      return deepCopyMode(mode)
+    })
+  }
+
+  async createMode(input: {
+    name: string
+    template?: string
+    customPrefix?: string
+    customSuffix?: string
+    promptEntries?: readonly PromptEntry[]
+  }): Promise<PromptMode> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const name = input.name.trim()
+      if (name.length === 0) {
+        throw new PromptError('mode name must be a non-empty string', PromptErrorCode.INVALID_PAYLOAD)
+      }
+      const mode: PromptMode = {
+        id: newModeId(),
+        name,
+        kind: 'custom',
+        template: normalizeTemplate(input.template ?? ''),
+        customPrefix: input.customPrefix !== undefined ? normalizeTemplate(input.customPrefix) : undefined,
+        customSuffix: input.customSuffix !== undefined ? normalizeTemplate(input.customSuffix) : undefined,
+        promptEntries: (input.promptEntries ?? []).map(entry => normalizeEntry(entry)),
+      }
+      store.modes.push(mode)
+      await this.persist()
+      this.emit({ type: 'modes-changed' })
+      return deepCopyMode(mode)
+    })
+  }
+
+  /**
+   * Update a mode. Builtin modes may be edited (template/entries) but their
+   * id and kind are immutable.
+   */
+  async updateMode(
+    id: string,
+    patch: {
+      name?: string
+      template?: string
+      customPrefix?: string
+      customSuffix?: string
+      promptEntries?: readonly PromptEntry[]
+    },
+  ): Promise<PromptMode> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const mode = this.requireMode(store, id)
+      const isBuiltin = mode.kind === 'builtin'
+      if (patch.name !== undefined && isBuiltin) {
+        throw new PromptError(
+          `builtin prompt mode "${id}" cannot be renamed`,
+          PromptErrorCode.BUILTIN_IMMUTABLE,
+        )
+      }
+      const name = patch.name?.trim()
+      if (name !== undefined && name.length === 0) {
+        throw new PromptError('mode name must be a non-empty string', PromptErrorCode.INVALID_PAYLOAD)
+      }
+      const next: PromptMode = {
+        ...mode,
+        name: name ?? mode.name,
+        template: patch.template !== undefined ? normalizeTemplate(patch.template) : mode.template,
+        customPrefix: patch.customPrefix !== undefined
+          ? patch.customPrefix.length > 0 ? normalizeTemplate(patch.customPrefix) : undefined
+          : mode.customPrefix,
+        customSuffix: patch.customSuffix !== undefined
+          ? patch.customSuffix.length > 0 ? normalizeTemplate(patch.customSuffix) : undefined
+          : mode.customSuffix,
+        promptEntries: patch.promptEntries !== undefined
+          ? patch.promptEntries.map(entry => normalizeEntry(entry))
+          : mode.promptEntries,
+      }
+      store.modes[store.modes.indexOf(mode)] = next
+      await this.persist()
+      this.emit({ type: 'modes-changed' })
+      return deepCopyMode(next)
+    })
+  }
+
+  async renameMode(id: string, name: string): Promise<PromptMode> {
+    return this.updateMode(id, { name })
+  }
+
+  /** Copy a mode as a new custom mode (entries get fresh ids). */
+  async duplicateMode(id: string): Promise<PromptMode> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const mode = this.requireMode(store, id)
+      const copy: PromptMode = {
+        ...copyWithNewIds(mode),
+        id: newModeId(),
+        name: `${mode.name} copy`,
+        kind: 'custom',
+      }
+      store.modes.push(copy)
+      await this.persist()
+      this.emit({ type: 'modes-changed' })
+      return deepCopyMode(copy)
+    })
+  }
+
+  /** Delete a custom mode; builtin modes are protected. */
+  async deleteMode(id: string): Promise<void> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const mode = this.requireMode(store, id)
+      if (mode.kind === 'builtin') {
+        throw new PromptError(
+          `builtin prompt mode "${id}" cannot be deleted`,
+          PromptErrorCode.BUILTIN_IMMUTABLE,
+        )
+      }
+      store.modes = store.modes.filter(m => m.id !== id)
+      if (store.currentModeId === id) {
+        store.currentModeId = BUILTIN_MODE_IDS[0] as string
+      }
+      await this.persist()
+      this.emit({ type: 'modes-changed' })
+    })
+  }
+
+  /**
+   * Import one or many modes (ImportModesDialog JSON payload). Imported modes
+   * are always custom; colliding ids are regenerated; templates and entry
+   * content are normalized.
+   */
+  async importModes(payload: unknown): Promise<PromptMode[]> {
+    return this.mutate(async () => {
+      const store = await this.requireStore()
+      const raws = Array.isArray(payload) ? payload : [payload]
+      const existingIds = new Set(store.modes.map(mode => mode.id))
+      const imported = raws.map(raw => parseImportedMode(raw, existingIds))
+      store.modes.push(...imported)
+      await this.persist()
+      this.emit({ type: 'modes-changed' })
+      return imported.map(mode => deepCopyMode(mode))
+    })
+  }
+
+  /**
+   * Export modes (JSON-safe envelope, ready to be fed back to importModes).
+   * `ids` limits the export; omitted = all modes.
+   */
+  async exportModes(ids?: readonly string[]): Promise<{ version: number; modes: PromptMode[] }> {
+    await this.ensureLoaded()
+    const store = this.store!
+    const modes = ids ? store.modes.filter(mode => ids.includes(mode.id)) : store.modes
+    return { version: PROMPT_MODE_STORE_VERSION, modes: modes.map(mode => deepCopyMode(mode)) }
+  }
+
+  // ─── internal ─────────────────────────────────────────
+
+  private async requireStore(): Promise<PromptModeStore> {
+    await this.ensureLoaded()
+    if (!this.store) {
+      throw new PromptError('prompt modes store is not loaded', PromptErrorCode.STORAGE_CORRUPT)
+    }
+    return this.store
+  }
+
+  private requireMode(store: PromptModeStore, id: string): PromptMode {
+    const mode = store.modes.find(m => m.id === id)
+    if (!mode) {
+      throw new PromptError(`prompt mode "${id}" not found`, PromptErrorCode.MODE_NOT_FOUND)
+    }
+    return mode
+  }
+}
+
+function isFirstBuiltin(id: string): boolean {
+  return id === (BUILTIN_MODE_IDS[0] as string)
+}
+
