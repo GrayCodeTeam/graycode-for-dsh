@@ -100,6 +100,12 @@ export interface ParsedSettingsExport {
   skills: ParsedSkill[]
   /** 需在 DSH credentials 重新录入的渠道 id / MCP server id */
   credentialReentryRequired: string[]
+  /**
+   * 仅 collectSecrets=true（apply 授权模式）时填充：渠道明文 apiKey。
+   * 只在内存中短暂存在，供凭据一键迁移写入 ctx.credentials；
+   * 绝不进入报告/建议文件/日志（settingsTarget 消费后即丢弃）。
+   */
+  credentialSecrets?: Array<{ channelId: string; apiKey: string }>
   /** 不支持的 provider（导入为 disabled 草稿） */
   disabledDraftChannels: string[]
   /** 同名同 hash 去重的 skill 数量 */
@@ -266,8 +272,17 @@ function parseFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+export interface ParseSettingsOptions {
+  /** 授权模式：在内存中保留渠道明文 apiKey（凭据一键迁移 B1 用；默认 false = 现状脱敏） */
+  collectSecrets?: boolean
+}
+
 /** 解析设置导出文件（结构见 docs/legacy-format.md §4.2） */
-export function parseSettingsExport(raw: string, sourceFile: string): ParsedSettingsExport {
+export function parseSettingsExport(
+  raw: string,
+  sourceFile: string,
+  parseOptions: ParseSettingsOptions = {},
+): ParsedSettingsExport {
   const fail = (errorCode: string, errorMessage: string): ParsedSettingsExport => ({
     ok: false,
     errorCode,
@@ -326,6 +341,8 @@ export function parseSettingsExport(raw: string, sourceFile: string): ParsedSett
   const credentialReentryRequired: string[] = []
   const disabledDraftChannels: string[] = []
   const unmigratedChannelFields: Record<string, string[]> = {}
+  // B1：授权模式才收集明文 apiKey（仅内存，绝不出现在报告/建议文件）
+  const credentialSecrets: Array<{ channelId: string; apiKey: string }> = []
   const rawChannels = Array.isArray(root.channelConfigs) ? root.channelConfigs : []
   for (const item of rawChannels) {
     const channel = asRecord(item)
@@ -335,6 +352,9 @@ export function parseSettingsExport(raw: string, sourceFile: string): ParsedSett
     const apiKey = typeof channel.apiKey === 'string' ? channel.apiKey : ''
     const apiKeyRedacted = apiKey.length > 0 && apiKey !== REDACTED_PLACEHOLDER
     if (apiKeyRedacted) credentialReentryRequired.push(id)
+    if (parseOptions.collectSecrets === true && apiKeyRedacted) {
+      credentialSecrets.push({ channelId: id, apiKey })
+    }
     const providerSupported = isSupportedChannelType(type)
     if (!providerSupported) disabledDraftChannels.push(`${id} (${type})`)
 
@@ -470,6 +490,7 @@ export function parseSettingsExport(raw: string, sourceFile: string): ParsedSett
     mcpServers,
     skills,
     credentialReentryRequired,
+    ...(credentialSecrets.length > 0 ? { credentialSecrets } : {}),
     disabledDraftChannels,
     deduplicatedSkills,
     unmigratedChannelFields,

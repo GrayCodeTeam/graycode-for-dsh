@@ -11,7 +11,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { sha256Hex, sha256HexParts } from '../../domain/idempotency.ts'
-import type { ValidatePort, ValidatedObject } from '../../application/ports.ts'
+import type { ValidateOptions, ValidatePort, ValidatedObject } from '../../application/ports.ts'
 import type { InventoryEntry } from '../../application/ports.ts'
 import { MIGRATION_ERROR_CODES, type ObjectType } from '../../domain/types.ts'
 import { MAX_SOURCE_FILE_BYTES } from './inventory.ts'
@@ -39,15 +39,23 @@ export class DefaultValidator implements ValidatePort {
     this.maxFileBytes = options.maxFileBytes ?? MAX_SOURCE_FILE_BYTES
   }
 
-  async validateAll(sourceDir: string, entries: readonly InventoryEntry[]): Promise<ValidatedObject[]> {
+  async validateAll(
+    sourceDir: string,
+    entries: readonly InventoryEntry[],
+    options?: ValidateOptions,
+  ): Promise<ValidatedObject[]> {
     const out: ValidatedObject[] = []
     for (const entry of entries) {
-      out.push(await this.validateOne(sourceDir, entry))
+      out.push(await this.validateOne(sourceDir, entry, options))
     }
     return out
   }
 
-  private async validateOne(sourceDir: string, entry: InventoryEntry): Promise<ValidatedObject> {
+  private async validateOne(
+    sourceDir: string,
+    entry: InventoryEntry,
+    options?: ValidateOptions,
+  ): Promise<ValidatedObject> {
     const base = { objectType: entry.objectType, legacyId: entry.legacyId, sourceHash: '' }
 
     // 读取构成文件（确定性顺序：文件路径排序）；缺失/超限 → 对象级错误（M3）
@@ -101,7 +109,7 @@ export class DefaultValidator implements ValidatePort {
       case 'memory-workspace':
         return this.validateMemory(entry, contents, hash, 'workspace')
       case 'settings':
-        return this.validateSettings(entry, contents, hash)
+        return this.validateSettings(entry, contents, hash, options?.collectSecrets)
       default:
         return { ...base, sourceHash: hash, valid: false, errorCode: 'UNKNOWN_OBJECT_TYPE' }
     }
@@ -361,9 +369,10 @@ export class DefaultValidator implements ValidatePort {
     entry: InventoryEntry,
     contents: Map<string, Buffer>,
     sourceHash: string,
+    collectSecrets?: boolean,
   ): ValidatedObject {
     const raw = contents.get(entry.files[0] ?? '')?.toString('utf-8') ?? ''
-    const parsed = parseSettingsExport(raw, entry.files[0] ?? '')
+    const parsed = parseSettingsExport(raw, entry.files[0] ?? '', { collectSecrets })
     if (!parsed.ok) {
       return {
         objectType: entry.objectType,
