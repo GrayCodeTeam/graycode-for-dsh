@@ -14,8 +14,10 @@
  * ledger 仍缺条目但本台账已有记录 → 跳过同一对象，不重复追加。
  */
 
-import { MemoryService } from '../../../memory/service.ts'
+import { createHash } from 'node:crypto'
+import { MemoryService, normalizeWorkspaceKey } from '../../../memory/service.ts'
 import type { TargetWriterPort, WriteTargetInput, WriteTargetResult } from '../../application/ports.ts'
+import { resolveScopeOverride, type ScopeOverrideMap } from '../../domain/scopeMap.ts'
 import { AppliedJournalStore } from './appliedJournal.ts'
 
 interface MemoryObjectData {
@@ -61,13 +63,29 @@ export function createMemoryTargetWriter(
         }
       }
 
+      // 目标选择（D-1）：默认按 scope.json 自动映射；用户覆盖可改写目标。
+      // scopeRef 随实际目标更新（global → memory://global；覆盖路径 → 该路径的
+      // 工作区记忆目录）；journalKey 保持 memory:workspace:<legacyId>（同一对象
+      // 只导一次，与目标无关）。
+      let resolvedScopeRef = scopeRef
       let manager
       if (data.scope === 'global') {
         manager = await service.getGlobal()
       } else {
-        const cwd = data.scopeMeta?.fsPath ?? data.scopeMeta?.cwd
-        if (!cwd) throw new Error(`memory-workspace ${input.object.legacyId} 缺少可用的工作区路径`)
-        manager = await service.getWorkspace(cwd, true)
+        const resolved = resolveScopeOverride(input.scopeOverrides, input.object.legacyId)
+        if (resolved.kind === 'global') {
+          manager = await service.getGlobal()
+          resolvedScopeRef = 'memory://global'
+        } else {
+          const cwd = resolved.kind === 'workspace' ? resolved.cwd : (data.scopeMeta?.fsPath ?? data.scopeMeta?.cwd)
+          if (!cwd) throw new Error(`memory-workspace ${input.object.legacyId} 缺少可用的工作区路径`)
+          if (resolved.kind === 'workspace') {
+            // 覆盖路径同样哈希出 DSH 工作区记忆目录（与 getWorkspace 同算法：
+            // sha256(normalizeWorkspaceKey(cwd)) 前 16 hex）
+            resolvedScopeRef = `memory://workspace/${workspaceDirName(cwd)}`
+          }
+          manager = await service.getWorkspace(cwd, true)
+        }
       }
       if (!manager) throw new Error(`memory scope 不可用: ${input.object.legacyId}`)
 
@@ -91,9 +109,9 @@ export function createMemoryTargetWriter(
 
       // 落盘成功后记录写入台账（ledger.put 失败后重跑凭此跳过）
       if (journal) {
-        await journal.put(journalKey, { at: new Date().toISOString(), targetRef: scopeRef })
+        await journal.put(journalKey, { at: new Date().toISOString(), targetRef: resolvedScopeRef })
       }
-      return { targetRef: scopeRef, notes }
+      return { targetRef: resolvedScopeRef, notes }
     },
     async probe(targetRef: string): Promise<boolean> {
       // memory 目标的存在性以台账为准（追加式日志无法按 targetRef 精确探测）
@@ -112,4 +130,9 @@ function truncateUtf8(text: string, maxBytes: number): string {
     out += ch
   }
   return out
+}
+
+/** DSH 工作区记忆目录名（与 memory/service.ts scopeKeyToDirName 同算法）。 */
+function workspaceDirName(cwd: string): string {
+  return createHash('sha256').update(normalizeWorkspaceKey(cwd)).digest('hex').slice(0, 16)
 }

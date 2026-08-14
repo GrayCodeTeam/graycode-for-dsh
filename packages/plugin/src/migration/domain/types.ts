@@ -10,6 +10,8 @@
  * - 迁移报告 DTO：人类可读 Markdown + 机器可读 JSON 两部分（§7.2.9）。
  */
 
+import type { ConversationCheckpointList, ConversationCwdIssue, ScopeMapEntry } from './scopeMap.ts'
+
 /** 旧数据对象类型（= 幂等键的 objectType 维度） */
 export type ObjectType =
   | 'conversation'
@@ -116,6 +118,12 @@ export interface MigrationReport {
   skips: Array<{ objectType: ObjectType; legacyId: string; reason: string }>
   /** settings 摘要（脱敏后）；无 settings 对象时为 undefined */
   settingsSummary?: unknown
+  /** D-1：工作区记忆映射建议表（memory-workspace 对象 → DSH workspace）；无则 undefined */
+  scopeMap?: ScopeMapEntry[]
+  /** D-4a：workspaceUri 无法派生 DSH cwd 的会话清单（远程/损坏 URI，接受降级） */
+  conversationCwdIssues?: ConversationCwdIssue[]
+  /** D-5b：会话侧 custom.checkpoints 存档点清单（DSH 无会话外键，供检索） */
+  conversationCheckpointLists?: ConversationCheckpointList[]
 }
 
 /** 幂等台账条目（持久化于 <dataRoot>/migration/ledger.json） */

@@ -15,6 +15,7 @@ import z from '@deepseek-ai/schemastery'
 import { createScopedToolRegistrar } from '../agentScope.ts'
 import { createMigrationService } from './adapters/compose.ts'
 import { createMigrationTools } from './tools.ts'
+import { createMigrationRemoteHandlers } from './adapters/dsh/remote.ts'
 
 export const name = 'graycode-migration'
 
@@ -44,7 +45,12 @@ export function apply(ctx: Context, config: Config): () => void {
   const service = createMigrationService({ dataRoot: config.dataRoot, ctx })
   const registrar = createScopedToolRegistrar(ctx, 'roots')
   registrar.register(createMigrationTools(service, { allowLegacyReaders: config.allowLegacyReaders }))
+  // D-2 可视化：scope 映射 Remote 端点（仅安全门开启时暴露；client ScopeMapPanel 消费）
+  const disposeRemote = config.allowLegacyReaders
+    ? ctx.grayRemote?.register(createMigrationRemoteHandlers(service))
+    : undefined
   return () => {
     registrar.dispose()
+    disposeRemote?.()
   }
 }

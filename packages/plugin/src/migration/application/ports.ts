@@ -12,6 +12,7 @@ import type {
   PlannedObject,
   TargetDomain,
 } from '../domain/types.ts'
+import type { ScopeOverrideMap } from '../domain/scopeMap.ts'
 
 // ─── Inventory（清单与哈希） ─────────────────────────────
 
@@ -90,6 +91,8 @@ export interface WriteTargetInput {
   runId: string
   object: PlannedObject
   sourceDir: string
+  /** D-1：工作区记忆 scope 覆盖表（memory writer 消费；可选，未覆盖走自动映射） */
+  scopeOverrides?: ScopeOverrideMap
 }
 
 export interface WriteTargetResult {

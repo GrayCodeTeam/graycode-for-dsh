@@ -11,8 +11,10 @@
 
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
+import * as fs from 'node:fs/promises'
 import { renderMarkdownReport } from './domain/report.ts'
 import type { MigrationReport } from './domain/types.ts'
+import type { ScopeOverrideMap } from './domain/scopeMap.ts'
 import type { LegacyImportService } from './application/importService.ts'
 
 export interface MigrationToolOptions {
@@ -29,6 +31,8 @@ interface ApplyArgs {
   confirmToken: string
   /** B1：用户显式授权后一键迁移渠道 apiKey 到 DSH credentials（默认 false） */
   migrateCredentials?: boolean
+  /** D-1：工作区记忆 scope 覆盖 JSON 文件路径（{ "<hashDir>": "global" | "/abs/path" }） */
+  scopeOverridesFile?: string
 }
 
 const scanParameters = {
@@ -47,6 +51,13 @@ const applyParameters = {
       '设为 true 时，把旧渠道明文 apiKey 一键写入 DSH credentials（引用名 GRAYCODE_<TYPE>_<ID>_API_KEY）。' +
       '默认 false（凭据不迁移，只生成引用占位 + 重新录入清单）。注意：旧 key 可能已过期/轮换，' +
       '写入前请确认授权；写入后立即从内存丢弃，明文绝不进入报告/日志/建议文件。',
+  },
+  scopeOverridesFile: {
+    type: 'string',
+    description:
+      '工作区记忆 scope 覆盖 JSON 文件路径（可选）：形如 { "<hashDir>": "global" | "/绝对/路径" }。' +
+      'scan 报告的「工作区记忆映射」节给出 hashDir 与建议目标；未在覆盖表中的项按建议自动映射，' +
+      '值为 global 时该工作区记忆降级写入 DSH 全局记忆，值为绝对路径时写入该路径对应的工作区记忆。',
   },
 } as const
 
@@ -92,6 +103,11 @@ function toToolResult(report: MigrationReport): {
     })),
     skips: skips.map(s => ({ objectType: s.objectType, legacyId: s.legacyId, reason: s.reason })),
     ...(settingsSummary !== undefined ? { settingsSummary } : {}),
+    ...(report.scopeMap !== undefined ? { scopeMap: report.scopeMap } : {}),
+    ...(report.conversationCwdIssues !== undefined ? { conversationCwdIssues: report.conversationCwdIssues } : {}),
+    ...(report.conversationCheckpointLists !== undefined
+      ? { conversationCheckpointLists: report.conversationCheckpointLists }
+      : {}),
     run: {
       id: run.id,
       status: run.status,
@@ -156,10 +172,31 @@ export function createMigrationTools(
     },
     async execute(args, exec) {
       assertReaderAllowed(options, 'migration_apply')
-      const { sourceDir, confirmToken, migrateCredentials } = args as ApplyArgs
+      const { sourceDir, confirmToken, migrateCredentials, scopeOverridesFile } = args as ApplyArgs
+      // D-1：scope 覆盖解析（文件入口；须为 JSON 对象）
+      let merged: ScopeOverrideMap | undefined
+      if (scopeOverridesFile) {
+        let raw: string
+        try {
+          raw = await fs.readFile(scopeOverridesFile, 'utf-8')
+        } catch (err) {
+          throw new Error(`scopeOverridesFile 读取失败: ${(err as Error).message}`)
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(raw)
+        } catch (err) {
+          throw new Error(`scopeOverridesFile 解析失败（须为 JSON 对象 { "<hashDir>": "global" | "绝对路径" }）: ${(err as Error).message}`)
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('scopeOverridesFile 必须是 JSON 对象')
+        }
+        merged = parsed as ScopeOverrideMap
+      }
       const { report } = await service.apply(sourceDir, confirmToken, {
         signal: exec.signal,
         credentialsAuthorized: migrateCredentials === true,
+        scopeOverrides: merged,
       })
       return toToolResult(report)
     },

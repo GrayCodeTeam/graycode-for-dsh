@@ -21,6 +21,12 @@ import {
 } from '../domain/importRun.ts'
 import { summarizeCounts } from '../domain/report.ts'
 import {
+  buildConversationCheckpointLists,
+  buildConversationCwdIssues,
+  buildScopeMap,
+  type ScopeOverrideMap,
+} from '../domain/scopeMap.ts'
+import {
   DOMAIN_ORDER,
   MIGRATION_ERROR_CODES,
   MigrationError,
@@ -163,13 +169,13 @@ export class LegacyImportService {
   async apply(
     sourceDir: string,
     confirmToken: string,
-    options: { signal?: AbortSignal; credentialsAuthorized?: boolean } = {},
+    options: { signal?: AbortSignal; credentialsAuthorized?: boolean; scopeOverrides?: ScopeOverrideMap } = {},
   ): Promise<ScanResult> {
     this.assertNotCancelled(options.signal)
     // H1c：apply 全程持跨进程文件锁（防并发 apply 重复写目标）；finally 保证释放
     const release = await this.acquireApplyLock(options.signal)
     try {
-      return await this.applyInner(sourceDir, confirmToken, options.signal, options.credentialsAuthorized)
+      return await this.applyInner(sourceDir, confirmToken, options.signal, options.credentialsAuthorized, options.scopeOverrides)
     } finally {
       await release()
     }
@@ -180,6 +186,7 @@ export class LegacyImportService {
     confirmToken: string,
     signal?: AbortSignal,
     credentialsAuthorized = false,
+    scopeOverrides?: ScopeOverrideMap,
   ): Promise<ScanResult> {
     const { run: plannedRun, report: scanReport, plan } = await this.scanWithPlan(sourceDir, signal, {
       // B1：apply 授权模式才在内存中收集明文 apiKey（默认 false = 脱敏，现状不变）
@@ -241,7 +248,7 @@ export class LegacyImportService {
         // outcome === 'import'（含 disabled-draft 对象：以草稿形态导入）
         this.assertNotCancelled(signal)
         try {
-          const result = await writer.write({ runId: run.id, object: obj, sourceDir })
+          const result = await writer.write({ runId: run.id, object: obj, sourceDir, scopeOverrides })
           if (domain === 'settings' && result.summary) settingsWriteSummaries.push(result.summary)
           const entry: LedgerEntry = {
             key,
@@ -514,6 +521,9 @@ export class LegacyImportService {
   ): MigrationReport {
     const settingsObject = plan.objects.find(o => o.objectType === 'settings')
     const settingsSummary = settingsObject?.data ? sanitizeSettingsSummary(settingsObject.data) : undefined
+    const scopeMap = buildScopeMap(plan.objects)
+    const cwdIssues = buildConversationCwdIssues(plan.objects)
+    const checkpointLists = buildConversationCheckpointLists(plan.objects)
     return {
       run,
       source: {
@@ -534,6 +544,10 @@ export class LegacyImportService {
       })),
       skips: plan.skips,
       ...(settingsSummary !== undefined ? { settingsSummary } : {}),
+      // D-1/D-4a/D-5b：scope 与归属事实（无相关对象时不输出字段）
+      ...(scopeMap.length > 0 ? { scopeMap } : {}),
+      ...(cwdIssues.length > 0 ? { conversationCwdIssues: cwdIssues } : {}),
+      ...(checkpointLists.length > 0 ? { conversationCheckpointLists: checkpointLists } : {}),
     }
   }
 }

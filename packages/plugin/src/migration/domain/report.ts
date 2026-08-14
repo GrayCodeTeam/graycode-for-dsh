@@ -8,6 +8,7 @@
 
 import { shortHash } from './idempotency.ts'
 import type { MigrationReport, PlanOutcome } from './types.ts'
+import type { ScopeMapEntry } from './scopeMap.ts'
 
 const OUTCOME_LABEL: Record<PlanOutcome, string> = {
   import: '待导入',
@@ -90,6 +91,50 @@ export function renderMarkdownReport(report: MigrationReport): string {
     lines.push('')
     for (const skip of report.skips) {
       lines.push(`- ${skip.objectType}:\`${skip.legacyId}\` — ${skip.reason}`)
+    }
+    lines.push('')
+  }
+
+  // D-1：工作区记忆映射建议（含用户覆盖指引）
+  if (report.scopeMap && report.scopeMap.length > 0) {
+    lines.push('## 工作区记忆映射')
+    lines.push('')
+    lines.push('| 旧 scope 目录 | 源路径 | 建议目标 | 状态 |')
+    lines.push('| --- | --- | --- | --- |')
+    for (const entry of report.scopeMap) {
+      const source = entry.sourcePath ? `\`${entry.sourcePath}\`` : '_无_' 
+      const target = entry.suggestedTarget ? `\`${entry.suggestedTarget}\`` : '_无_'
+      const status = entry.status === 'unmapped' ? '未映射（scope.json 缺失/损坏）' : '自动'
+      lines.push(`| \`${entry.hashDir}\` | ${source} | ${target} | ${status} |`)
+    }
+    lines.push('')
+    lines.push('> 调整目标：编辑覆盖 JSON（`{ "<hashDir>": "global" | "/绝对/路径" }`），')
+    lines.push('> 在 migration_apply 传 scopeOverridesFile（或 scopeOverrides 内联）。未覆盖项按建议自动映射。')
+    lines.push('')
+  }
+
+  // D-4a：workspaceUri 无法派生 DSH cwd 的会话（远程/损坏 URI，接受降级）
+  if (report.conversationCwdIssues && report.conversationCwdIssues.length > 0) {
+    lines.push('## 会话工作区归属缺失（已接受降级）')
+    lines.push('')
+    lines.push('以下会话的 workspaceUri 无法派生 DSH 工作区路径（远程/非 file:// URI），')
+    lines.push('迁移后会话无 cwd，原 URI 仅随附 artifact：')
+    lines.push('')
+    for (const issue of report.conversationCwdIssues) {
+      lines.push(`- \`${issue.legacyId}\`: \`${issue.workspaceUri}\``)
+    }
+    lines.push('')
+  }
+
+  // D-5b：会话历史存档点清单（DSH 侧 checkpoint 与会话无外键，供检索）
+  if (report.conversationCheckpointLists && report.conversationCheckpointLists.length > 0) {
+    lines.push('## 会话历史存档点')
+    lines.push('')
+    lines.push('以下会话在旧数据中挂载了工作区存档（custom.checkpoints）；存档已作为独立对象')
+    lines.push('导入（DSH 侧无会话外键），此清单供会话 ↔ 存档检索：')
+    lines.push('')
+    for (const item of report.conversationCheckpointLists) {
+      lines.push(`- \`${item.legacyId}\`: ${item.checkpointIds.map(id => `\`${id}\``).join(', ')}`)
     }
     lines.push('')
   }
