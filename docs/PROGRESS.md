@@ -3,8 +3,9 @@
 > 基线文档：[PLAN_V2.md](./PLAN_V2.md)（V2 实施基线稿，本仓库只读副本；冲突一律以 V2 为准）
 > 基线版本：Gray Code `067f9693`（v1.5.4）/ DSH `47f9438`（0.1.0-rc.6）
 > 状态：P3A/P3B/P3C/P3E/P3F 已移植并通过真实 DSH 运行时验证（P3F 按 D-11 = c 落地）；
-> P0-08 已落地；P3D 决策完成（ADR-0003，staged-diff 首发工作包已实现）；
-> Phase 4 Client 骨架、Phase 5 迁移器已交付；审计批次完成（docs/review/）。
+> P0-08 已落地；P3D 决策完成（ADR-0003，staged-diff 首发工作包已实现，写工具适配已完成）；
+> Phase 4 Client UI（P4-01~P4-07）已交付；Phase 5 迁移器已交付；审计批次完成（docs/review/）；
+> D-1（模板对齐）/ D-4（toolPolicy 执行链）已落地；D-5/D-6 已文档化。
 
 ## 版本锁定（ADR-0001）
 
@@ -47,7 +48,7 @@
 - [x] **mock LLM E2E**（tests/e2e/，5 场景）：文本回复/工具调用落盘/文件变更/seed 重放恢复/取消
 - [x] P0-15 sendHistoryThoughts：随 D-11=c 作为注入时门（默认 false）
 
-### Phase 3A Workflows — 已移植 + 审计修复
+### Phase 3A Workflows — 已移植 + 审计修复 + 收尾完成
 
 12 工具。审计（docs/review/audit-workflows.md、audit-bugs.md）后修复：
 `record_progress_milestone` 缺省 status 恢复 completed 旧语义、compare_review_documents
@@ -55,8 +56,12 @@
 create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Windows 保留名、
 路径白名单大小写归一、workspace.ts 移除 node:fs 前置 mkdir（依赖 writeText 自动建目录）。
 
-- 文件 IO：ctx.fs + per-path 写锁；会话门闸：进程内 Map + per-sessionId 锁（DEFERRED：迁 storageDomain）
-- autoSync 联动未移植（DEFERRED）；requiresUserConfirmation 语义移除（已文档化）
+- 文件 IO：ctx.fs + per-path 写锁；会话门闸：**已持久化**（sidecar
+  `<dataRoot>/workflows/review-sessions.json`，重启仍生效；dataRoot 为空退化为纯内存）
+- autoSync 联动：**已恢复**（design/review 落盘后 best-effort 同步 progress.md，warnings 上报）；
+  requiresUserConfirmation 语义移除（已文档化）
+- staged-diff 写工具适配（ADR §6 动作 2）：**已完成**——stagedDiff 经 cordis service
+  （`graycode.stagedDiff`）跨域共享，enabled 时写工具先 stage 后落盘（默认关闭，行为不变）
 
 ### Phase 3B Memory — 已移植 + 存储格式换代
 
@@ -73,15 +78,20 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - 审计记录（docs/review/audit-memory-checkpoints.md）：旧 v1/v2 manifest 与 md5 哈希在新 schema
   下不可读（C-01/C-02）→ 迁移器负责旧格式转换（checkpointManifestParser 已实现 v1/v2 读取 +
   ATOMIC-PAIR 校验；md5→sha256 重算列入迁移器范围）；记录存储迁 records.json（C-03 文档化）
-- DEFERRED：恢复前自动保护点；跨进程锁；stat 级哈希复用；旧 conversation 记录面不迁移
+- DEFERRED 已收尾：**恢复前自动保护点**（默认开，restoreProtectionPoint 可关）、**跨进程文件锁**
+  （原子创建 + 心跳 + 陈旧检测 + 超时）、**stat 级哈希复用**（size+mtime 未变跳过重哈希）；
+  GC/恢复自愈取舍文档化（D-5/D-6，见 checkpoints/README.md）；旧 conversation 记录面不迁移
 
-### Phase 3D Staged Diff — 决策完成 + 首发工作包已实现
+### Phase 3D Staged Diff — 决策完成 + 首发工作包已实现 + 写工具适配完成
 
 - **ADR-0003**（docs/ADR-0003.md）：四场景探针全 GAP（8 用例，tests/spike/staged-diff.spec.ts）
   → 判定 DSH 原生 diff/approval 不满足延迟审阅语义，staged-diff service 为首发必做
 - **实现**（packages/plugin/src/stagedDiff/，44 用例）：条目状态机（pending→reviewing→accepted→done/
   rejected，needs-reapply 崩溃恢复）、CAS、sidecar 原子写、路径防穿越、5 个工具；
-  已挂载 composition root（`enabled` 默认 false，写工具适配为 ADR §6 后续动作 2）
+  已挂载 composition root（`enabled` 默认 false）
+- **写工具适配（ADR §6 动作 2）已完成**：stagedDiff 子插件经 cordis service 提供 handle，
+  workflows 写工具在 enabled 时先 stage 后落盘（默认关闭，行为与现状完全一致）；
+  grayRemote 可选注入（ctx.inject）
 
 ### Phase 3E 树状分支 — 已移植 + 审计修复
 
@@ -92,25 +102,36 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - GAP：第三方自定义会话事件无公开 ignorable 注册机制 → 分支事件随 Phase 4 Client 重评
 - DEFERRED：workspace snapshot 关联（`workspaceSnapshotId` 字段预留）；「切对话+工作区」联动
 
-### Phase 3F 提示词编排 — 已实现（D-11 = c）+ 审计修复
+### Phase 3F 提示词编排 — 已实现（D-11 = c）+ 审计修复 + 模板对齐（D-1）
 
 - 决策 D-11 = c（ADR-0002 §4）：system-prompt 文本注入，不写会话日志、不做 thought part
 - 审计后修复：导入兼容旧版格式（`type:'chat_history'` 映射 + 丢弃字段 warnings）、渲染层
   cleanupEmptyLines（字节对齐）、importModes 重复 id 去重、setCurrentMode 持久化失败回滚、
   注入器部分注册失败清理、ENVIRONMENT 模块对齐（路径/OS/时区/语言提示）、fakeThought trim、
   空条目跳过；README 增补导入兼容与渲染声明
+- **D-1 已落地**：内置 5 模式模板与 Gray Code 1.5.4 逐字节一致（golden 测试守护）；
+  渲染层将编辑器专属大写占位符替换为确定性说明文本（不向 DSH 装配器泄漏非法变量）
+- **D-4 已落地**：模式 toolPolicy 执行链经 `ctx.tools.guard` 接入（默认开启，内置四模式
+  白名单与旧版 preflight 逐字一致，resolve 抛错 fail-closed；接线测试 4 用例）
 - 已知降级点（D-11 = c 语义差异）见 `packages/plugin/src/prompt/README.md`；DSH 升级重跑探针
 
-### Phase 4 Client UI — 骨架完成
+### Phase 4 Client UI — P4-01~P4-07 已交付（契约驱动消费点 + 可挂接组件）
 
 - `packages/client`（@graycode/dsh-client）：`dsh.client` manifest（`platform:"web"` + `exports["./client"]`，
-  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，3.73 kB，
+  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，~31 kB，
   `window.__ModuleLoader__.load` 闭包形状）、`shell.overlay` slot 渲染 "Gray Code loaded"、
   locale zh/en（ja 占位，GAP-1：rc.6 LocaleId 仅 zh|en）
-- 已加入 bundle cordis.patch.yml（graycode-client 行）
-- P4-01~P4-07 完整 UI 面未做（后续批次）
+- **Host Remote API 层**：`src/remote/`（GrayRemoteService + ProjectionJournal + 稳定机器码词表），
+  workflows/memory/checkpoints/stagedDiff 四域 15 端点；已挂载 composition root
+- **P4-01~P4-07 已交付**：workflow node（conversationEvents 定义 + 可挂接渲染器）、workflow
+  overview、memory 管理、checkpoint 列表、restore 预览（双门确认 + previewToken 绑定）、
+  staged diff 卡片（批量幂等）、settings 贡献（secret 无明文）；各 surface 独立 locale 命名空间
+  已注册进 client 入口；组件以可挂接导出交付
+- **已知 GAP（记录于各 surface README）**：rc.6 无管理视图 slot（shell 仅 shell.overlay；
+  settings.section 需补 dsh-client-ui-settings 依赖后可用）；rc.6 无浏览器→host Remote 通道
+  （Typert 仅 host 侧）→ surface 全部以 mock 数据源 + 契约消费点交付，host 升级后平移 Typert
 
-### Phase 5 迁移器 — 实现交付（24 文件 + 9 用例）
+### Phase 5 迁移器 — 实现交付 + 收尾完成（24 文件 + 51 用例）
 
 - `migration_scan`（dry-run 不写盘，返回 markdown + 脱敏机器 JSON + planToken）+
   `migration_apply`（confirmToken 二次确认、逐域提交点、幂等重跑）
@@ -118,8 +139,10 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   adapters（legacy 只读解析器：conversations 双格式、checkpoint v1/v2 ATOMIC-PAIR、
   memory 复用 logFormat、settings 脱敏；storage 写入侧：memory 经公开 service、checkpoint 经 BlobStore）
 - 14 类脱敏 fixture（tests/migration/fixtures/，114 文件，F-b 交付）
-- 未完成：会话/快照未接 DSH session API（暂存只读 artifact）；checkpoint 增量链不跨目录回溯；
-  复杂 scope 映射待用户确认；settings 只产出建议配置不直接改 DSH
+- **收尾已完成**：会话导入接入 DSH session 公开 API（确定性 seed、幂等、失败可重跑，标题/分支图/
+  子代理转录仍走 artifact 随附）；checkpoint 增量链跨目录回溯（沿 backupSourceCheckpointId 逐级
+  解析，环/缺失/损坏隔离）；domainNotes 并入导入报告；settings 仍只产出建议配置（不直接改 DSH）
+- 未完成：复杂 scope 映射待用户确认；settings 直写 DSH 待决策
 
 ### Phase 6 发布 — pending（CI 就绪；npm 发布、三平台验收、升级/回滚演练待做）
 
@@ -140,8 +163,9 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 | audit-bugs.md | 1H/4M/6L + 7 疑似 + 12 建议 | HIGH/MED 已修复；LOW 已修复；疑似项 S-01~07 部分已加固，其余记录 |
 | audit-tests.md | 3H/9M/3L | 补测项列入后续批次；恒真断言已清理；typecheck 已覆盖 tests/** |
 
-决策待办（D-1~D-6）：内置模板对齐、reroll 激活（已按旧语义落地）、旧 checkpoint 数据迁移范围、
-toolPolicy 执行链探针、GC 语义确认、恢复自愈取舍。
+决策待办（D-1~D-6）：D-1 模板对齐（✅ 已落地）、D-2 reroll 激活（✅ 已按旧语义落地）、
+D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-4 toolPolicy 执行链（✅ 已落地，
+默认开启）、D-5 GC 语义（✅ 文档化，checkpoints/README.md）、D-6 恢复自愈（✅ 文档化，fail-closed）。
 
 ## 已决冲突记录（V2 优先）
 
@@ -159,8 +183,8 @@ toolPolicy 执行链探针、GC 语义确认、恢复自愈取舍。
 
 ## 测试基线
 
-`pnpm test`：42 文件 452 用例全绿（workflows 88 / memory 84 / checkpoints 35 / branches 89 /
-prompt 68 / stagedDiff 44 / fault-injection 19 / migration 9 / spike 8 / e2e 5 / agentScope /
-persona / providers / client 9 等）。
+`pnpm test`：74 文件 1051 用例全绿（workflows 89 / memory 101 / checkpoints 67 / branches 89 /
+prompt 76 / stagedDiff 46 / migration 41 / remote 66 / fault-injection 19 / e2e 5 / spike 8 /
+agentScope / persona / providers / client 343 等）。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
 `scripts/verify-pack.ps1`：PASS（2 tarball，violations: none）。

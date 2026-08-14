@@ -41,6 +41,36 @@
   ADR-0003（staged diff 决策门）、`legacy-format.md`（旧数据格式规范）、
   `legacy-fixture-plan.md`（fixture 清单）、`memory-format.md`（新记忆存储格式）、
   `PROVIDER_MATRIX.md`（5 渠道能力矩阵）、`docs/review/`（5 份审计报告 + 汇总）、`docs/CI.md`。
+- **Host Remote API 层（Phase 4 数据源）**：`src/remote/`（GrayRemoteService + 投影日志 + 稳定
+  机器码错误词表），workflows/memory/checkpoints/stagedDiff 四域各注册 Remote 端点
+  （15 端点：workflow 列表/详情、memory 查询/编辑/删除、checkpoint 列表/verify/恢复预览/恢复、
+  staged diff 批/接受/拒绝），统一 `GrayRemoteResult` 信封（业务错误永不 reject）。
+- **Phase 4 Client UI（P4-01~P4-07，契约驱动消费点 + 可挂接组件）**：
+  P4-01 workflow conversation node（`conversationEvents` 定义 + 可挂接渲染器，12 工具识别、
+  状态机、replace/prepend/append 流更新）；P4-02 workflow overview（分页/过滤/会话定位）；
+  P4-03 memory 管理（搜索/作用域/编辑 diff 预览/forget 双确认）；P4-04 checkpoint 列表
+  （游标分页/父链/verify 徽标）；P4-05 restore 预览（文件分类/冲突/双门确认/previewToken 绑定）；
+  P4-06 staged diff 卡片（状态映射/批量操作幂等/mock 数据源）；P4-07 settings 贡献
+  （静态配置清单/校验/敏感值无明文展示）；各自独立 locale 命名空间（zh/en/ja 占位）。
+  已注册进 client 入口；DSH rc.6 无管理视图 slot 与浏览器→host Remote 通道（GAP 记录于各
+  surface README，host 升级后可平移 Typert）。
+- **Workflows 收尾（ADR §6 后续动作 2 + DEFERRED 项）**：staged-diff 写工具适配——经 cordis
+  service（`graycode.stagedDiff`）跨域共享，enabled 时写工具先 stage 后落盘（默认关闭，行为不变）；
+  会话门闸持久化（sidecar 落盘，重启仍生效）；autoSync 恢复（progress.md 随 design/review 自动
+  更新，best-effort + warnings）。
+- **Checkpoints 收尾（DEFERRED 项）**：恢复前自动保护点（默认开，可关闭）；跨进程文件锁
+  （原子创建 + 心跳 + 陈旧锁检测 + 超时，Windows 兼容）；stat 级哈希复用（size+mtime 未变跳过
+  重哈希）；GC/恢复自愈取舍文档化（D-5/D-6）。
+- **Migration 收尾**：会话导入接入 DSH session 公开 API（确定性 seed、幂等重跑、失败可重试，
+  标题/分支图等仍走 artifact 随附）；checkpoint 增量链跨目录回溯（沿 backupSourceCheckpointId
+  逐级解析，含环/缺失/损坏隔离）；domainNotes 并入导入报告 notes。
+- **模式工具策略执行链（D-4 落地）**：`modeToolsPolicy` guard 经 `ctx.tools.guard` 接入运行态
+  （默认开启，对齐旧版 preflight：design/plan/ask/review 内置白名单强制，code/自定义模式无过滤），
+  模式切换实时生效，fail-closed。
+- **Prompt 内置模板对齐（D-1 落地）**：内置 5 模式模板与 Gray Code 1.5.4 逐字节一致
+  （golden 测试守护），渲染管道不变。
+- **测试补强（审计 R5 批次）**：CheckpointOperationLock/跨进程锁、checkpoints/prompt 工具层、
+  MemoryLogStore、regexGuard 等缺失面补测试（+86 用例）。
 
 ### Changed（变更）
 
@@ -72,12 +102,22 @@
   setCurrentMode 持久化失败回滚内存；注入器部分注册失败清理（含 `push(section(), variable())`
   求值顺序坑）；ENVIRONMENT 模块内容对齐旧版；fakeThought trim、空条目跳过。
 - **memory**：updateConfig 先写盘成功再提交内存（失败不分叉）；无 cwd 时走全局记忆
-  （不再回退 process.cwd() 伪工作区）。
+  （不再回退 process.cwd() 伪工作区）；工具返回对象剔除显式 `undefined` 字段
+  （dsh-tools lossless-JSON 校验，真实 agent loop 不再报 invalid output）。
+- **prompt**：渲染层把编辑器专属大写占位符（`{{$CONTEXT_BADGE_FORMAT}}` 等）替换为确定性
+  说明文本，resolved 模块无值时给 unavailable 提示，不再向 DSH 装配器泄漏非法变量引用
+  （修复 e2e S2/S4 的 malformed prompt variable reference）。
+- **stagedDiff**：grayRemote 改为可选注入（`ctx.inject` 延迟挂载），独立挂载/测试不再因
+  缺少 grayRemote 服务而失败。
+- **migration**：importService 的 domainNotes（审计备注）并入 run.notes（此前被收集但从未写入）。
 
 ### Security（安全）
 
 - 迁移器对设置导出中的明文 secret 一律脱敏（只生成"重新录入"占位），报告不输出密钥。
-- 模式工具策略 allowlist 执行链缺失已记录（R1-M3 / R3-H3，需 DSH 宿主探针确认后补实现）。
+- 模式工具策略 allowlist 执行链已落地（D-4）：内置 design/plan/ask/review 模式经
+  `ctx.tools.guard` 强制白名单（与旧版 preflight 逐字一致），resolve 抛错 fail-closed。
+- Client settings 贡献面不显示/不存储任何 secret 明文（对齐 DSH credentials 无值契约，
+  只展示引用名与 configured 状态）。
 
 ### Removed（移除）
 
