@@ -19,8 +19,11 @@ function isScopedMarkdownPathAllowed(path: string, scopeRoot: string): boolean {
         return false;
     }
 
-    // 处理 Windows 路径分隔符：将 \ 转换为 /
-    const normalizedPath = path.replace(/\\/g, '/');
+    // 处理 Windows 路径分隔符：将 \ 转换为 /；Windows 文件系统大小写不敏感，
+    // 校验前统一转小写（scopeRoot 同步转小写），与 normalizeProgressPathKey 口径一致，
+    // 避免 `.GRAYCODE/design/foo.MD` 等合法路径被误拒。
+    const normalizedPath = path.replace(/\\/g, '/').toLowerCase();
+    const normalizedScopeRoot = scopeRoot.toLowerCase();
 
     // 拒绝绝对路径（以 / 开头）
     if (normalizedPath.startsWith('/')) {
@@ -33,7 +36,7 @@ function isScopedMarkdownPathAllowed(path: string, scopeRoot: string): boolean {
     }
 
     // 必须以指定目录开头
-    if (!normalizedPath.startsWith(scopeRoot)) {
+    if (!normalizedPath.startsWith(normalizedScopeRoot)) {
         return false;
     }
 
@@ -43,7 +46,7 @@ function isScopedMarkdownPathAllowed(path: string, scopeRoot: string): boolean {
     }
 
     // 必须是一个文件路径（不能只是目录本身）
-    const relativePath = normalizedPath.substring(scopeRoot.length);
+    const relativePath = normalizedPath.substring(normalizedScopeRoot.length);
     if (!relativePath || relativePath.length === 0) {
         return false;
     }
@@ -124,7 +127,8 @@ export function isReviewPathAllowed(path: string): boolean {
  * - 空字符串、目录路径或其他 Markdown 文件
  */
 export function isProgressPathAllowed(path: string): boolean {
-    const normalizedPath = (path || '').replace(/\\/g, '/');
+    // Windows 文件系统大小写不敏感：转小写后与固定路径比较（与 normalizeProgressPathKey 口径一致）
+    const normalizedPath = (path || '').replace(/\\/g, '/').toLowerCase();
     if (!normalizedPath || normalizedPath.startsWith('/') || normalizedPath.includes('..') || normalizedPath.endsWith('/')) {
         return false;
     }

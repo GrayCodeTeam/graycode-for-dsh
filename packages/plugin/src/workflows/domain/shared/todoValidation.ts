@@ -88,7 +88,8 @@ export function validateTodos(
 }
 
 /**
- * 收集重复 id（归一化后比较，空 id 跳过），返回 `${fieldName}:${id}` 列表（按首次出现顺序）。
+ * 收集重复 id（归一化后小写比较，空 id 跳过），返回 `${fieldName}:${id}` 列表（按首次出现顺序）。
+ * 大小写不敏感与 progress milestone 去重（PG1/pg1）及 review milestone 去重（M1/m1）口径一致。
  */
 export function findDuplicateIds(value: unknown, fieldName: string): string[] {
   if (!Array.isArray(value)) return [];
@@ -100,11 +101,12 @@ export function findDuplicateIds(value: unknown, fieldName: string): string[] {
     const rawId = (item as Record<string, unknown>).id;
     const id = normalizeSingleLineText(rawId);
     if (!id) continue;
-    if (seen.has(id)) {
+    const key = id.toLowerCase();
+    if (seen.has(key)) {
       duplicates.add(id);
       continue;
     }
-    seen.add(id);
+    seen.add(key);
   }
 
   return Array.from(duplicates).map((id) => `${fieldName}:${id}`);

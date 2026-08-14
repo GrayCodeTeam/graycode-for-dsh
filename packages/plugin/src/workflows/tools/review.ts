@@ -39,6 +39,7 @@ import {
   ensureNoActiveReviewSession,
   loadReviewSessionState,
   saveReviewSessionState,
+  withReviewSessionLock,
 } from '../sessionState.ts'
 import { withProgressWriteLock } from '../domain/progress/progressWriteLock.ts'
 import {
@@ -165,46 +166,51 @@ export async function executeCreateReview(
 
   assertReviewPathAllowed(deps, outPath)
 
-  const sessionCheck = ensureNoActiveReviewSession(deps.sessionId, outPath)
-  if (sessionCheck.ok === false) {
-    throw new Error(sessionCheck.error)
-  }
-
   const target = await resolveTarget(deps, outPath)
 
+  // 会话门闸检查移入临界区：per-path 写锁（串行化同路径创建）之内、per-session 锁
+  // （串行化同会话跨路径创建）之内「重查门闸 → 写文档 → 保存会话状态」整体原子化，
+  // 避免并发 create 双双通过门闸后互相覆盖会话状态、产生孤儿 review 文档。
   return withProgressWriteLock(outPath, async () => {
-    if (await targetExists(deps, target)) {
-      throw new Error(
-        `Review document already exists at ${outPath}. Continue it with record_review_milestone or finalize_review, or choose a different path.`
-      )
-    }
+    return withReviewSessionLock(deps.sessionId, async () => {
+      const sessionCheck = ensureNoActiveReviewSession(deps.sessionId, outPath)
+      if (sessionCheck.ok === false) {
+        throw new Error(sessionCheck.error)
+      }
 
-    const locale = getCurrentReviewDocumentLocale()
-    const content = buildInitialReviewDocument({
-      title,
-      overview: typeof rawArgs.overview === 'string' ? rawArgs.overview : '',
-      review,
-    }, locale)
-    const summary = summarizeReviewDocument(content)
-    await writeTargetText(deps, target, content)
+      if (await targetExists(deps, target)) {
+        throw new Error(
+          `Review document already exists at ${outPath}. Continue it with record_review_milestone or finalize_review, or choose a different path.`
+        )
+      }
 
-    if (summary.reviewSnapshot) {
-      saveReviewSessionState(deps.sessionId, {
-        reviewRunId: summary.reviewSnapshot.reviewRunId,
-        reviewPath: outPath,
-        status: summary.reviewSnapshot.status,
-        createdAt: summary.reviewSnapshot.createdAt,
-        finalizedAt: summary.reviewSnapshot.finalizedAt,
+      const locale = getCurrentReviewDocumentLocale()
+      const content = buildInitialReviewDocument({
+        title,
+        overview: typeof rawArgs.overview === 'string' ? rawArgs.overview : '',
+        review,
+      }, locale)
+      const summary = summarizeReviewDocument(content)
+      await writeTargetText(deps, target, content)
+
+      if (summary.reviewSnapshot) {
+        saveReviewSessionState(deps.sessionId, {
+          reviewRunId: summary.reviewSnapshot.reviewRunId,
+          reviewPath: outPath,
+          status: summary.reviewSnapshot.status,
+          createdAt: summary.reviewSnapshot.createdAt,
+          finalizedAt: summary.reviewSnapshot.finalizedAt,
+        })
+      }
+
+      return projectReviewToolResultData({
+        path: outPath,
+        content,
+        delta: {
+          type: 'created',
+          changedFields: ['header', 'scope', 'reviewSnapshot', 'reviewSession'],
+        },
       })
-    }
-
-    return projectReviewToolResultData({
-      path: outPath,
-      content,
-      delta: {
-        type: 'created',
-        changedFields: ['header', 'scope', 'reviewSnapshot', 'reviewSession'],
-      },
     })
   })
 }
@@ -473,18 +479,18 @@ function sortUnique(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean))).sort()
 }
 
-function hashFindingKey(finding: { category: string; title: string; descriptionMarkdown?: string | null; evidence: ReviewEvidenceRef[] }): string {
-  const evidenceKey = finding.evidence
-    .map((item) => normalizeEvidenceKey(item))
-    .filter(Boolean)
-    .sort()
-    .join('||')
-
+/**
+ * finding 匹配 key：只取稳定身份（category + title，归一化后哈希）。
+ *
+ * description / evidence / recommendation / severity / trackingStatus /
+ * relatedMilestoneIds 等易变字段不参与 key——它们的变化必须走 persisted 分支的
+ * changes 列表（description/evidence 等 diff 分支可达），而不是被误报为 added+removed。
+ * title 属于身份的一部分：标题变化按「新增 + 删除」处理（identity 变更，语义正确）。
+ */
+function hashFindingKey(finding: { category: string; title: string }): string {
   const payload = [
     normalizeComparableText(finding.category),
     normalizeComparableText(finding.title),
-    normalizeComparableText(finding.descriptionMarkdown),
-    evidenceKey,
   ].join('||')
 
   return `finding:${createHash('sha256').update(payload, 'utf8').digest('hex')}`
@@ -566,7 +572,6 @@ export async function executeCompareReviewDocuments(
     const changes: string[] = []
     if (baseItem.severity !== targetItem.severity) changes.push('severity')
     if (baseItem.trackingStatus !== targetItem.trackingStatus) changes.push('trackingStatus')
-    if (normalizeComparableText(baseItem.title) !== normalizeComparableText(targetItem.title)) changes.push('title')
     if (normalizeComparableText(baseItem.descriptionMarkdown) !== normalizeComparableText(targetItem.descriptionMarkdown)) changes.push('description')
     if (normalizeComparableText(baseItem.recommendationMarkdown) !== normalizeComparableText(targetItem.recommendationMarkdown)) changes.push('recommendation')
 

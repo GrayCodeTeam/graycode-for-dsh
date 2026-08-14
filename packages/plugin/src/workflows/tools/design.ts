@@ -13,6 +13,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
+import { withProgressWriteLock } from '../domain/progress/progressWriteLock.ts'
 import { slugify } from '../domain/shared/slugify.ts'
 import { normalizeLineEndingsToLF } from '../domain/shared/textUtils.ts'
 import {
@@ -74,15 +75,20 @@ export async function executeCreateDesign(
   }
 
   const target = await resolveTarget(deps, outPath)
-  if (await targetExists(deps, target)) {
-    throw new Error(
-      `Design document already exists at ${outPath}. Use update_design to revise it instead of overwriting.`
-    )
-  }
 
-  const content = normalizeLineEndingsToLF(design)
-  await writeTargetText(deps, target, content)
-  return { path: outPath, content }
+  // 「存在性检查 → 写入」整体进 per-path 写锁：并行子代理并发 create/update 同一
+  // 路径时串行化，「create 不覆盖既有文档」语义不被 TOCTOU 竞态破坏。
+  return withProgressWriteLock(outPath, async () => {
+    if (await targetExists(deps, target)) {
+      throw new Error(
+        `Design document already exists at ${outPath}. Use update_design to revise it instead of overwriting.`
+      )
+    }
+
+    const content = normalizeLineEndingsToLF(design)
+    await writeTargetText(deps, target, content)
+    return { path: outPath, content }
+  })
 }
 
 export async function executeUpdateDesign(
@@ -100,16 +106,21 @@ export async function executeUpdateDesign(
   }
 
   const target = await resolveTarget(deps, targetPath)
-  if (!(await targetExists(deps, target))) {
-    throw new Error(`Design document does not exist: ${targetPath}`)
-  }
 
-  const content = normalizeLineEndingsToLF(design)
-  await writeTargetText(deps, target, content)
-  const changeSummary = typeof args.changeSummary === 'string' && args.changeSummary.trim()
-    ? args.changeSummary.trim()
-    : undefined
-  return { path: targetPath, content, changeSummary }
+  // 「存在性检查 → 写入」整体进 per-path 写锁，与 create_design 同一队列：
+  // update 不会基于并发 create 写回前的旧盘面误判，create 也不会回滚式覆盖 update。
+  return withProgressWriteLock(targetPath, async () => {
+    if (!(await targetExists(deps, target))) {
+      throw new Error(`Design document does not exist: ${targetPath}`)
+    }
+
+    const content = normalizeLineEndingsToLF(design)
+    await writeTargetText(deps, target, content)
+    const changeSummary = typeof args.changeSummary === 'string' && args.changeSummary.trim()
+      ? args.changeSummary.trim()
+      : undefined
+    return { path: targetPath, content, changeSummary }
+  })
 }
 
 function renderToolResult<A, V>(_args: A, value: V): Array<{ type: 'text'; text: string }> {

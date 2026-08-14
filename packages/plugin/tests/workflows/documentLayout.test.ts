@@ -123,7 +123,7 @@ describe('buildProgressDocument', () => {
     const input = baseMetadata()
     input.log = Array.from({ length: 25 }, (_, i) => ({
       at: `2026-04-0${(i % 9) + 1}T00:00:00.000Z`,
-      type: 'updated' as const,
+      type: 'created' as const,
       message: `log-${i}`,
     }))
     const { metadata } = buildProgressDocument(input, { generatedAt: '2026-04-04T00:00:00.000Z' })
@@ -159,6 +159,21 @@ describe('validateProgressDocument', () => {
     const end = content.indexOf('<!-- GRAYCODE_PROGRESS_METADATA_END -->')
     const metadata = JSON.parse(content.slice(start, end)) as { milestones: Array<Record<string, unknown>> }
     metadata.milestones.push({ ...metadata.milestones[0], id: 'PG1', summary: 'dup' })
+    const tampered = `${content.slice(0, start)}${JSON.stringify(metadata, null, 2)}${content.slice(end)}`
+
+    const validation = validateProgressDocument(tampered)
+    expect(validation.success).toBe(false)
+    if (!validation.success) {
+      expect(validation.error).toContain('Duplicate milestone ids')
+    }
+  })
+
+  it('rejects case-variant duplicate milestone ids in the metadata block (PG1 vs pg1)', () => {
+    const { content } = buildProgressDocument(baseMetadata(), { generatedAt: '2026-04-04T00:00:00.000Z' })
+    const start = content.indexOf('<!-- GRAYCODE_PROGRESS_METADATA_START -->') + '<!-- GRAYCODE_PROGRESS_METADATA_START -->'.length
+    const end = content.indexOf('<!-- GRAYCODE_PROGRESS_METADATA_END -->')
+    const metadata = JSON.parse(content.slice(start, end)) as { milestones: Array<Record<string, unknown>> }
+    metadata.milestones.push({ ...metadata.milestones[0], id: 'pg1', summary: 'dup' })
     const tampered = `${content.slice(0, start)}${JSON.stringify(metadata, null, 2)}${content.slice(end)}`
 
     const validation = validateProgressDocument(tampered)

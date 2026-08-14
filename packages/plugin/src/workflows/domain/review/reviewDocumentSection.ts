@@ -631,10 +631,19 @@ function nextFindingId(existingIds: Set<string>, preferredTitle: string, categor
   return candidate;
 }
 
+function hasMilestoneIdIgnoreCase(existingIds: Set<string>, candidate: string): boolean {
+  const lower = candidate.toLowerCase();
+  for (const id of existingIds) {
+    if (id.toLowerCase() === lower) return true;
+  }
+  return false;
+}
+
 function nextMilestoneId(existingIds: Set<string>, indexHint: number): string {
   let candidate = `M${indexHint}`;
   let cursor = indexHint + 1;
-  while (existingIds.has(candidate)) {
+  // 大小写不敏感查重：文档已有小写变体（如 m1）时自动生成器不会产出 M1 造成同义重复
+  while (hasMilestoneIdIgnoreCase(existingIds, candidate)) {
     candidate = `M${cursor}`;
     cursor += 1;
   }
@@ -2531,7 +2540,8 @@ export function appendReviewMilestone(content: string, input: ReviewMilestoneInp
   const existingMilestoneIds = new Set(state.snapshot.milestones.map((item) => item.id));
   const milestoneId = normalizeSingleLineText(input.milestoneId)
     || nextMilestoneId(existingMilestoneIds, state.snapshot.milestones.length + 1);
-  if (state.snapshot.milestones.some((item) => item.id === milestoneId)) {
+  // 显式 milestoneId 的重复检查与自动生成器口径一致：大小写不敏感（M1 与 m1 视为同一 id）
+  if (state.snapshot.milestones.some((item) => item.id.toLowerCase() === milestoneId.toLowerCase())) {
     throw new Error(`Duplicate milestone id is not allowed: ${milestoneId}`);
   }
 

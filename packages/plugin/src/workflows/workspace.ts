@@ -7,7 +7,6 @@
  * `workspaceName/.graycode/...` 前缀支持（首段与 workspace 目录名一致时剥离后判定）。
  */
 
-import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import {
@@ -198,15 +197,6 @@ export function applyProgressArtifactPatch(
   return next
 }
 
-/**
- * 递归创建父目录。工作区路径在沙箱内，仅此用途；
- * ctx.fs.writeText 的 createIfAbsent 是否自动建目录不确定，写前统一显式 mkdir。
- */
-export async function ensureParentDir(processPath: string): Promise<void> {
-  const dir = path.dirname(processPath)
-  await fs.mkdir(dir, { recursive: true })
-}
-
 /** 解析工作区内相对路径为 FsTarget（相对 cwd） */
 export function resolveTarget(deps: ToolDeps, relPath: string): Promise<FsTarget> {
   return deps.fs.resolve(relPath, { cwd: deps.cwd, signal: deps.signal })
@@ -223,9 +213,13 @@ export async function readTargetText(deps: ToolDeps, target: FsTarget): Promise<
   return deps.fs.readText(target, deps.signal)
 }
 
-/** 写入目标文本：先 mkdir 父目录，内容归一化 LF 后写入 */
+/**
+ * 写入目标文本：内容归一化 LF 后写入。
+ *
+ * 不在此处用 node:fs 直接 mkdir 父目录：dsh-fs-local 的 writeFileAtomic 内置
+ * recursive mkdir（自动建父目录），且 node:fs 直写会绕过 fs 后端的权限/审批/沙箱层
+ * （PLAN_V2 §6.2：文件写入经 ctx.fs）。父目录自动创建由 fs 后端保证。
+ */
 export async function writeTargetText(deps: ToolDeps, target: FsTarget, content: string): Promise<void> {
-  const processPath = deps.fs.processPath(target)
-  await ensureParentDir(processPath)
   await deps.fs.writeText(target, normalizeLineEndingsToLF(content), undefined, deps.signal)
 }

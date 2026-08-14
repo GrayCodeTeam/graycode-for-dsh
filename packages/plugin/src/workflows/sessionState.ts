@@ -13,6 +13,35 @@ export const REVIEW_SESSION_METADATA_KEY = 'reviewSession'
 
 const sessionStates = new Map<string, ConversationReviewSessionState>()
 
+/** 会话级互斥队列：把「门闸检查 → 写文档 → 保存会话状态」按 sessionId 串行化 */
+const sessionLocks = new Map<string, Promise<unknown>>()
+
+/**
+ * 在 per-session 互斥内执行 `fn`（sessionId 缺省时退化为单条全局队列）。
+ *
+ * 用途：create_review 的会话门闸是「检查-然后-写」，与文件写锁不在同一临界区时，
+ * 同一 sessionId 并发创建不同路径的 review 会双双通过门闸，后写者覆盖先写者的
+ * 会话状态，先创建的 review 文档成为孤儿。把「重查门闸 → 写文件 → 保存状态」整体
+ * 包进本锁后，同一会话的创建严格串行：第二个创建者重查门闸时必然看到活跃会话并拒绝。
+ */
+export function withReviewSessionLock<T>(sessionId: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const key = sessionId || ''
+  const previous = sessionLocks.get(key) || Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(fn)
+  sessionLocks.set(key, next)
+  // 队列排空后清理条目，避免 Map 随会话数无限增长
+  next
+    .finally(() => {
+      if (sessionLocks.get(key) === next) {
+        sessionLocks.delete(key)
+      }
+    })
+    .catch(() => undefined)
+  return next
+}
+
 /** 测试与诊断用：清空全部进程内会话状态 */
 export function resetReviewSessionStatesForTest(): void {
   sessionStates.clear()

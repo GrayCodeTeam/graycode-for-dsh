@@ -129,6 +129,35 @@ describe('appendReviewMilestone', () => {
     }, 'en')).toThrow(/Duplicate milestone id is not allowed: M1/)
   })
 
+  it('rejects a case-variant duplicate milestone id (M1 vs m1)', () => {
+    const first = appendReviewMilestone(buildInitialDoc(), {
+      milestoneId: 'M1',
+      milestoneTitle: '第一次',
+      summary: '摘要一',
+    }, 'en')
+    expect(() => appendReviewMilestone(first.content, {
+      milestoneId: 'm1',
+      milestoneTitle: '第二次',
+      summary: '摘要二',
+    }, 'en')).toThrow(/Duplicate milestone id is not allowed: m1/)
+  })
+
+  it('auto-generated milestone ids skip case variants of existing ids', () => {
+    // 文档已有小写变体 m2：indexHint 产出的候选 M2 与 m2 大小写同义，
+    // 自动生成器必须跳过 M2 取 M3（大小写不敏感查重）
+    const first = appendReviewMilestone(buildInitialDoc(), {
+      milestoneId: 'm2',
+      milestoneTitle: '第一次',
+      summary: '摘要一',
+    }, 'en')
+    const second = appendReviewMilestone(first.content, {
+      milestoneTitle: '第二次',
+      summary: '摘要二',
+    }, 'en')
+    expect(second.milestoneId).toBe('M3')
+    expect(second.reviewSnapshot?.milestones.map((m) => m.id)).toEqual(['m2', 'M3'])
+  })
+
   it('rejects recording a milestone for a finalized document', () => {
     const finalized = finalizeReviewDocument(buildInitialDoc(), {
       conclusion: '整体结论',

@@ -443,12 +443,15 @@ export async function executeRecordProgressMilestone(
       ? rawArgs.milestoneId.trim()
       : ''
     const milestoneId = requestedMilestoneId || generateNextMilestoneId(currentMetadata.milestones)
-    if (currentMetadata.milestones.some((item) => item.id === milestoneId)) {
+    // 重复 id 检查与自动生成器口径一致：大小写不敏感（PG1 与 pg1 视为同一里程碑）
+    if (currentMetadata.milestones.some((item) => item.id.toLowerCase() === milestoneId.toLowerCase())) {
       throw new Error(`Milestone id already exists: ${milestoneId}`)
     }
 
     const now = new Date().toISOString()
-    const milestoneStatus: ProgressMilestoneStatus = rawArgs.status === 'completed' ? 'completed' : 'in_progress'
+    // 与源语义一致：仅显式传 in_progress 才是进行中；缺省（或 completed）一律为
+    // completed，且 completedAt 缺省为当前时间（completedAt 赋值见下方 milestone 构造）。
+    const milestoneStatus: ProgressMilestoneStatus = rawArgs.status === 'in_progress' ? 'in_progress' : 'completed'
 
     const milestone = {
       id: milestoneId,

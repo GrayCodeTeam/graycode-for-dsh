@@ -55,6 +55,21 @@ describe('modeToolsPolicy path whitelist', () => {
     expect(isPlanPathAllowed('.graycode/plans/sub/foo.md')).toBe(true)
     expect(isPlanPathAllowed('.graycode/design/foo.md')).toBe(false)
   })
+
+  it('accepts case variants (.MD extension / .GRAYCODE root) — Windows case-insensitive semantics (BUG-10)', () => {
+    expect(isDesignPathAllowed('.graycode/design/foo.MD')).toBe(true)
+    expect(isDesignPathAllowed('.GRAYCODE/design/foo.md')).toBe(true)
+    expect(isDesignPathAllowed('.graycode/DESIGN/foo.md')).toBe(true)
+    expect(isReviewPathAllowed('.GRAYCODE/REVIEW/bar.MD')).toBe(true)
+    expect(isPlanPathAllowed('.GrayCode/Plans/foo.PLAN.MD')).toBe(true)
+    expect(isProgressPathAllowed('.GRAYCODE/PROGRESS.MD')).toBe(true)
+    expect(isProgressPathAllowed('.graycode/progress.md')).toBe(true)
+
+    // 大小写归一不影响拒绝规则：越界路径仍然拒绝
+    expect(isDesignPathAllowed('.GRAYCODE/plans/foo.md')).toBe(false)
+    expect(isDesignPathAllowed('.graycode/design/foo.TXT')).toBe(false)
+    expect(isProgressPathAllowed('.GRAYCODE/PROGRESS2.MD')).toBe(false)
+  })
 })
 
 describe('workspace multi-root prefix variants', () => {
