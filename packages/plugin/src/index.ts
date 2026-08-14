@@ -16,6 +16,7 @@ import * as todo from './todo/index.ts'
 import * as subagents from './subagents/index.ts'
 import * as notifications from './notifications/index.ts'
 import * as thoughts from './thoughts/index.ts'
+import * as settings from './settings/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -52,6 +53,8 @@ export interface Config {
   notifications: notifications.Config
   /** Thoughts request layer (A1): llm/stream rewrite, off by default. */
   thoughts: thoughts.Config
+  /** Gray Code 设置面板：graycode settings 命名空间 + /graycode 配置通道。 */
+  settings: settings.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -71,6 +74,7 @@ export const Config: z<Config> = z.object({
   subagents: subagents.Config,
   notifications: notifications.Config,
   thoughts: thoughts.Config,
+  settings: settings.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -105,4 +109,7 @@ export function apply(ctx: Context, config: Config): void {
   // ADR-0002 §4b), off by default. Reads the prompt-mode service lazily via
   // ctx.get — prompt must mount first (it does, above) so the service exists.
   ctx.plugin(thoughts, { ...config.thoughts })
+  // Settings 面板域：注册 graycode settings 命名空间（持久化）+ /graycode 配置
+  // 通道（浏览器面板读写；connection 缺失时通道跳过，命名空间不受影响）。
+  ctx.plugin(settings, { ...config.settings })
 }

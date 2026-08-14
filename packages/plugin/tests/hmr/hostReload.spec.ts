@@ -115,6 +115,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     subagents: { maxHopDepth: 5, maxConcurrent: 2 },
     notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
     thoughts: { enabled: false, sendHistoryThoughts: false },
+    settings: { base: {} },
   }
 }
 
