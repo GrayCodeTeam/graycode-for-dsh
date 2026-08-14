@@ -14,7 +14,7 @@
  *   staged 条目（与主文档一致，接受后才落盘），否则直接落盘。
  */
 
-import type { ProgressDocumentMetadataV1 } from './domain/progress/schema.ts'
+import type { ProgressDocumentMetadataV1, ProgressPhase, ProgressTodoItem } from './domain/progress/schema.ts'
 import { buildProgressDocument, validateProgressDocument } from './domain/progress/documentLayout.ts'
 import { withProgressWriteLock } from './domain/progress/progressWriteLock.ts'
 import { slugify } from './domain/shared/slugify.ts'
@@ -35,6 +35,13 @@ import {
 export interface SyncProgressFromDesignArtifactArgs {
   designPath: string
   title?: string
+}
+
+export interface SyncProgressFromPlanArtifactArgs {
+  planPath: string
+  title?: string
+  todos?: ProgressTodoItem[]
+  updateMode?: 'revision' | 'progress_sync'
 }
 
 export interface SyncProgressFromReviewArtifactArgs {
@@ -176,6 +183,75 @@ export async function syncProgressFromDesignArtifact(
     })
   } catch (error) {
     return [`Failed to auto-sync progress after design write: ${error instanceof Error ? error.message : String(error)}`]
+  }
+}
+
+/** plan 文档写入后的 best-effort 进度同步（失败返回 warning，不抛错） */
+export async function syncProgressFromPlanArtifact(
+  deps: ToolDeps,
+  args: SyncProgressFromPlanArtifactArgs
+): Promise<string[]> {
+  const planPath = normalizeSingleLineText(args.planPath)
+  if (!planPath) return []
+
+  const progressPath = resolveProgressPathForArtifact(planPath)
+  const updateMode = args.updateMode === 'progress_sync' ? 'progress_sync' : 'revision'
+
+  try {
+    return await withProgressWriteLock(progressPath, async () => {
+      const now = new Date().toISOString()
+      const loaded = await loadExistingProgress(deps, progressPath)
+      if (loaded.error) {
+        return [`Failed to auto-sync progress after plan write: ${loaded.error}`]
+      }
+
+      const base = loaded.missing || !loaded.metadata
+        ? {
+          ...buildInitialProgressMetadata(deps, now, progressPath),
+          phase: updateMode === 'progress_sync' ? 'implementation' : 'plan',
+        }
+        : loaded.metadata
+
+      // 与源 autoSync 一致：progress 缺失时 phase 按模式初始化（revision→plan /
+      // progress_sync→implementation）；已存在时 progress_sync 保持当前 phase，
+      // revision 仅在 design/plan 阶段推进到 plan（实现阶段不被回退）。
+      const currentPhase = base.phase as ProgressPhase | undefined
+      const nextPhase: ProgressPhase | undefined = loaded.missing
+        ? (updateMode === 'progress_sync' ? 'implementation' : 'plan')
+        : updateMode === 'progress_sync'
+          ? currentPhase
+          : (currentPhase === 'design' || currentPhase === 'plan' ? 'plan' : currentPhase)
+
+      const nextMetadata: Partial<ProgressDocumentMetadataV1> = {
+        ...base,
+        updatedAt: now,
+        phase: nextPhase,
+        currentFocus: !base.currentFocus && normalizeSingleLineText(args.title)
+          ? normalizeSingleLineText(args.title)
+          : base.currentFocus,
+        activeArtifacts: {
+          ...(base.activeArtifacts || {}),
+          plan: planPath,
+        },
+        todos: Array.isArray(args.todos) ? args.todos : base.todos,
+        log: [
+          ...(base.log || []),
+          {
+            at: now,
+            type: 'artifact_changed',
+            refId: 'plan',
+            message: updateMode === 'progress_sync'
+              ? `同步计划 TODO 快照：${planPath}`
+              : `同步计划文档：${planPath}`,
+          },
+        ],
+      }
+
+      await writeProgress(deps, progressPath, nextMetadata, now)
+      return []
+    })
+  } catch (error) {
+    return [`Failed to auto-sync progress after plan write: ${error instanceof Error ? error.message : String(error)}`]
   }
 }
 
