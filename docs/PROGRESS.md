@@ -176,6 +176,22 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - 脱敏：凭据与 url/CLI 参数一律脱敏，报告不输出密钥
 - 实现：packages/plugin/src/migration/adapters/storage/settingsTarget.ts
 
+### Phase 5 收尾：B1 凭据一键迁移 + B2 写时信息合流 — 已落地（2026-09）
+
+- **B1 凭据一键迁移（✅ 已落地）**：`migration_apply` 新增 `migrateCredentials` 参数（默认 false）；
+  授权后 apply 以 collectSecrets 模式重新解析（明文 apiKey 仅内存），settingsTarget 对每个有 route 的
+  渠道调用 `ctx.credentials.set(GRAYCODE_<TYPE>_<ID>_API_KEY, apiKey)`；写入后立即丢弃明文。
+  失败隔离（单 ref 失败不抛出，保留「需重录」状态并记 credentialMigrationErrors）；
+  未授权时行为与旧版完全一致（引用占位 + 重录清单）。
+- 安全不变量保持：credentialSecrets 绝不进入报告/建议文件/日志/notes——
+  `buildReport` 新增 `sanitizeSettingsSummary` 防御性剥离；建议文件与机器 JSON 全程无明文。
+- **B2 settings 写时信息合流（✅ 已落地）**：`WriteTargetResult` 新增 `summary`（脱敏写时结果），
+  settings writer 返回 dshWrite（mode/writtenRoutes/conflictSkippedRoutes/credentialRefs/
+  migratedCredentialRefs/credentialStates/rejectionMessage），apply 后合流进机器报告
+  `report.settingsSummary.writeResult`（替代此前只进 run.notes 的形态）。
+- 新增用例：settingsParser 3 + settingsTarget 3 + importService 2（共 8 个，含无明文断言）。
+- 实现：settingsParser.ts / validator.ts / importService.ts / settingsTarget.ts / tools.ts / ports.ts
+
 ### Phase 6 发布 — pending（CI 就绪；npm 发布、三平台验收、升级/回滚演练待做）
 
 ## §6.5 Agent 作用域注册 — 已实现并在真实运行时验证
@@ -215,14 +231,12 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 ### 迁移增强（B 组）
 
-- **B1 凭据一键迁移（已允许）**：渠道导入支持用户显式授权后，把旧 apiKey 经
-  `ctx.credentials.set(ref, value)` 写入 DSH（引用名 `GRAYCODE_<TYPE>_<ID>_API_KEY`）；
-  当前实现只生成引用占位 + credentialReentryRequired 重录清单。定案：允许迁移；
-  注意旧 key 可能已过期/轮换，写入前需用户确认授权。
-- **B2 settings 写时信息合流**：渠道导入的写时结果（已写入 routes / 冲突跳过 /
-  凭据引用）目前只进 `report.run.notes` 与建议文件，不进机器 JSON 的
-  `settingsSummary`（需改 `importService.buildReport` 合流）。定案：要合流。
-- **B3 snapshots 迁移接线**：旧 snapshots 解析器已就绪（parseSnapshot），但 plan 层
+- **B1 凭据一键迁移（✅ 已落地，2026-09）**：`migration_apply` 新增 `migrateCredentials` 授权参数；
+  授权后旧 apiKey 经 `ctx.credentials.set(ref, value)` 写入 DSH（引用名 `GRAYCODE_<TYPE>_<ID>_API_KEY`）；
+  明文仅内存、失败隔离、报告全程无明文（见上「B1/B2 已落地」节）。
+- **B2 settings 写时信息合流（✅ 已落地，2026-09）**：写时结果（routes/冲突/凭据引用/迁移状态）
+  经 `WriteTargetResult.summary` 合流进机器 JSON `report.settingsSummary.writeResult`。
+- **B3 snapshots 迁移接线（待实施）**：旧 snapshots 解析器已就绪（parseSnapshot），但 plan 层
   恒 unmapped（noopTarget fail-closed）。定案：尽量接 DSH lineage / session fork
   语义（探明 DSH 公开 API 后实现）。
 

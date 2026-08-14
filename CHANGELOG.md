@@ -32,6 +32,10 @@
 - **旧数据迁移器（Phase 5）**：migration_scan（dry-run 不写盘）+ migration_apply（confirmToken
   二次确认、逐域提交点、幂等重跑），legacy 解析器（conversations 双格式、checkpoint v1/v2
   ATOMIC-PAIR、memory LOG/TREE 320/1024、设置导出脱敏），14 类脱敏 fixture。
+- **迁移增强 B1/B2**：migration_apply 新增 `migrateCredentials` 授权参数——凭据一键迁移
+  （旧 apiKey 经 `ctx.credentials.set` 写入 DSH，明文仅内存、失败隔离、报告全程无明文）；
+  settings 写时结果（routes/冲突/凭据引用/迁移状态）合流进机器 JSON
+  `settingsSummary.writeResult`。
 - **Client 包（Phase 4 骨架）**：`@graycode/dsh-client`，`dsh.client` manifest、
   `shell.overlay` slot 注册、zh/en locale、tsdown browser bundle（3.7 kB，可被 DSH 加载）。
 - **CI 与打包**：`.github/workflows/ci.yml`（三平台矩阵、typecheck/test/build/pack/tarball 检查）、
