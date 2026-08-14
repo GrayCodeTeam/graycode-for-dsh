@@ -32,7 +32,6 @@ let dataRoot: string
 let ctx: Context
 let agent: Agent
 let tools: Map<string, ToolDefinition>
-let linkSupported = true
 const mounted: Array<{ dispose(): Promise<void> }> = []
 
 function exec(): ToolRunContext {
@@ -72,14 +71,6 @@ beforeAll(async () => {
       name => [name, ctx.tools.get(name, agent)!]
     )
   )
-  // 符号链接支持探测（Windows 需要开发者模式/管理员权限）
-  const probe = path.join(workspace, '__symlink_probe__')
-  try {
-    await fs.symlink(workspace, probe, 'dir')
-    await fs.rm(probe)
-  } catch {
-    linkSupported = false
-  }
 })
 
 afterAll(async () => {
@@ -156,7 +147,23 @@ describe('staged_diff 工具闭环（真实 ctx.fs 落盘）', () => {
     expect(result.code).toBe('GRAY_STAGED_INVALID_PATH')
   })
 
-  it.runIf(linkSupported)('符号链接逃逸：accept 拒绝（GRAY_STAGED_PATH_ESCAPE），外部目录不被写入', async () => {
+  it('符号链接逃逸：accept 拒绝（GRAY_STAGED_PATH_ESCAPE），外部目录不被写入', async t => {
+    // 探测在测试体内执行：runIf/skipIf 在定义时求值，beforeAll 探针无法生效；
+    // Windows 未开开发者模式/无管理员权限时 symlink 抛 EPERM → 动态跳过
+    const probe = path.join(workspace, '__symlink_probe__')
+    try {
+      await fs.symlink(workspace, probe, 'dir')
+      await fs.rm(probe)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM') {
+        console.warn(`[stagedDiff/tools] symbolic links unavailable (${detail}); test skipped`)
+        t.skip()
+        return
+      }
+      throw error
+    }
+
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-staged-outside-'))
     try {
       await fs.symlink(outside, path.join(workspace, 'link'), 'dir')
