@@ -13,9 +13,9 @@
 
 | 包 | 角色 | tarball（仓库根） | files 白名单 |
 | --- | --- | --- | --- |
-| `@graycode/dsh` | bundle 组合层（cordis.patch.yml 增量层） | `graycode-dsh-0.1.0.tgz` | `cordis.patch.yml`、`README.md` |
-| `@graycode/dsh-plugin` | 宿主插件（全部领域实现） | `graycode-dsh-plugin-0.1.0.tgz` | `lib`、`README.md` |
-| `@graycode/dsh-client` | Client 插件（browser bundle + slot） | `graycode-dsh-client-0.1.0.tgz` | `lib`、`README.md` |
+| `@graycode/dsh` | bundle 组合层（cordis.patch.yml 增量层） | `graycode-dsh-0.1.0.tgz` | `cordis.patch.yml`、`README.md`（npm 同时自动纳入 `LICENSE`） |
+| `@graycode/dsh-plugin` | 宿主插件（全部领域实现） | `graycode-dsh-plugin-0.1.0.tgz` | `lib`、`README.md`（npm 同时自动纳入 `LICENSE`） |
+| `@graycode/dsh-client` | Client 插件（browser bundle + slot） | `graycode-dsh-client-0.1.0.tgz` | `lib`、`README.md`（npm 同时自动纳入 `LICENSE`） |
 
 - 根包 `graycode-dsh` 为 `private: true`，**不发布**；根 `pack` 脚本已用 `--filter` 排除
   （`pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin --filter @graycode/dsh-client pack`）。
@@ -38,13 +38,13 @@ npx --yes pnpm@11.7.0 run pack           # 必须 `run`：裸 `pnpm pack` 会打
 npx --yes pnpm@11.7.0 run verify:pack -SkipBuild -SkipPack   # tarball 已存在时只做内容检查
 ```
 
-- `verify:pack` 退出码：黑名单 / 结构违规 / bundle patch 行缺失依赖 → 1；README/LICENSE
-  缺失默认仅 WARN（`-Strict` 才失败）；无 tarball → 1。
+- `verify:pack` 退出码：黑名单 / 结构违规 / 悬空 exports / bundle patch 行缺失依赖 → 1；
+  README/LICENSE 缺失默认仅 WARN（`-Strict` 才失败）；无 tarball → 1。
 - CI 侧：`.github/workflows/ci.yml` 的 `full`（Linux 全量）+ `smoke`（Windows/macOS 子集）
   已各自跑 build → pack → tarball 校验，三平台结果都应绿。
-- 已知预期：`full` job 末尾的 dsh clean-profile 冒烟在 `@graycode/*` 发布前会
-  `ERR_PNPM_FETCH_404`（`continue-on-error: true` + artifact 日志，非阻塞）——发布后应翻转
-  （见 §5）。
+- `full` job 的 plugin tarball clean-profile 安装与 profile 加载是硬门禁；其后的 bundle
+  探针在 `@graycode/*` 发布前会 `ERR_PNPM_FETCH_404`，仅该独立步骤暂设
+  `continue-on-error: true` 并上传 artifact——发布后应翻转（见 §5）。
 
 ## 3. 产物核对
 
@@ -73,8 +73,8 @@ npx --yes pnpm@11.7.0 run verify:pack -SkipBuild -SkipPack   # tarball 已存在
 ### 3.3 README / LICENSE 状态
 
 - README：三包 `README.md` 均在 files 白名单内，verify-pack 报 present。
-- LICENSE：`packages/*` 下无 LICENSE 文件 → 三个 tarball 内均无 LICENSE（verify-pack 报
-  WARN，`-Strict` 才失败）。建议发布前处理，见问题清单 #2。
+- LICENSE：三个包目录均有 MIT `LICENSE`，三个 tarball 均报 present；`verify-pack -Strict`
+  不会因此产生警告或失败。
 
 ## 4. 发布步骤（npm publish —— 需 npm 账号）
 
@@ -126,8 +126,8 @@ pnpm --filter @graycode/dsh publish
    `plugin/tests/hmr/hostReload.spec.ts` 已用 `Fiber.restart()` 验证 20 轮）。
 4. **升级 / 回滚演练**：先装上一版本（如本地 tarball 0.1.0）→ 升级到 registry 新版 →
    验证 dataRoot 数据（memory/checkpoints/sidecar）不丢 → 降级回旧版再次验证。
-5. **CI 冒烟翻转**（发布后动作，本批次不改 `.github/`）：把 `ci.yml` 中 dsh 冒烟步骤的
-   `continue-on-error: true` 改为 `false`，使 bundle clean-room 安装成为硬性门槛。
+5. **CI bundle 探针翻转**（发布后动作）：移除 `ci.yml` 中 bundle clean-profile 探针的
+   `continue-on-error: true`，使其与已经阻断的 plugin 安装烟测一起成为硬性门槛。
 
 ## 6. 回滚预案
 
@@ -157,17 +157,16 @@ pnpm --filter @graycode/dsh publish
   的 CJS closure（tsdown 固定 banner/footer/intro，见 `packages/client/tsdown.config.ts`）。
   DSH 客户端模块系统若在后续版本变更该契约，bundle 需重建适配。
 - **CI 冒烟 404 预期**：`@graycode/*` 发布前 bundle 的 clean-room 安装必然
-  `ERR_PNPM_FETCH_404`（`continue-on-error` + artifact 日志，见 docs/CI.md §4 #1）；
-  发布后翻转（§5-5）。
-- **`exports["./src/*"]` 悬空导出**：plugin 的该 export 指向未打包的 `src/`，见问题清单 #3。
+  `ERR_PNPM_FETCH_404`（独立 bundle probe 的 `continue-on-error` + artifact 日志，见
+  docs/CI.md §4 #1）；plugin tarball 烟测始终阻断，发布后翻转 bundle probe（§5-5）。
 
 ## 8. 问题清单（本批次静态核对）
 
 | # | 级别 | 项 | 处置 |
 | --- | --- | --- | --- |
-| 1 | 阻塞 | 无——三包 files 白名单均覆盖全部运行产物；exports 指向的 lib 文件全部存在；bundle patch 行 ↔ dependencies 一致（verify-pack 自动检查） | — |
-| 2 | P2（建议） | `packages/*` 下无 LICENSE 文件 → 三个 tarball 内均无 LICENSE（verify-pack WARN，`-Strict` 失败） | 发布前在三个包目录放置 MIT LICENSE（与根 LICENSE 同文本），或确认接受 WARN |
-| 3 | 观察项 | plugin `exports["./src/*"]` 指向 `./src/*`，但 files 只含 `lib`+`README` → 发布后该子路径不可解析。当前仓库内无外部引用（测试走相对路径 `../../src/...`，workspace 内不受影响） | 若需对外暴露 src 子路径，把对应目录纳入 files；否则可接受 |
+| 1 | 阻塞 | 无——三包 files 白名单均覆盖全部运行产物；exports 指向的文件全部存在；bundle patch 行 ↔ dependencies 一致（verify-pack 自动检查） | — |
+| 2 | 已修正 | 三个包目录与 tarball 均包含 MIT LICENSE | `verify-pack` 实测 present，warnings 0 |
+| 3 | 已修正 | plugin 曾声明未打包的 `exports["./src/*"]` | 移除非公开源码导出；verify-pack 新增 exports 目标存在性硬检查 |
 | 4 | 已修正 | 根 README 安装示例的 tarball 路径原写 `./packages/bundle/...`，实际产物在仓库根（docs/CI.md §4 #2） | 本批次已改为 `./graycode-dsh-0.1.0.tgz` |
 
 ## 9. 本批次验证命令（主代理统一执行）
@@ -179,4 +178,4 @@ npx --yes pnpm@11.7.0 run verify:pack -SkipBuild -SkipPack
 
 预期：`pack` 产出 `graycode-dsh-0.1.0.tgz` / `graycode-dsh-plugin-0.1.0.tgz` /
 `graycode-dsh-client-0.1.0.tgz` 三个 tarball（仓库根）；`verify:pack` 输出
-`RESULT: PASS`（README present ×3；LICENSE WARN ×3 为预期非阻塞项，见问题清单 #2）。
+`RESULT: PASS`（README present ×3；LICENSE present ×3；warnings 0）。

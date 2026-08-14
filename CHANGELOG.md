@@ -46,7 +46,7 @@
   `migration/scopeMap` Remote 端点（仅 allowLegacyReaders=true 注册）。
 - **Client ScopeMapPanel（D-2 可视化）**：`src/client/scopeMap/`——表格（hashDir/source/
   status + 目标单选）+ overrides JSON 导出（只含手动行，供 scopeOverridesFile 输入）+
-  空态/replay 退化；Remote/Mock 双源；locale 命名空间 `graycode.scopeMap`；31 用例。
+  空态/replay 退化；Remote/Mock 双源；locale 命名空间 `graycode.scopeMap`；32 用例。
 - **迁移报告归属透明化（D-4a/D-5b）**：报告「会话工作区归属缺失（已接受降级）」
   （`conversationCwdIssues`：workspaceUri 无法派生 cwd 的会话清单）与「会话历史存档点」
   （`conversationCheckpointLists`：custom.checkpoints id 清单）两节；cwd 派生下沉 domain。
@@ -214,7 +214,9 @@
   multi-root 前缀。
 - **remote（投影日志）**：sidecar 滚动（rotateIfOversized）后保留尾随换行——此前
   `keep.join('\n')` 无尾部换行，下一次追加会把新条目拼到滚动边界旧条目上，产生
-  一条无法解析的合并脏行，边界两条记录永久丢失（回放静默跳过）。
+  一条无法解析的合并脏行，边界两条记录永久丢失（回放静默跳过）；滚动前先剔除
+  split 产生的尾空行，避免“保留后半”少一条；新增 `flush()`，清理与测试不再靠固定 sleep
+  猜测异步写链是否完成。
 - **file（delete_code）**：`MAX_EDIT_FILE_BYTES`（5MB）此前声明但从未执行，超限
   文件会被完整读入内存再切行；现于读取后按字节数拒绝（per-file 失败，边界 == 上限
   仍允许）。
@@ -236,6 +238,13 @@
   ERR_MODULE_NOT_FOUND（实测复现）；补依赖后 `--dump-config`/真实启动均通过。
 - **verify-pack**：新增「bundle patch 行 name ↔ bundle dependencies」一致性检查
   （parse patch 的 insert 行，缺依赖即失败），防上述回归在打包门禁外发生。
+- **migration scope 覆盖**：`scopeOverridesFile` 与 service 入口双层校验 value 类型、空键及
+  POSIX/Windows/UNC 绝对路径；损坏/缺失 scope 的 unmapped workspace memory 可在 apply
+  获得合法覆盖后恢复导入，并重新走台账判定，重跑保持 already-imported/conflict 幂等语义。
+- **CI clean-profile 烟测**：plugin tarball 安装与 profile 配置加载改为阻断步骤并启用
+  `set -euo pipefail`；尚未发布导致的 404 只留在独立 bundle 探针，不再掩盖插件失败。
+- **发布包 exports**：移除 plugin 未随 tarball 发布的 `./src/*` 子路径；verify-pack 新增
+  所有相对 exports 目标存在性硬检查。
 
 ### Security（安全）
 

@@ -13,9 +13,11 @@ packages/client/
 └── src/
     ├── index.ts          # Node half (cordis plugin entry; no host behavior yet)
     └── client/           # Browser bundle
-        ├── index.ts      # apply(): locale registration + shell.overlay contribution
+        ├── index.ts      # definitions/locales/overlay registration + mountable exports
         ├── locales.ts    # `graycode` locale namespace (zh/en + ja placeholder)
-        └── GrayCodeBadge.tsx  # "Gray Code loaded" marker (React)
+        ├── GrayCodeBadge.tsx  # "Gray Code loaded" marker (React)
+        └── <surface>/    # workflow, memory, checkpoint, restore, staged diff,
+                          # settings, activity, scope map and notifications
 ```
 
 ## How DSH loads this package (rc.6)
@@ -65,6 +67,12 @@ pnpm --filter @graycode/dsh-client build   # tsc -p tsconfig.json && tsdown
   `@deepseek-ai/dsh-client-ui-layout`), deferred via `ctx.slots.inject`
   until the slot is declared. The marker is a list entry (`id:
   graycode.loaded`), so it never shadows or replaces other entries.
+- **Conversation definition** — Gray workflow tool events are projected to
+  `kind: 'graycode.workflow'` nodes through `conversationEvents`.
+- **Mountable surfaces** — workflow node/overview, memory management,
+  checkpoint list, restore preview, staged diff, settings, activity heatmap,
+  scope mapping and notification center components are exported with their
+  locale namespaces and contract-driven data sources.
 
 ## GAPs and handoffs
 
@@ -74,13 +82,10 @@ pnpm --filter @graycode/dsh-client build   # tsc -p tsconfig.json && tsdown
   release; it cannot become selectable without an upstream change.
 - **GAP-2 (host half)**: the Node half is intentionally a no-op plugin. DSH
   rc.6 has no Node-side "register client module" API — the manifest is the
-  registration. Future host-side work (settings schemas, remotes, event
-  projections per PLAN_V2 §5.6) will land here.
-- **Handoff**: for the bundle to actually load the client, the profile
-  (`@graycode/dsh` → `packages/bundle/cordis.patch.yml`, owned by the bundle
-  package) needs an entry for `@graycode/dsh-client` (PLAN_V2 §5.2 suggests
-  `id: graycode-client`). Not part of this skeleton.
-- **TODO (remote/projection surface)**: `src/client/` currently contains only
-  the marker + locale. Remote consumers and conversation-node projections
-  (PLAN_V2 §5.6 contract 3) arrive in a later phase; `@deepseek-ai/dsh-api-remotes/client`
-  and `@deepseek-ai/dsh-client-runtime/client` are the intended surfaces.
+  registration. Host Remote endpoints live in `@graycode/dsh-plugin`.
+- **GAP-3 (runtime mounting/transport)**: the bundle already inserts
+  `@graycode/dsh-client` as `id: graycode-client`, but DSH rc.6 exposes neither
+  a management-view slot nor a browser→host Remote transport for these
+  surfaces. They therefore ship as tested, mountable exports with mock/contract
+  data sources; runtime navigation and live Remote wiring require an upstream
+  host surface or a later DSH compatibility layer.

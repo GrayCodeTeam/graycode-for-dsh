@@ -4,10 +4,11 @@
 > 基线版本：Gray Code `067f9693`（v1.5.4）/ DSH `47f9438`（0.1.0-rc.6）
 > 状态：P3A/P3B/P3C/P3E/P3F 已移植并通过真实 DSH 运行时验证（P3F 按 D-11 = c 落地）；
 > P0-08 已落地；P3D 决策完成（ADR-0003，staged-diff 首发工作包已实现，写工具适配已完成）；
-> Phase 4 Client UI（P4-01~P4-07）已交付；Phase 5 迁移器已交付；审计批次完成（docs/review/）；
+> Phase 4 Client UI 的组件/契约已交付（rc.6 下运行时管理视图挂载与浏览器 Remote 通道仍为
+> 上游 GAP）；Phase 5 迁移器已交付；审计批次完成（docs/review/）；
 > D-1（模板对齐）/ D-4（toolPolicy 执行链）已落地；D-5/D-6 已文档化。
 > 本轮：plan 工具（P3A 扩展）已注册；activity 域（get_activity_stats）与 media 域
-> （3 本地工具）已挂载；渠道配置导入直写 DSH 已落地（Phase 5 收尾）；subagents 验证完成
+> （3 本地工具 + 2 个可选模型渠道工具）已挂载；渠道配置导入直写 DSH 已落地（Phase 5 收尾）；subagents 验证完成
 > （docs/SUBAGENTS_VERIFICATION.md，缺口 G1-G3 接受差异）；跨 7 域 bug 修复批次完成；
 > fakeThought 调研结论已记录（路线决策待定）。
 > 本轮（C 组功能补缺）：C7 delete_code（file 域）、C3 todo_update 薄适配（todo 域）、
@@ -20,7 +21,7 @@
 > 本轮（Phase 5 复杂 scope 映射，D-1/D-4a/D-5b/D-6）：host 侧工作区记忆映射表
 > （buildScopeMap + 报告 markdown/machine 三节）+ scopeOverridesFile 覆盖导入
 > （global / 绝对路径，memoryTarget 应用）+ migration/scopeMap Remote 端点；
-> client ScopeMapPanel 可视化面板（Remote/Mock 双源，31 用例）；D-4a 会话工作区
+> client ScopeMapPanel 可视化面板（Remote/Mock 双源，32 用例）；D-4a 会话工作区
 > 归属缺失报告清单、D-5b 会话存档点清单；ADR-0004 注册表立项。
 
 ## 版本锁定（ADR-0001）
@@ -50,11 +51,13 @@
 
 - [x] pnpm workspace + bundle/plugin/client 三包
 - [x] `@graycode/dsh` bundle + `cordis.patch.yml` 增量层（含 client 条目）
-- [x] `@graycode/dsh-plugin` composition root + 8 个子插件（workflows/memory/checkpoints/branches/persona/prompt/migration/stagedDiff）
+- [x] `@graycode/dsh-plugin` composition root + 15 个子插件（含后续新增 activity/media/file/todo/subagents/notifications/thoughts）
 - [x] Schemastery Config（dataRoot、agentScope 等）
 - [x] 目录安装进 profile + `--dump-config` + headless 真实启动验证
-- [x] CI：`.github/workflows/ci.yml`（Linux 全量 + Windows/macOS smoke、pack + tarball 校验 + dsh 冒烟）；`scripts/verify-pack.ps1` 本地验证（实测 PASS）
-- [ ] tarball clean-room 安装全流程：CI 中 bundle 404 为发布前预期（`continue-on-error` + artifact 日志），@graycode/* 发布后关闭
+- [x] CI：`.github/workflows/ci.yml`（Linux 全量 + Windows/macOS smoke、pack + tarball 校验 +
+  plugin clean-profile 硬门禁 + 独立 bundle 发布探针）；`scripts/verify-pack.ps1` 本地验证（实测 PASS）
+- [ ] bundle registry clean-room 安装：CI 中 bundle 404 为发布前预期，仅 bundle 探针
+  `continue-on-error`；plugin tarball 安装已阻断，@graycode/* 发布后关闭 bundle 豁免
 
 ### Phase 2（通用内核）— 收尾完成
 
@@ -139,13 +142,14 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - **activity 域**：get_activity_stats 已挂载（activity/，按 agentScope 安装）：agent/inbox +
   agent/pre-step 事件采样、惰性心跳回算、按天 JSON 原子写、24h 热力 / 月度 / 连续会话聚合
 - **media 域**：crop_image / resize_image / rotate_image 已挂载（media/）：sharp 执行时动态
-  加载 + 缺失降级、归一化坐标、14 个稳定错误码、ctx.fs 读写；generate_image /
-  remove_background 设计已记录 deferred
+  加载 + 缺失降级、归一化坐标、稳定错误码、ctx.fs 读写；generate_image /
+  remove_background 也已注册，经可选 `ChannelImagePort` 调用模型渠道，未注入渠道时以
+  `GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE` fail-closed。
 
-### Phase 4 Client UI — P4-01~P4-07 已交付（契约驱动消费点 + 可挂接组件）
+### Phase 4 Client UI — 组件/契约已交付；rc.6 运行时挂载受 GAP 阻塞
 
 - `packages/client`（@graycode/dsh-client）：`dsh.client` manifest（`platform:"web"` + `exports["./client"]`，
-  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，~272 kB / gzip ~61 kB，
+  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，~319 kB / gzip ~71 kB，
   `window.__ModuleLoader__.load` 闭包形状）、`shell.overlay` slot 渲染 "Gray Code loaded"、
   locale zh/en（ja 占位，GAP-1：rc.6 LocaleId 仅 zh|en）
 - **Host Remote API 层**：`src/remote/`（GrayRemoteService + ProjectionJournal + 稳定机器码词表），
@@ -202,7 +206,7 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - 新增用例：settingsParser 3 + settingsTarget 3 + importService 2（共 8 个，含无明文断言）。
 - 实现：settingsParser.ts / validator.ts / importService.ts / settingsTarget.ts / tools.ts / ports.ts
 
-### Phase 6 发布 — pending（CI 就绪；npm 发布、三平台验收、升级/回滚演练待做）
+### Phase 6 发布 — pending（本地门禁全绿；远端矩阵待本次变更重跑；npm 发布、三平台验收、升级/回滚演练待做）
 
 - **发布面准备（本批次）**：`docs/RELEASE.md` 发布检查清单已就绪；三包 tarball 产物与
   files 白名单核对通过（bundle/plugin/client）；npm publish 未执行（需 npm 账号）。
@@ -211,8 +215,9 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 - `src/agentScope.ts`：`agent/created` 时 scoped 注册工具（shadow 全局），`agent/disposed` 清理，
   apply 时 backfill，dispose 走 fiber effect；`agentScope = roots | all | disabled`（默认 roots）
-- 12 个子插件均经 registrar 注册（workflows/memory/checkpoints/branches/persona/prompt/migration/
-  stagedDiff/activity/media/file/todo；migration/stagedDiff 复用同模式）
+- composition root 当前挂载 15 个子插件（workflows/memory/checkpoints/branches/persona/prompt/
+  migration/stagedDiff/activity/media/file/todo/subagents/notifications/thoughts）；其中带工具的域经
+  registrar 按 agentScope 注册，migration/stagedDiff 复用同模式。
 - 验证：headless 真实启动中模型可列出全部工具（roots 模式）
 
 ## Subagents 能力覆盖验证 — 完成（docs/SUBAGENTS_VERIFICATION.md）
@@ -334,16 +339,19 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   fsPath=覆盖路径；未覆盖 → 沿用 scope.json fsPath 自动映射）；覆盖路径的目录名与
   getWorkspace 同算法（sha256(normalizeWorkspaceKey(cwd)) 前 16 hex），台账 targetRef
   如实记录，journalKey 保持 legacyId 维度（幂等不变）。dsh-tools 参数 schema 不支持
-  object 类型 → 覆盖仅文件入口（不提供内联对象参数）。10 用例
+  object 类型 → 覆盖仅文件入口（不提供内联对象参数）。覆盖文件与 service 入口均校验
+  value 类型及跨平台绝对路径，非法输入 fail-closed；原本 unmapped 的 workspace memory
+  只有在 apply 收到合法覆盖时才恢复导入，并重新走台账判定保证重跑幂等。19 用例
   （`tests/migration/scopeOverrides.test.ts`）。
 - **D-2 可视化面板（✅ 已落地，client ScopeMapPanel）**：`src/client/scopeMap/`
   （types/query/wire/errors/viewModel/overrides/dataSource/locales/ScopeMapPanel/README），
   仿 activityHeatmap Remote/Mock 双源模式：`dataSource: 'remote' | 'mock'` prop +
   transport/sourceDir；表格（hashDir/source/status + 目标单选：默认建议/全局记忆/自定义
   绝对路径）；overrides JSON 导出只含手动改过的行（供 scopeOverridesFile 输入）；空态/
-  replay 退化；独立 locale 命名空间 `graycode.scopeMap`。31 用例
+  replay 退化；独立 locale 命名空间 `graycode.scopeMap`。32 用例
   （`tests/scopeMapPanel.spec.ts`）。
-- **D-3 不变**：scope.json 缺失/损坏 → unmapped 跳过（fail-closed，见 workspaceScope 批次）。
+- **D-3 收窄**：scope.json 缺失/损坏默认仍为 unmapped 跳过；用户在 apply 提供合法
+  `global`/绝对路径覆盖时恢复为可导入对象，未提供或覆盖非法时继续 fail-closed。
 - **D-4a 维持现状 + 报告透明化（✅ 已落地）**：workspaceUri 无法派生 DSH cwd 的会话
   （vscode-remote:// 等远程/损坏 URI）迁移后无 cwd、原值随附 artifact；报告「会话工作区
   归属缺失（已接受降级）」节列出 legacyId + workspaceUri 清单（机器 JSON
@@ -403,9 +411,9 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：120 文件 1716 用例全绿（1711 通过 / 5 skipped；本地实测连续多次运行一致）——
-workflows 171 / client 417（含 activityHeatmap 33 + scopeMapPanel 31）/ branches 125 /
-prompt 88 / migration 110 / memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 /
+`pnpm test`：120 文件 1725 用例全绿（1720 通过 / 5 skipped；本地实测）——
+workflows 171 / client 418（含 activityHeatmap 33 + scopeMapPanel 32）/ branches 125 /
+prompt 88 / migration 119 / memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 /
 stagedDiff 48 / shared 47 / spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ 
 fault-injection 19 / providers 13 / agentScope 9 / persona 8 / e2e 5 / todo 25 / file 17。
 5 skipped 分布：spike/subagents.probe 1、migrationHarden 3（Windows 无 symlink）、
@@ -421,13 +429,15 @@ stagedDiff/tools 1（Windows 无 symlink）。
     registry 解析）：`--dump-config` 出现 `id: graycode` 与 `id: graycode-client` 两行
     （仅增 Gray 层）；`dsh --profile graycode` 真实启动 ✅——插件 dataRoot 初始化
     （`graycode/prompt/modes.json` 写入内置 5 模式）。@graycode/* 发布前 CI 的
-    `ERR_PNPM_FETCH_404` 仍为预期状态（发布后把 `continue-on-error` 翻转为 false）。
+    `ERR_PNPM_FETCH_404` 仍为独立 bundle 探针的预期状态；plugin smoke 已是硬门禁，
+    发布后移除 bundle probe 的 `continue-on-error`。
 - **修复（分 commit）**：
   - bundle 缺 `@graycode/dsh-client` 依赖：cordis.patch.yml 插入 graycode-client 行但
     bundle 不依赖该包 → 全新 profile 启动即 ERR_MODULE_NOT_FOUND（实测复现）；
     补依赖后启动恢复。
   - verify-pack 新增「bundle patch 行 ↔ bundle dependencies」一致性检查（防该回归）。
-  - remote 投影日志滚动丢行边界（rotate 后无尾随换行 → 新旧条目合并成脏行）。
+  - remote 投影日志滚动边界（rotate 后无尾随换行导致合并脏行、尾空行占用保留名额）+
+    可等待写链的 flush/clear 收尾，移除固定 sleep 竞态。
   - delete_code 的 5MB 护栏此前未生效（常数声明但从未使用）——已真正执行。
   - checkpoints records.json 写回补 Windows rename 重试；previewToken 进程内上限 128。
   - staged-diff 路径校验补 Windows 保留设备名；resize_image 补 50MP 输出像素护栏。

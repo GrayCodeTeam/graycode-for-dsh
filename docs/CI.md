@@ -9,7 +9,7 @@
 
 | Job | Runner | 步骤 | 对应 §9.7 Gate |
 | --- | --- | --- | --- |
-| `full` | ubuntu-latest | typecheck → 全量单测 → build → pack → tarball 内容检查 → dsh clean-profile install 冒烟 | lint/typecheck/unit、pack + clean-profile install、mock LLM E2E（全量）、Linux |
+| `full` | ubuntu-latest | typecheck → 全量单测 → build → pack → tarball 内容检查 → plugin clean-profile 硬门禁 → bundle clean-profile 发布探针 | lint/typecheck/unit、pack + clean-profile install、mock LLM E2E（全量）、Linux |
 | `smoke` | windows-latest / macos-latest | typecheck → 核心测试子集 → build → pack → tarball 内容检查 | Windows/macOS smoke |
 
 设计要点：
@@ -17,7 +17,7 @@
 - **工具链锁定**：Node `22.x`（解析到最新 22，满足 ADR-0001 的 `^22.19 \|\| >=24`），
   pnpm `11.7.0`（与根 `packageManager` 一致）。dsh CLI 用 `@deepseek-ai/dsh@0.1.0-rc.6`
   固定版本（npm 全局安装，与 ADR-0001 的 rc.6 基线同源）。
-- **Linux 全量 / Win+mac 子集**：全量单测约 100 文件 1464 用例（本地 ~6s），
+- **Linux 全量 / Win+mac 子集**：Linux 跑全部插件与客户端测试，
   三平台全量并非不可行，但按 §9.7 的“Windows/macOS 只跑 smoke”原则拆分，
   失败时 `fail-fast: false` 保证三平台都跑完、结果都可见。
 - **smoke 子集**（`pnpm test:smoke`）：agentScope（9 例）、persona（8 例）、
@@ -32,26 +32,27 @@
   tarball 内容检查步骤（`./scripts/verify-pack.ps1 -SkipBuild -SkipPack`，pwsh 三平台
   预装）复用本地验证脚本，保证 CI 与本地行为一致。
 
-### dsh clean-profile install 冒烟（非阻塞，原因必须读）
+### dsh clean-profile install：插件硬门禁 + bundle 发布探针
 
-`full` job 最后一步执行：
+`full` job 末尾拆成两个独立步骤：
 
 ```sh
-dsh plugin --profile graycode add <plugin.tgz>     # 插件 tarball，今日即可装
-dsh plugin --profile graycode add <bundle.tgz>     # bundle tarball，见下
-dsh --profile graycode --dump-config               # 断言出现 id: graycode 层
+dsh plugin --profile graycode add <plugin.tgz>     # 阻断；随后确认 profile 配置仍可加载
+dsh plugin --profile graycode add <bundle.tgz>     # 非阻断发布探针；随后断言 Gray 两行
 ```
 
-该步骤 `continue-on-error: true` **并附带日志上传 artifact（`if: always()`）**，
-失败是响亮的（步骤标黄、日志可下载），不是静默吞错。原因：
+插件步骤使用 `set -euo pipefail` 且不设 `continue-on-error`，任何命令失败或 profile
+配置无法加载都会让 job 失败，避免“只打印退出码”的假绿。bundle 步骤单独设
+`continue-on-error: true`，
+并通过 `if: always()` 上传两步日志。拆分原因：
 
 1. **bundle tarball 安装被发布状态阻塞**：bundle 的依赖
    `@graycode/dsh-plugin@^0.1.0` 必须从 npm registry 解析；`@graycode/*`
    尚未发布，`dsh plugin add` 必然 `ERR_PNPM_FETCH_404`。这正是该 gate 要抓的
-   条件——包发布后此步骤自动变绿，届时把 `continue-on-error` 改为 `false`
-   即成为硬性门槛。
-2. **插件 tarball 单独安装今日可用**（全部传递依赖均为已发布 rc.6），
-   `--dump-config` 照常断言，至少覆盖“从 tarball 装进全新 profile”这条路径。
+   条件——包发布后此步骤自动变绿，届时移除 `continue-on-error` 即成为硬性门槛。
+2. **插件 tarball 单独安装今日可用**（全部传递依赖均为已发布 rc.6），安装后执行
+   `--dump-config` 确认 profile 仍可加载。plugin 本身是普通依赖，不应单独产生 loader 行；
+   `id: graycode` / `id: graycode-client` 由 bundle patch 负责并在 bundle 探针断言。
 3. dsh CLI 在 runner 上非预装，需 npm 全局安装（可能受 registry 波动影响）。
 
 ## 2. 本地验证命令
@@ -86,7 +87,8 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
   渲染凭据引用）、`node_modules/`、`.graycode` 数据、`.npmrc`、`.git` 元数据。
 - 绝对路径：POSIX `/` 开头、盘符（`C:\` / `C:/`）、UNC；以及内嵌盘符路径。
 - 路径穿越（`..` 段）与 `package/` 根之外的多余条目（能抓住“整仓被打包”的脏 tarball）。
-- `package/package.json` 的 name/version 与工作区清单一致。
+- `package/package.json` 的 name/version 与工作区清单一致；每个相对 `exports` 目标必须
+  指向 tarball 内真实文件/路径，防止发布悬空子路径。
 - **bundle patch 依赖一致性**（`dsh.bundle.patch` 行）：解析 tarball 内 patch
   YAML 的 `insert` 行，断言每个行 `name` 都是 bundle 自身 `dependencies` 的成员。
   缺失会以 `ERR_MODULE_NOT_FOUND` 在 profile 启动时失败（实测回归：`graycode-client`
@@ -105,8 +107,8 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 1. **`@graycode/*` 未发布 → bundle tarball 无法 clean-room 安装**：bundle tarball
    依赖 `@graycode/dsh-plugin@^0.1.0` 与 `@graycode/dsh-client@^0.1.0` 必须从 npm
    registry 解析；`@graycode/*` 尚未发布，`dsh plugin add` 必然
-   `ERR_PNPM_FETCH_404`。这正是该 gate 要抓的条件——包发布后此步骤自动变绿，
-   届时把 `continue-on-error` 改为 `false` 即成为硬性门槛。
+   `ERR_PNPM_FETCH_404`。只有独立的 bundle 探针允许该失败；plugin tarball 安装与
+   profile 加载始终是硬门禁。包发布后移除 bundle 步骤的 `continue-on-error`。
 2. **monorepo pack 输出位置**：`pnpm pack` 在 workspace 根执行时，所有 tarball
    写到**调用方 cwd（仓库根）**，不是 `packages/*/` 下。根 `pack` 脚本已改为
    `pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin --filter
@@ -118,10 +120,6 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
    <绝对路径目录>` 时 pnpm 把 `A:/...` 当相对路径，junction 指向
    `profile\A:\...`（损坏）。tarball（`file:`）安装不受影响。因此 CI 冒烟只放
    Linux；Windows 上如需目录安装，先 `cd` 到 profile 目录用相对路径或改用 tarball。
-4. **测试基线（快照，随并行开发增长）**：当前 `pnpm test` 全量 100 文件 1464
-   用例绿。曾观察到 vitest 缓存损坏导致 transform 假报错与偶发断言失败，清掉
+4. **测试基线（快照，随开发增长）**：准确计数见 `docs/PROGRESS.md` 的“测试基线”。
+   曾观察到 vitest 缓存损坏导致 transform 假报错与偶发断言失败，清掉
    `node_modules/.vite`、`node_modules/.vitest` 后消失（CI 全新 checkout 无此问题）。
-5. **并发开发扰动（2026-06 记录）**：本仓库 CI/打包落地时正值多个功能并行开发
-   （migration、memory 格式重构、client 包）。验证期间 `migration.test.ts`（F6
-   导入）与 `e2e/loop.test.ts`（S2 memory_note 落盘）曾因 WIP 短暂红过；这些属于
-   packages/** 范围内的在途工作，随各自 PR 收敛。CI 的职责是等它们稳定后自动转绿。

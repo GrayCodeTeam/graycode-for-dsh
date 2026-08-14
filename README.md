@@ -18,11 +18,14 @@ DSH 负责 Agent 循环、会话、工具流水线、权限与 Web 宿主；本�
 | Prompt | `prompt_mode_list/set/preview` | 提示词模式编排（D-11=c 文本注入） |
 | Staged diff | `staged_diff_stage/list/preview/accept/reject` | 延迟文件审阅（默认关闭，写工具适配后启用） |
 | Activity | `get_activity_stats` | 24h 热力 / 月度 / 连续会话聚合 |
-| Media | `crop_image` / `resize_image` / `rotate_image` | 本地图片处理（sharp） |
+| Media | `crop_image` / `resize_image` / `rotate_image` / `generate_image` / `remove_background` | 本地图片处理（sharp）+ 可选模型渠道；未注入渠道时模型工具 fail-closed |
 | File | `delete_code` | 批量行级删除（5MB 护栏 + staged-diff 钩子） |
 | Todo | `todo_update` | DSH 整表快照上的增量 ops 薄适配 |
+| Notifications | `notify` | Windows 原生 toast + 浏览器通知中心/noop 降级 |
+| Subagents | — | hop 深度、父链寻址与并发守卫 |
+| Thoughts | — | 可选请求构造层（默认关闭，非契约适配） |
 | Migration | `migration_scan/apply` | 旧 Gray Code 1.5.4 数据导入（dry-run 优先） |
-| Client | `shell.overlay` slot + locale + 8 个可挂接表面 | Phase 4 UI（workflow/memory/checkpoint/restore/staged diff/settings/heatmap 面板） |
+| Client | `shell.overlay` slot + locale + 10 个可挂接表面 | workflow/overview/memory/checkpoint/restore/staged diff/settings/activity/scope/notifications UI；rc.6 管理视图挂载与浏览器 Remote 通道仍受上游 GAP 限制 |
 
 ## 包结构
 
@@ -46,7 +49,7 @@ dsh plugin --profile graycode add ./graycode-dsh-0.1.0.tgz
 dsh --profile graycode
 ```
 
-发布后也可从 npm registry 安装（`@graycode/dsh@0.1.0` 已发布）：
+`@graycode/*` 当前尚未发布到 npm registry；首次发布完成后可改用：
 
 ```sh
 # bundle 安装：DSH 按 cordis.patch.yml 增量层自动拉取 @graycode/dsh-plugin 与 @graycode/dsh-client
