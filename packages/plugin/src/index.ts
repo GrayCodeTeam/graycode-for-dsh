@@ -66,7 +66,7 @@ export function apply(ctx: Context, config: Config): void {
   // Phase 4 host 侧 Remote API（T8）：注册 `ctx.grayRemote` 分发服务并默认启用
   // 可回放投影日志（<dataRoot>/remote/projections.jsonl）。各域子插件在各自
   // apply() 中向它注册端点；DSH 升级到公开 Remote 注册面后，端点可平移为
-  // Typert `@Remote` 方法（见 src/remote/README.md「DSH 升级后如何切换」）。
+  // Typert `@Remote` 方法（设计见 docs/PLAN_V2.md §5.6 与 docs/ADR-0002 §5）。
   new GrayRemoteService(ctx, { journalPath: `${dataRoot}/remote/projections.jsonl` })
   ctx.plugin(workflows, { ...config.workflows, dataRoot })
   ctx.plugin(memory, { ...config.memory, dataRoot })

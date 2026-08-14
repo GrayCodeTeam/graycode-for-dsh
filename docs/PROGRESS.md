@@ -13,6 +13,10 @@
 > 本轮（C 组功能补缺）：C7 delete_code（file 域）、C3 todo_update 薄适配（todo 域）、
 > C5 branch_rename 工具 + branches Remote 端点、C6 activity/stats Remote 端点 +
 > client 作息热力图面板 均已落地（分 commit 提交，测试全绿）。
+> 本轮（打磨批次）：clean-room 安装全流程实测通过（bundle 补 dsh-client 依赖修复启动
+> 崩溃）；verify-pack 补 bundle patch 一致性检查；7 项 bug 修复（remote 日志滚动 /
+> delete_code 5MB 护栏 / checkpoints rename 重试 + token 上限 / staged-diff 保留名 /
+> resize 像素护栏 / migration 锁心跳 + 敏感键扩展）。
 
 ## 版本锁定（ADR-0001）
 
@@ -136,7 +140,7 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 ### Phase 4 Client UI — P4-01~P4-07 已交付（契约驱动消费点 + 可挂接组件）
 
 - `packages/client`（@graycode/dsh-client）：`dsh.client` manifest（`platform:"web"` + `exports["./client"]`，
-  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，~31 kB，
+  实测 rc.6 格式）、Node half（官方模式空插件）、browser bundle（tsdown，~272 kB / gzip ~61 kB，
   `window.__ModuleLoader__.load` 闭包形状）、`shell.overlay` slot 渲染 "Gray Code loaded"、
   locale zh/en（ja 占位，GAP-1：rc.6 LocaleId 仅 zh|en）
 - **Host Remote API 层**：`src/remote/`（GrayRemoteService + ProjectionJournal + 稳定机器码词表），
@@ -178,7 +182,8 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 - `src/agentScope.ts`：`agent/created` 时 scoped 注册工具（shadow 全局），`agent/disposed` 清理，
   apply 时 backfill，dispose 走 fiber effect；`agentScope = roots | all | disabled`（默认 roots）
-- 8 个子插件均经 registrar 注册（migration/stagedDiff 复用同模式）
+- 12 个子插件均经 registrar 注册（workflows/memory/checkpoints/branches/persona/prompt/migration/
+  stagedDiff/activity/media/file/todo；migration/stagedDiff 复用同模式）
 - 验证：headless 真实启动中模型可列出全部工具（roots 模式）
 
 ## Subagents 能力覆盖验证 — 完成（docs/SUBAGENTS_VERIFICATION.md）
@@ -240,7 +245,7 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - **C5 branch_rename 工具面 + branches Remote 端点（✅ 已落地，2026-08）**：branch_rename
   工具（1-200 字符对齐老版 renameBranchCandidate）+ branches/list、branches/rename 端点
   （workspace 过滤 + 游标分页 + expectedRevision CAS）；BranchError → 稳定 Remote 码
-  （BRANCH_CODE_MAP）。remote.test.ts 新增 11 用例。
+  （BRANCH_CODE_MAP）。remote.test.ts 新增 9 用例。
 - **C6 activity 前端面板（✅ 已落地，2026-08）**：host 侧 activity/stats Remote 端点 +
   client graycode.activityHeatmap 面板（7×24 热力图 + 每日/月度条形图 + 汇总条，
   Remote/Mock 双数据源、locale 独立命名空间）。host remote.test.ts 5 用例 +
@@ -296,10 +301,36 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：100 文件 1464 用例全绿（1459 通过 / 5 skipped；本地实测连续多次运行一致）——
-workflows 171 / client 386（含 activityHeatmap 33）/ branches 125 / prompt 88 / migration 97 /
-memory 96 / media 85 / checkpoints 78 / remote 68 / activity 58 / stagedDiff 47 / shared 47 /
+`pnpm test`：100 文件 1470 用例全绿（1465 通过 / 5 skipped；本地实测连续多次运行一致）——
+workflows 171 / client 386（含 activityHeatmap 33）/ branches 125 / prompt 88 / migration 100 /
+memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 / stagedDiff 48 / shared 47 /
 spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ fault-injection 19 / providers 13 /
-agentScope 9 / persona 8 / e2e 5 / todo 25 / file 16。
+agentScope 9 / persona 8 / e2e 5 / todo 25 / file 17。
+5 skipped 分布：spike/subagents.probe 1、migrationHarden 3（Windows 无 symlink）、
+stagedDiff/tools 1（Windows 无 symlink）。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
 `scripts/verify-pack.ps1`：PASS（3 tarball，violations: none）。
+
+## 打磨批次（2026-08：clean-room 安装验证 + bug 修复）
+
+- **clean-room 安装全流程实测**（本机 Windows，dsh 0.1.0-rc.6 全局 CLI + 全新 DSH_HOME）：
+  - plugin tarball 安装 ✅（警告「无 dsh.bundle，作为普通依赖」为预期）；
+  - bundle tarball 安装 ✅（把依赖临时改写为 `file:` 本地 tarball 模拟发布后的
+    registry 解析）：`--dump-config` 出现 `id: graycode` 与 `id: graycode-client` 两行
+    （仅增 Gray 层）；`dsh --profile graycode` 真实启动 ✅——插件 dataRoot 初始化
+    （`graycode/prompt/modes.json` 写入内置 5 模式）。@graycode/* 发布前 CI 的
+    `ERR_PNPM_FETCH_404` 仍为预期状态（发布后把 `continue-on-error` 翻转为 false）。
+- **修复（分 commit）**：
+  - bundle 缺 `@graycode/dsh-client` 依赖：cordis.patch.yml 插入 graycode-client 行但
+    bundle 不依赖该包 → 全新 profile 启动即 ERR_MODULE_NOT_FOUND（实测复现）；
+    补依赖后启动恢复。
+  - verify-pack 新增「bundle patch 行 ↔ bundle dependencies」一致性检查（防该回归）。
+  - remote 投影日志滚动丢行边界（rotate 后无尾随换行 → 新旧条目合并成脏行）。
+  - delete_code 的 5MB 护栏此前未生效（常数声明但从未使用）——已真正执行。
+  - checkpoints records.json 写回补 Windows rename 重试；previewToken 进程内上限 128。
+  - staged-diff 路径校验补 Windows 保留设备名；resize_image 补 50MP 输出像素护栏。
+  - migration apply 文件锁补心跳（长导入不再被陈旧判定误破）；settings 敏感键
+    匹配扩展 accessKey/consumerKey/privateKey 形态（此类键值不再以明文出现在
+    导入产物中）。
+- **fixture 假凭据形态调整**：迁移 fixture 的假 key 统一为 `demo-key-*` 形态
+  （避开公开扫描器易命中的前缀形态），fixture 说明与文档同步。

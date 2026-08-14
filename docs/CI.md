@@ -17,7 +17,7 @@
 - **工具链锁定**：Node `22.x`（解析到最新 22，满足 ADR-0001 的 `^22.19 \|\| >=24`），
   pnpm `11.7.0`（与根 `packageManager` 一致）。dsh CLI 用 `@deepseek-ai/dsh@0.1.0-rc.6`
   固定版本（npm 全局安装，与 ADR-0001 的 rc.6 基线同源）。
-- **Linux 全量 / Win+mac 子集**：全量单测约 27 文件 294 用例（~2.5s 本地），
+- **Linux 全量 / Win+mac 子集**：全量单测约 100 文件 1464 用例（本地 ~6s），
   三平台全量并非不可行，但按 §9.7 的“Windows/macOS 只跑 smoke”原则拆分，
   失败时 `fail-fast: false` 保证三平台都跑完、结果都可见。
 - **smoke 子集**（`pnpm test:smoke`）：agentScope（9 例）、persona（8 例）、
@@ -64,8 +64,8 @@ pnpm ci:all
 pnpm typecheck          # tsc --noEmit 类型门槛
 pnpm test               # 全量单测（vitest run）
 pnpm test:smoke         # CI smoke 子集
-pnpm build              # tsc 构建到 packages/plugin/lib
-pnpm run pack            # 只打包可发布包（bundle + plugin），产物在仓库根目录（必须 run，裸 pnpm pack 会打根包）
+pnpm build              # tsc 构建 plugin（packages/plugin/lib）+ client（tsc + tsdown bundle）
+pnpm run pack            # 只打包可发布包（bundle + plugin + client），产物在仓库根目录（必须 run，裸 pnpm pack 会打根包）
 pnpm verify:pack        # build + pack + tarball 内容检查（Windows PowerShell）
 
 # 只做检查（tarball 已存在时；macOS/Linux 用 pwsh）
@@ -80,8 +80,10 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 
 对每个 tarball（`tar -tzf` 列目录 + .NET GZipStream 统计未压缩大小）：
 
-- 黑名单（大小写不敏感）：`.env*`、`*.pem / *.key / *.p12 / *.pfx`、文件名含
-  `secret`、`node_modules/`、`.graycode` 数据、`.npmrc`、`.git` 元数据。
+- 黑名单（大小写不敏感）：`.env*`、`*.pem / *.key / *.p12 / *.pfx`、密钥文件形态
+  （`secrets/` 目录、`*.secret*`、`*secrets.json/yaml/...`——注意已从裸「文件名含
+  secret」收窄为密钥文件形态，因为 client 包合法携带 `secrets.ts`/`SecretItemRow.tsx`
+  渲染凭据引用）、`node_modules/`、`.graycode` 数据、`.npmrc`、`.git` 元数据。
 - 绝对路径：POSIX `/` 开头、盘符（`C:\` / `C:/`）、UNC；以及内嵌盘符路径。
 - 路径穿越（`..` 段）与 `package/` 根之外的多余条目（能抓住“整仓被打包”的脏 tarball）。
 - `package/package.json` 的 name/version 与工作区清单一致。
@@ -93,35 +95,33 @@ pwsh ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 - 摘要：条目数、tgz 大小、未压缩大小、README/LICENSE 是否存在。
 
 预期 tarball 集合 = `packages/*` 下所有非 private 包（自动发现）；出现
-“expected but not packed”只报 WARN——工作区里可能有不属于当前 pack 集合的包
-（例如开发中的 `@graycode/dsh-client`），纳入根 `pack` 脚本后自动生效；
-“unexpected tarball”（非任何工作区包产生）则是硬失败。
+“expected but not packed”只报 WARN——工作区里可能有不属于当前 pack 集合的包，
+纳入根 `pack` 脚本后自动生效；“unexpected tarball”（非任何工作区包产生）
+则是硬失败。当前 pack 集合 = bundle + plugin + client 三个包。
 
-## 4. 已知问题与缺口（实测 2026-06，本机 Windows + Node 22.18 + pnpm 11.7.0）
+## 4. 已知问题与缺口（实测 2026-06 本机 Windows + Node 22.18 + pnpm 11.7.0；
+2026-08 更新）
 
-1. **`@graycode/*` 未发布 → bundle tarball 无法 clean-room 安装**（见上）。
-   发布（或提供私有 registry）后 CI gate 自动转硬。
-2. **bundle 依赖发布状态（2026-08 更新）**：bundle tarball 依赖
-   `@graycode/dsh-plugin@^0.1.0` 与 `@graycode/dsh-client@^0.1.0` 必须从 npm
+1. **`@graycode/*` 未发布 → bundle tarball 无法 clean-room 安装**：bundle tarball
+   依赖 `@graycode/dsh-plugin@^0.1.0` 与 `@graycode/dsh-client@^0.1.0` 必须从 npm
    registry 解析；`@graycode/*` 尚未发布，`dsh plugin add` 必然
    `ERR_PNPM_FETCH_404`。这正是该 gate 要抓的条件——包发布后此步骤自动变绿，
    届时把 `continue-on-error` 改为 `false` 即成为硬性门槛。
-3. **monorepo pack 输出位置**：`pnpm pack` 在 workspace 根执行时，所有 tarball
+2. **monorepo pack 输出位置**：`pnpm pack` 在 workspace 根执行时，所有 tarball
    写到**调用方 cwd（仓库根）**，不是 `packages/*/` 下。根 `pack` 脚本已改为
-   `pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin pack`，
-   只打包两个可发布包；旧的 `pnpm -r pack` 会把私有根包（整仓，含 docs/tests/
-   tsconfig 等）也打成 `graycode-dsh-<version>.tgz`，且与 bundle 同名互相覆盖——
-   这是 P1-05 “pack 检查”要抓的问题，verify-pack 的“package/ 根之外条目”检查
-   会直接判失败。
-4. **dsh CLI 在 Windows 的目录安装路径 bug（外部，非本仓库）**：`dsh plugin add
+   `pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin --filter
+   @graycode/dsh-client pack`，只打包三个可发布包；旧的 `pnpm -r pack` 会把私有
+   根包（整仓，含 docs/tests/tsconfig 等）也打成 `graycode-dsh-<version>.tgz`，
+   且与 bundle 同名互相覆盖——这是 P1-05 “pack 检查”要抓的问题，verify-pack 的
+   “package/ 根之外条目”检查会直接判失败。
+3. **dsh CLI 在 Windows 的目录安装路径 bug（外部，非本仓库）**：`dsh plugin add
    <绝对路径目录>` 时 pnpm 把 `A:/...` 当相对路径，junction 指向
    `profile\A:\...`（损坏）。tarball（`file:`）安装不受影响。因此 CI 冒烟只放
    Linux；Windows 上如需目录安装，先 `cd` 到 profile 目录用相对路径或改用 tarball。
-5. **测试基线（快照，随并行开发增长）**：本机验证时 `pnpm test` 全量 27 文件
-   294 用例绿；后续 fault-injection/migration/memoryFormat 等新测试文件会并入同一
-   套件。曾观察到 vitest 缓存损坏导致 transform 假报错与偶发断言失败，清掉
+4. **测试基线（快照，随并行开发增长）**：当前 `pnpm test` 全量 100 文件 1464
+   用例绿。曾观察到 vitest 缓存损坏导致 transform 假报错与偶发断言失败，清掉
    `node_modules/.vite`、`node_modules/.vitest` 后消失（CI 全新 checkout 无此问题）。
-6. **并发开发扰动（2026-06 记录）**：本仓库 CI/打包落地时正值多个功能并行开发
+5. **并发开发扰动（2026-06 记录）**：本仓库 CI/打包落地时正值多个功能并行开发
    （migration、memory 格式重构、client 包）。验证期间 `migration.test.ts`（F6
    导入）与 `e2e/loop.test.ts`（S2 memory_note 落盘）曾因 WIP 短暂红过；这些属于
    packages/** 范围内的在途工作，随各自 PR 收敛。CI 的职责是等它们稳定后自动转绿。

@@ -166,6 +166,30 @@
   mergeFindingRecords 显式字段覆盖、milestone/risk 文本 marker 转义、staged 模式下会话
   状态延迟保存、compare key 含 severity、finding 标题清洗、冒号分割修正、plan 模式
   multi-root 前缀。
+- **remote（投影日志）**：sidecar 滚动（rotateIfOversized）后保留尾随换行——此前
+  `keep.join('\n')` 无尾部换行，下一次追加会把新条目拼到滚动边界旧条目上，产生
+  一条无法解析的合并脏行，边界两条记录永久丢失（回放静默跳过）。
+- **file（delete_code）**：`MAX_EDIT_FILE_BYTES`（5MB）此前声明但从未执行，超限
+  文件会被完整读入内存再切行；现于读取后按字节数拒绝（per-file 失败，边界 == 上限
+  仍允许）。
+- **checkpoints**：records.json 原子写回补 Windows rename 重试（EPERM/EACCES/EBUSY
+  退避 + EEXIST 时 unlink 补写，与各侧边存储同模式）；恢复门闸 previewToken 进程内
+  Map 上限 128（按插入序驱逐最旧，长会话不再无界增长）。
+- **stagedDiff**：normalizeEntryPath 补 Windows 保留设备名拒绝（con/aux/nul/prn/
+  com1-9/lpt1-9，任意层级、忽略大小写与扩展名，与 slugify.ts 同形）。
+- **media**：resize_image 补输出像素预检（>50MP → OUTPUT_TOO_LARGE，与 rotate 同
+  护栏），目标尺寸过大时不再让 sharp 展开超大内存缓冲。
+- **migration**：apply 跨进程文件锁补心跳（每 staleMs/3 重写 updatedAt，释放时
+  清理；陈旧判定优先 updatedAt → createdAt → mtime），长导入不再被陈旧锁判定误破；
+  settings 敏感键匹配扩展 accessKey/consumerKey/privateKey 形态（此类键值不再以
+  明文进入导入产物）。
+- **fixtures**：迁移 fixture 假凭据值统一为 `demo-key-*` 形态（避开公开扫描器易
+  命中的前缀形态），fixture 说明与 docs/legacy-fixture-plan.md 同步。
+- **bundle**：`@graycode/dsh` 补 `@graycode/dsh-client` 依赖——cordis.patch.yml 插入
+  `graycode-client` 行但 bundle 不依赖该包时，全新 profile 启动即
+  ERR_MODULE_NOT_FOUND（实测复现）；补依赖后 `--dump-config`/真实启动均通过。
+- **verify-pack**：新增「bundle patch 行 name ↔ bundle dependencies」一致性检查
+  （parse patch 的 insert 行，缺依赖即失败），防上述回归在打包门禁外发生。
 
 ### Security（安全）
 
