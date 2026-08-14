@@ -111,10 +111,11 @@ describe('mock-LLM loop E2E', () => {
       expect(toolResultFor(events, calls[0]!.callId)).toBeDefined()
       expect(assistantText(events, 'Noted.')).toBe('Noted.')
 
-      // 工作区记忆写入 <dataRoot>/memory-workspaces/<hash16>/LOG.txt；
-      // 全局 memory/LOG.txt（auto-inject 预初始化）不在此轮写入，搜索全部 LOG.txt。
+      // 工作区记忆写入 <dataRoot>/memory-workspaces/<hash16>/records.jsonl
+      // （新 JSONL 格式，旧 LOG.txt 仅为只读导入源，不再由写入路径产生）；
+      // 全局 memory/records.jsonl（auto-inject 预初始化）不在此轮写入，搜索全部 records.jsonl。
       const files = await listFilesRecursive(harness.dataRoot)
-      const logFiles = files.filter(file => file.endsWith('/LOG.txt'))
+      const logFiles = files.filter(file => file.endsWith('/records.jsonl'))
       expect(logFiles.length).toBeGreaterThan(0)
       const contents = await Promise.all(logFiles.map(file => readFile(file, 'utf-8')))
       expect(contents.some(content => content.includes('e2e-memory-marker'))).toBe(true)
@@ -238,7 +239,7 @@ describe('mock-LLM loop E2E', () => {
       await agent.whenIdle()
 
       const events = harness.eventsOf(agent)
-      const turnEnd = events.findLast(event => event.type === 'turn/end')
+      const turnEnd = [...events].reverse().find(event => event.type === 'turn/end')
       expect(turnEnd).toBeDefined()
       expect(turnEnd!.data.reason.kind).toBe('aborted')
     } finally {

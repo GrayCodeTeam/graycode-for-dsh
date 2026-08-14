@@ -32,8 +32,15 @@ import {
   PUBLIC_BASE_URL,
   apply as applyDeepSeek,
   resolveAdapterOptions,
+  type DeepSeekAdapterOptions,
 } from '@deepseek-ai/dsh-llm-deepseek'
 import { PiAiAdapter, apply as applyPiAi, supportedProtocols } from '@deepseek-ai/dsh-llm-pi-ai'
+
+/**
+ * dsh-anonymous-user-id 的 AnonymousUserId 是 branded 类型且未作为本包直接依赖导出；
+ * 从 DeepSeekAdapterOptions.resolveUserId 派生结构等价类型（精确等于该 branded 类型）。
+ */
+type AnonymousUserId = ReturnType<DeepSeekAdapterOptions['resolveUserId']>
 
 /** 环境变量守卫：测试期间删除这些 key，确保任何路径都解析不到真实凭据。 */
 const GUARDED_ENV = [
@@ -224,7 +231,7 @@ describe('provider capability matrix — 注册面与 provider 名（无网络�
     const deepSeek = new DeepSeekAdapter({
       options: () => connection,
       resolveApiKey: async () => '',
-      resolveUserId: () => 'probe' as unknown as string,
+      resolveUserId: () => 'probe' as unknown as AnonymousUserId,
     })
     expect(deepSeek).toBeInstanceOf(LlmAdapter)
     // 端点事实：默认走公开 API，且可被自定义 baseURL 覆盖

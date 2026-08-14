@@ -5,10 +5,12 @@
  * 以 fake context/agent 验证注册器的编排逻辑。
  */
 import { describe, expect, test } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createScopedToolRegistrar } from '../src/agentScope.ts'
 import type { AgentScopeMode } from '../src/agentScope.ts'
+import type { Config } from '../src/workflows/index.ts'
 
 interface FakeAgentScope {
   tools: {
@@ -32,6 +34,8 @@ interface FakeCtx {
 
 function makeFakeScope(): FakeAgentScope {
   return {
+    // 占位实现：makeFakeAgent 在安装前总会用真实 register 覆盖，此处仅为满足类型。
+    tools: { register: () => () => {} },
     registered: new Map(),
     disposers: new Map(),
     disposeAll() {
@@ -66,13 +70,18 @@ function makeFakeAgent(id: string, root: boolean): { agent: Agent; scope: FakeAg
   return { agent, scope }
 }
 
+/** FakeCtx 仅实现 Context 的测试相关子集；跨入真实 Context 类型边界。 */
+function toContext(ctx: FakeCtx): Context {
+  return ctx as unknown as Context
+}
+
 function makeFakeCtx(agents: Array<{ agent: Agent; scope: FakeAgentScope }>): FakeCtx {
   const createdListeners: FakeCtx['createdListeners'] = []
   const disposedListeners: FakeCtx['disposedListeners'] = []
   const ctx: FakeCtx = {
     agents: {
       list: () => agents.map(entry => entry.agent),
-      roots: () => agents.filter(entry => entry.agent.root).map(entry => entry.agent),
+      roots: () => agents.filter(entry => (entry.agent as unknown as { root: boolean }).root).map(entry => entry.agent),
     },
     on: (event, callback) => {
       if (event === 'agent/created') {
@@ -124,7 +133,7 @@ describe('createScopedToolRegistrar', () => {
     const sub = makeFakeAgent('sub-1', false)
     const ctx = makeFakeCtx([root, sub])
 
-    const registrar = createScopedToolRegistrar(ctx, 'roots')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
     registrar.register(TWO_DEFS)
 
     expect([...root.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1'])
@@ -142,7 +151,7 @@ describe('createScopedToolRegistrar', () => {
     const sub = makeFakeAgent('sub-1', false)
     const ctx = makeFakeCtx([root, sub])
 
-    const registrar = createScopedToolRegistrar(ctx, 'all')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'all')
     registrar.register(TWO_DEFS)
 
     expect(root.scope.registered.size).toBe(2)
@@ -153,7 +162,7 @@ describe('createScopedToolRegistrar', () => {
     const root = makeFakeAgent('root-1', true)
     const ctx = makeFakeCtx([root])
 
-    const registrar = createScopedToolRegistrar(ctx, 'disabled')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'disabled')
     registrar.register(TWO_DEFS)
     emitCreated(ctx, root)
 
@@ -166,7 +175,7 @@ describe('createScopedToolRegistrar', () => {
     const existing = makeFakeAgent('root-0', true)
     const ctx = makeFakeCtx([existing])
 
-    const registrar = createScopedToolRegistrar(ctx, 'roots')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
     registrar.register(TWO_DEFS)
 
     expect([...existing.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1'])
@@ -176,7 +185,7 @@ describe('createScopedToolRegistrar', () => {
     const root = makeFakeAgent('root-1', true)
     const ctx = makeFakeCtx([root])
 
-    const registrar = createScopedToolRegistrar(ctx, 'roots')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
     registrar.register(TWO_DEFS)
     emitDisposed(ctx, root)
     expect(root.scope.registered.size).toBe(0)
@@ -190,14 +199,14 @@ describe('createScopedToolRegistrar', () => {
     const root = makeFakeAgent('root-1', true)
     const ctx = makeFakeCtx([root])
 
-    const first = createScopedToolRegistrar(ctx, 'roots')
+    const first = createScopedToolRegistrar(toContext(ctx), 'roots')
     first.register(TWO_DEFS)
     expect(root.scope.registered.size).toBe(2)
 
     first.dispose()
     expect(root.scope.registered.size).toBe(0)
 
-    const second = createScopedToolRegistrar(ctx, 'roots')
+    const second = createScopedToolRegistrar(toContext(ctx), 'roots')
     second.register(TWO_DEFS)
     expect(root.scope.registered.size).toBe(2)
 
@@ -208,17 +217,18 @@ describe('createScopedToolRegistrar', () => {
 
   test('agentScopeSchema 默认 roots 且只接受三档值（经域 Config 组合）', async () => {
     const config = (await import('../src/workflows/index.ts')).Config
-    expect(config({})).toMatchObject({ agentScope: 'roots' })
-    expect(config({ agentScope: 'all' })).toMatchObject({ agentScope: 'all' })
-    expect(config({ agentScope: 'disabled' })).toMatchObject({ agentScope: 'disabled' })
-    expect(() => config({ agentScope: 'global' })).toThrow()
+    // schemastery 在运行时校验并应用默认值，允许传入缺省字段的部分配置；此处仅补类型。
+    expect(config({} as Config)).toMatchObject({ agentScope: 'roots' })
+    expect(config({ agentScope: 'all' } as Config)).toMatchObject({ agentScope: 'all' })
+    expect(config({ agentScope: 'disabled' } as Config)).toMatchObject({ agentScope: 'disabled' })
+    expect(() => config({ agentScope: 'global' as unknown as AgentScopeMode } as Config)).toThrow()
   })
 
   test('registrar.dispose 移除监听器：后续 agent/created 不再安装', () => {
     const root = makeFakeAgent('root-1', true)
     const ctx = makeFakeCtx([root])
 
-    const registrar = createScopedToolRegistrar(ctx, 'roots')
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
     registrar.register(TWO_DEFS)
     registrar.dispose()
     expect(ctx.createdListeners).toHaveLength(0)
