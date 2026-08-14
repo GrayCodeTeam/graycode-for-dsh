@@ -73,8 +73,10 @@ export interface BranchSessionAdapter {
     /**
      * 向 child session 的 Agent 投递一条用户消息并唤醒驱动
      * （reroll / edit retry 的「把用户消息重新发送到新 Session」）。
+     * 返回是否实际投递：无 live agent（agent factory 未装载）时为 false，
+     * 不能把「未投递」当成「已投递」（messageSent 误报）。
      */
-    sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<void>;
+    sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<boolean>;
 }
 
 /** workspace id 生成：与 checkpoints 的 ws_<sha256 前 16 位> 同口径 */
@@ -134,8 +136,12 @@ export class BranchCoordinatorService {
     private loaded = false;
     /** 加载承诺：并发调用 initialize / 变更操作统一 await 同一份加载（ensureLoaded 模式） */
     private loadPromise: Promise<void> | undefined;
+    /** sidecar 损坏/不可读时的错误状态：置位后所有组访问响亮抛 STORAGE_CORRUPT */
+    private loadError: BranchError | undefined;
     /** 进程内串行互斥：让 CAS 在单进程内有效 */
     private mutationChain: Promise<unknown> = Promise.resolve();
+    /** 已弃用标志：dispose 后（未 await 的 initialize 在途完成时）不再回填状态/落盘 */
+    private disposed = false;
 
     constructor(
         private readonly config: BranchCoordinatorConfig,
@@ -145,21 +151,40 @@ export class BranchCoordinatorService {
         this.storePath = path.join(this.rootDir, BRANCH_STORE_FILE);
     }
 
-    /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）响亮抛错。幂等：
-     *  并发调用共享同一份加载承诺；加载完成后顺手清理超过保留期的软删候选（TREE-09）。 */
+    /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）在内部捕获并记录日志、
+     *  置空 groups + 标记错误状态（loadError），不向调用方拒绝——index.ts 的
+     *  void initialize() 无 catch，拒绝会变成 unhandled rejection 且后续工具全失败无日志
+     *  （BUG: initialize 未处理拒绝）。幂等：并发调用共享同一份加载承诺；加载完成后顺手
+     *  清理超过保留期的软删候选（TREE-09）。 */
     initialize(): Promise<void> {
         if (this.loadPromise) return this.loadPromise;
         this.loadPromise = (async () => {
             try {
                 const raw = await fs.readFile(this.storePath, 'utf8');
+                // dispose 与在途读取竞态：已弃用实例不再回填状态
+                if (this.disposed) return;
                 this.groups = parseBranchGroupStore(raw);
             } catch (error) {
                 if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                    if (this.disposed) return;
                     this.groups = [];
                 } else {
-                    throw error;
+                    this.loadError =
+                        error instanceof BranchError
+                            ? error
+                            : new BranchError(
+                                  `branch sidecar load failed: ${error instanceof Error ? error.message : String(error)}`,
+                                  BranchErrorCode.STORAGE_CORRUPT
+                              );
+                    this.groups = [];
+                    console.error(
+                        `[graycode-branches] sidecar load failed (${BRANCH_STORE_FILE}); ` +
+                            'branch groups are unavailable until the file is repaired:',
+                        this.loadError.message
+                    );
                 }
             }
+            if (this.disposed) return;
             this.loaded = true;
             await this.purgeExpiredGroups();
         })();
@@ -181,22 +206,35 @@ export class BranchCoordinatorService {
     }
 
     dispose(): void {
+        this.disposed = true;
         this.groups = [];
         this.loaded = false;
         this.loadPromise = undefined;
+        this.loadError = undefined;
     }
 
     listGroups(): GrayBranchGroup[] {
+        this.assertUsable();
         return [...this.groups];
     }
 
     getGroup(groupId: string): GrayBranchGroup | undefined {
+        this.assertUsable();
         return this.groups.find(g => g.id === groupId);
     }
 
     /** 包含该会话候选的分组（任意候选状态） */
     groupForSession(sessionId: string): GrayBranchGroup | undefined {
+        this.assertUsable();
         return this.groups.find(g => g.candidates.some(c => c.sessionId === sessionId));
+    }
+
+    /** 加载失败（sidecar 损坏/不可读）后所有组访问统一抛 STORAGE_CORRUPT（错误状态响亮失败） */
+    private assertUsable(): void {
+        if (this.loadError) throw this.loadError;
+        if (!this.loaded) {
+            throw new BranchError('branch service is not initialized', BranchErrorCode.STORAGE_CORRUPT);
+        }
     }
 
     /** 会话事件日志（透传适配器；用于轮次摘要等展示投影） */
@@ -216,6 +254,7 @@ export class BranchCoordinatorService {
         label?: string;
     }): Promise<GrayBranchGroup> {
         return this.mutate(async () => {
+            this.assertUsable();
             const existing = this.groups.find(
                 g => g.rootSessionId === input.rootSessionId && g.workspaceId === input.workspaceId
             );
@@ -451,10 +490,8 @@ export class BranchCoordinatorService {
     // ─── 内部 ─────────────────────────────────────────────
 
     private requireGroup(groupId: string): GrayBranchGroup {
-        if (!this.loaded) {
-            throw new BranchError('branch service is not initialized', BranchErrorCode.STORAGE_CORRUPT);
-        }
-        const group = this.getGroup(groupId);
+        this.assertUsable();
+        const group = this.groups.find(g => g.id === groupId);
         if (!group) {
             throw new BranchError(
                 `branch group "${groupId}" not found`,
@@ -542,9 +579,11 @@ export class BranchCoordinatorService {
                 activeSessionId: next.activeSessionId,
             };
         } catch (error) {
-            if (error instanceof BranchError && error.code === BranchErrorCode.STORAGE_WRITE_FAILED) {
-                // sidecar 写失败：保留 fork 会话，不入组，报告孤儿（§P3E）；
-                // activeSessionId 不变（激活从未提交）
+            // sidecar 提交失败：写失败（STORAGE_WRITE_FAILED）或 fork 后 CAS 冲突
+            // （REVISION_CONFLICT——另一进程在 fork 与提交之间改了组）时，fork 会话已存在
+            // 但未入组：保留会话、不入组、报告孤儿（§P3E），并携带 sessionId 供调用方恢复；
+            // activeSessionId 不变（激活从未提交）。非 BranchError（意外错误）不掩盖，原样上抛。
+            if (error instanceof BranchError) {
                 return {
                     groupId: input.group.id,
                     sessionId: forkOutcome.sessionId,
@@ -553,7 +592,7 @@ export class BranchCoordinatorService {
                     kind: input.kind,
                     agentAttached: forkOutcome.agentAttached,
                     orphan: true,
-                    revision: input.group.revision,
+                    revision: error.authoritativeGroup?.revision ?? input.group.revision,
                     activeSessionId: input.group.activeSessionId,
                 };
             }
@@ -563,8 +602,9 @@ export class BranchCoordinatorService {
 
     private async sendAfterFork(sessionId: string, content: readonly unknown[]): Promise<boolean> {
         try {
-            await this.adapter.sendUserMessage({ sessionId, content });
-            return true;
+            // 无 live agent 时适配器返回 false：必须据实返回，不能把「未投递」当「已投递」
+            const delivered = await this.adapter.sendUserMessage({ sessionId, content });
+            return delivered === true;
         } catch {
             return false;
         }
@@ -574,8 +614,9 @@ export class BranchCoordinatorService {
         this.groups = this.groups.map(g => (g.id === next.id ? next : g));
     }
 
-    /** 原子持久化整个 sidecar（tmp + rename） */
+    /** 原子持久化整个 sidecar（tmp + rename）；已弃用实例不再写盘 */
     private async persist(groups: GrayBranchGroup[]): Promise<void> {
+        if (this.disposed) return;
         const record: BranchGroupStore = {
             version: BRANCH_GROUP_STORE_VERSION,
             groups,
@@ -584,13 +625,50 @@ export class BranchCoordinatorService {
         try {
             await fs.mkdir(this.rootDir, { recursive: true });
             await fs.writeFile(tmpPath, JSON.stringify(record, null, 2), 'utf8');
-            await fs.rename(tmpPath, this.storePath);
+            await this.renameOverwrite(tmpPath, this.storePath);
         } catch (error) {
             await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+            // 错误消息剥离完整文件路径（Windows rename 错误常带全路径；只留文件名）
+            const detail = error instanceof Error ? error.message : String(error);
+            const stripped = detail
+                .replaceAll(tmpPath, BRANCH_STORE_FILE)
+                .replaceAll(this.storePath, BRANCH_STORE_FILE);
             throw new BranchError(
-                `branch sidecar write failed: ${error instanceof Error ? error.message : String(error)}`,
+                `branch sidecar write failed (${BRANCH_STORE_FILE}): ${stripped}`,
                 BranchErrorCode.STORAGE_WRITE_FAILED
             );
+        }
+    }
+
+    /**
+     * Windows 上 rename 覆盖已存在目标偶发 EPERM/EACCES/EBUSY/EEXIST（文件锁/杀软竞态）：
+     * 短暂退避重试（与 memory 域 renameConfigOverwrite 同模式，域内自包含不跨目录 import）；
+     * 重试耗尽后 EEXIST/EPERM 先删旧目标再最后 rename 一次，其余可恢复码原样抛出。
+     */
+    private async renameOverwrite(tmpPath: string, targetPath: string): Promise<void> {
+        for (let attempt = 1; ; attempt += 1) {
+            try {
+                await fs.rename(tmpPath, targetPath);
+                return;
+            } catch (error) {
+                const code = (error as NodeJS.ErrnoException)?.code;
+                if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY' && code !== 'EEXIST') {
+                    throw error;
+                }
+                if (attempt >= 4) {
+                    if (code === 'EEXIST' || code === 'EPERM') {
+                        try {
+                            await fs.unlink(targetPath);
+                        } catch {
+                            // 目标不存在或删除失败：最后一次 rename 暴露真实错误
+                        }
+                        await fs.rename(tmpPath, targetPath);
+                        return;
+                    }
+                    throw error;
+                }
+                await new Promise(resolve => setTimeout(resolve, 30 * attempt));
+            }
         }
     }
 

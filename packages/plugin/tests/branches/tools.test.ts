@@ -64,14 +64,17 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
     cwd?: string
     agentPreset?: string
   }): Promise<{ sessionId: string; agentAttached: boolean }> {
+    // 与真实适配器同口径：seed 按 seq <= boundary 选取（事件流 seq 可能不连续）
+    const boundary = input.boundary
     const seed =
-      input.boundary === undefined ? [...input.parent.events] : input.parent.events.slice(0, input.boundary + 1)
+      boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
     this.sessions.set(input.childSessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
     return { sessionId: input.childSessionId, agentAttached: false }
   }
 
-  async sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<void> {
+  async sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<boolean> {
     this.sentMessages.push(input)
+    return true
   }
 }
 
@@ -267,5 +270,37 @@ describe('branch tools', () => {
     const listed = await execute('branch_list', { groupId: env.groupId })
     const groups = listed.groups as Array<{ activeSessionId: string }>
     expect(groups[0]!.activeSessionId).toBe(result.sessionId)
+  })
+})
+
+describe('branch tools with a corrupt sidecar', () => {
+  it('tools return the stable STORAGE_CORRUPT code instead of throwing (initialize must not reject)', async () => {
+    const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-corrupt-'))
+    try {
+      await fs.mkdir(path.join(dataRoot, 'branches'), { recursive: true })
+      await fs.writeFile(path.join(dataRoot, 'branches', 'groups.json'), '{not json', 'utf-8')
+      const service = new BranchCoordinatorService({ dataRoot }, new FakeBranchSessionAdapter())
+      await service.initialize() // 损坏时内部捕获：不产生 unhandled rejection
+      const tools = new Map(createBranchTools(service).map(tool => [tool.name, tool]))
+      const exec = {
+        agent: { session: { id: ROOT_SESSION, header: { cwd: process.cwd() } } },
+        signal: new AbortController().signal,
+      } as unknown as ToolRunContext
+
+      const created = (await tools.get('branch_create')!.execute({ sessionId: ROOT_SESSION }, exec)) as ToolOutput
+      expect(created.success).toBe(false)
+      expect(created.code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+
+      const listed = (await tools.get('branch_list')!.execute({}, exec)) as ToolOutput
+      expect(listed.success).toBe(false)
+      expect(listed.code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+
+      const rerolled = (await tools.get('branch_reroll')!.execute({ sessionId: ROOT_SESSION, turn: 2 }, exec)) as ToolOutput
+      expect(rerolled.success).toBe(false)
+      expect(rerolled.code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+      service.dispose()
+    } finally {
+      await fs.rm(dataRoot, { recursive: true, force: true })
+    }
   })
 })

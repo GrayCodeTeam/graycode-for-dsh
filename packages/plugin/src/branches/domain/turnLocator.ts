@@ -66,14 +66,17 @@ export function findTurn(events: readonly BranchEventView[], turn: number): Turn
 
 /**
  * 计算目标轮次的 fork 边界（inclusive source seq）：
- * 取目标轮次 turn/start 之前的最后一个事件 seq（即上一完整轮次的末尾）。
- * 目标轮次是第一个轮次（startSeq === 0）时无边界可 fork，返回 undefined。
+ * 取目标轮次 turn/start 之前最后一个事件的 seq（即上一完整轮次的末尾）。
+ * 事件流 seq 可能不连续（修剪/压缩/过滤），不能直接 startSeq - 1（可能不是真实
+ * 事件）；按事件流顺序定位 turn/start，取其前一个事件的实际 seq。
+ * 目标轮次是第一个事件时无边界可 fork，返回 undefined。
  */
 export function forkBoundaryBeforeTurn(events: readonly BranchEventView[], turn: number): number | undefined {
     const target = findTurn(events, turn);
     if (!target) return undefined;
-    if (target.startSeq <= 0) return undefined;
-    return target.startSeq - 1;
+    const startIndex = events.findIndex(e => e.seq === target.startSeq);
+    if (startIndex <= 0) return undefined;
+    return events[startIndex - 1]!.seq;
 }
 
 /** 会话当前「可 fork 的完整前缀」末尾 seq（manual 分支缺省边界） */

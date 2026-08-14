@@ -40,9 +40,12 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
         },
 
         async forkChild({ parent, boundary, childSessionId, cwd, agentPreset }) {
+            // 按 seq 定位边界而非数组下标：事件流 seq 可能不连续（修剪/压缩/过滤），
+            // slice(0, boundary + 1) 按下标切片会错位（把 boundary 之后的事件带进 seed）；
+            // 边界 = 所有 seq <= boundary 的事件（保持事件流原有顺序）
             const seed = (boundary === undefined
                 ? [...parent.events]
-                : parent.events.slice(0, boundary + 1)) as unknown as SessionEvent[]
+                : parent.events.filter(event => event.seq <= boundary)) as unknown as SessionEvent[]
             const seedLength = seed.length
             const childId = SessionId(childSessionId)
             const meta = {
@@ -70,7 +73,9 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
 
         async sendUserMessage({ sessionId, content }) {
             const agent = ctx.agents.get(SessionId(sessionId))
-            if (!agent) return
+            // 无 live agent（agent factory 未装载 / 会话没有可驱动 Agent）：返回 false，
+            // 不能静默 resolve——上层 sendAfterFork 会把「未投递」误报成 messageSent:true
+            if (!agent) return false
             // 必须 await：followup 是异步投递，失败要向上传播（sendAfterFork 据实报
             // messageSent=false），不能浮空 promise 吞掉 rejection（BUG-04）
             await agent.followup(
@@ -79,6 +84,7 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
                     source: { kind: 'user' },
                 })
             )
+            return true
         },
     }
 }

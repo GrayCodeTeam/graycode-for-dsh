@@ -69,11 +69,11 @@ describe('dshSessionAdapter.sendUserMessage', () => {
     expect(followup).toHaveBeenCalledTimes(1)
   })
 
-  it('resolves as a no-op when no live agent exists', async () => {
+  it('resolves false when no live agent exists (message was not delivered)', async () => {
     const adapter = createDshBranchSessionAdapter(makeFakeCtx({ agent: null }))
     await expect(
       adapter.sendUserMessage({ sessionId: 's1', content: [{ type: 'text', text: 'hi' }] }),
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
   })
 })
 
@@ -111,6 +111,40 @@ describe('reroll through the real adapter', () => {
       const group = await service.ensureGroup({ workspaceId: 'ws-1', rootSessionId: 'root-session' })
       const result = await service.reroll({ groupId: group.id, sessionId: 'root-session', turn: 2 })
       expect(result.messageSent).toBe(true)
+    } finally {
+      service.dispose()
+    }
+  })
+
+  it('reroll reports messageSent false when no agent factory is registered (no live agent)', async () => {
+    // agents.create 抛 NO_FACTORY（未装载 agent-loop）→ forkChild 降级为仅建会话；
+    // agents.get 无 live agent → sendUserMessage 返回 false，不得误报 messageSent true
+    const ctx = {
+      sessions: {
+        get: () => ({ header: { cwd: '/workspace' }, events: twoClosedTurns() }),
+        create: () => undefined,
+      },
+      agents: {
+        get: () => undefined,
+        create: async () => {
+          throw new Error('no agent factory registered (load an agent-loop plugin)')
+        },
+      },
+    } as unknown as Context
+    const adapter = createDshBranchSessionAdapter(ctx)
+    const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branches-adapter-'))
+    tmpDirs.push(dataRoot)
+    const service = new BranchCoordinatorService({ dataRoot }, adapter)
+    await service.initialize()
+    try {
+      const group = await service.ensureGroup({ workspaceId: 'ws-1', rootSessionId: 'root-session' })
+      const result = await service.reroll({ groupId: group.id, sessionId: 'root-session', turn: 2 })
+      expect(result.messageSent).toBe(false)
+      expect(result.agentAttached).toBe(false)
+      expect(result.orphan).toBe(false)
+      // 会话已建并记录候选，只是没有 agent 可驱动
+      const current = service.getGroup(group.id)!
+      expect(current.candidates.some(c => c.sessionId === result.sessionId && c.kind === 'reroll')).toBe(true)
     } finally {
       service.dispose()
     }

@@ -94,6 +94,26 @@ describe('forkBoundaryBeforeTurn', () => {
   it('returns undefined for an unknown turn', () => {
     expect(forkBoundaryBeforeTurn(twoClosedTurns(), 99)).toBeUndefined()
   })
+
+  it('returns the actual seq of the event right before the target turn start when seqs are not contiguous', () => {
+    // seq1/4 缺失：startSeq - 1 = 4 不是真实事件；必须是 turn1 turn/end 的 seq3
+    const events: BranchEventView[] = [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 2, { source: { kind: 'user' } }),
+      ev('turn/end', 3, { turn: 1 }),
+      ev('turn/start', 5, { turn: 2 }),
+    ]
+    expect(forkBoundaryBeforeTurn(events, 2)).toBe(3)
+  })
+
+  it('returns undefined when the target turn start is the first event even with seq > 0', () => {
+    const events: BranchEventView[] = [
+      ev('turn/start', 10, { turn: 1 }),
+      ev('user/message', 12, { source: { kind: 'user' } }),
+      ev('turn/end', 13, { turn: 1 }),
+    ]
+    expect(forkBoundaryBeforeTurn(events, 1)).toBeUndefined()
+  })
 })
 
 describe('lastCompleteBoundary', () => {

@@ -268,5 +268,59 @@ export function parseBranchGroupStore(raw: string): GrayBranchGroup[] {
             BranchErrorCode.STORAGE_CORRUPT
         );
     }
-    return record.groups as GrayBranchGroup[];
+    // 信封通过后逐组逐候选校验字段类型：损坏数据不得静默进运行态（否则后续 CAS/
+    // 激活/软删会以错误形状运行）。任一字段非法即按 STORAGE_CORRUPT 报错并给出组 id。
+    const groups: GrayBranchGroup[] = [];
+    for (const [index, entry] of record.groups.entries()) {
+        if (!isValidGroup(entry)) {
+            const id = isRecord(entry) && typeof entry.id === 'string' ? entry.id : `#${index}`;
+            throw new BranchError(
+                `branch sidecar group ${id} is corrupt (invalid group/candidate shape)`,
+                BranchErrorCode.STORAGE_CORRUPT
+            );
+        }
+        groups.push(entry as GrayBranchGroup);
+    }
+    return groups;
+}
+
+// ─── 逐组逐候选形状校验（类型守卫；只读不归一化） ───────────────────────────
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value);
+}
+
+const BRANCH_CANDIDATE_KINDS = new Set<string>(['root', 'reroll', 'edit', 'manual']);
+
+function isValidCandidate(value: unknown): value is BranchCandidate {
+    if (!isRecord(value)) return false;
+    if (!isNonEmptyString(value.sessionId)) return false;
+    if (typeof value.kind !== 'string' || !BRANCH_CANDIDATE_KINDS.has(value.kind)) return false;
+    if (!isFiniteNumber(value.createdAt)) return false;
+    if (value.parentSessionId !== undefined && !isNonEmptyString(value.parentSessionId)) return false;
+    if (value.boundary !== undefined && !Number.isInteger(value.boundary)) return false;
+    if (value.label !== undefined && typeof value.label !== 'string') return false;
+    if (value.deletedAt !== undefined && !isFiniteNumber(value.deletedAt)) return false;
+    if (value.workspaceSnapshotId !== undefined && !isNonEmptyString(value.workspaceSnapshotId)) return false;
+    return true;
+}
+
+function isValidGroup(value: unknown): value is GrayBranchGroup {
+    if (!isRecord(value)) return false;
+    if (!isNonEmptyString(value.id)) return false;
+    if (!isNonEmptyString(value.rootSessionId)) return false;
+    if (!isNonEmptyString(value.activeSessionId)) return false;
+    if (!Array.isArray(value.candidates) || !value.candidates.every(isValidCandidate)) return false;
+    if (!Number.isInteger(value.revision) || (value.revision as number) < 1) return false;
+    if (!isFiniteNumber(value.createdAt)) return false;
+    if (value.workspaceId !== undefined && !isNonEmptyString(value.workspaceId)) return false;
+    return true;
 }

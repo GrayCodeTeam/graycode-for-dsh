@@ -313,4 +313,72 @@ describe('parseBranchGroupStore', () => {
     )
     expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
   })
+
+  // ── 逐组逐候选字段校验（损坏数据不得静默进运行态）──
+
+  const envelope = (groups: unknown[]) => JSON.stringify({ version: BRANCH_GROUP_STORE_VERSION, groups })
+  const groupAsRecord = (id: string) => createBranchGroup({ id, rootSessionId: 'r1' }) as unknown as Record<string, unknown>
+
+  it('a non-object group entry throws STORAGE_CORRUPT', () => {
+    const error = thrown(() => parseBranchGroupStore(envelope([42])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a group with a non-string activeSessionId throws STORAGE_CORRUPT naming the group', () => {
+    const error = thrown(() => parseBranchGroupStore(envelope([{ ...groupAsRecord('g1'), activeSessionId: 42 }])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+    expect((error as BranchError).message).toContain('g1')
+  })
+
+  it('a group with a non-string rootSessionId throws STORAGE_CORRUPT', () => {
+    const error = thrown(() => parseBranchGroupStore(envelope([{ ...groupAsRecord('g2'), rootSessionId: 7 }])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a group whose candidates is not an array throws STORAGE_CORRUPT', () => {
+    const error = thrown(() => parseBranchGroupStore(envelope([{ ...groupAsRecord('g3'), candidates: 'oops' }])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+    expect((error as BranchError).message).toContain('g3')
+  })
+
+  it('a group with a non-number revision throws STORAGE_CORRUPT', () => {
+    const error = thrown(() => parseBranchGroupStore(envelope([{ ...groupAsRecord('g4'), revision: '2' }])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a group missing createdAt throws STORAGE_CORRUPT', () => {
+    const { createdAt: _createdAt, ...withoutCreatedAt } = groupAsRecord('g5')
+    const error = thrown(() => parseBranchGroupStore(envelope([withoutCreatedAt])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a candidate with a non-string sessionId throws STORAGE_CORRUPT', () => {
+    const group = groupAsRecord('g6')
+    const bad = { ...group, candidates: [{ ...(group.candidates as Array<Record<string, unknown>>)[0]!, sessionId: 7 }] }
+    const error = thrown(() => parseBranchGroupStore(envelope([bad])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+    expect((error as BranchError).message).toContain('g6')
+  })
+
+  it('a candidate with an unknown kind throws STORAGE_CORRUPT', () => {
+    const group = groupAsRecord('g7')
+    const bad = { ...group, candidates: [{ ...(group.candidates as Array<Record<string, unknown>>)[0]!, kind: 'sideways' }] }
+    const error = thrown(() => parseBranchGroupStore(envelope([bad])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a candidate with a non-number boundary throws STORAGE_CORRUPT', () => {
+    const group = groupAsRecord('g8')
+    const bad = { ...group, candidates: [{ ...(group.candidates as Array<Record<string, unknown>>)[0]!, boundary: '3' }] }
+    const error = thrown(() => parseBranchGroupStore(envelope([bad])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
+
+  it('a candidate missing createdAt throws STORAGE_CORRUPT', () => {
+    const group = groupAsRecord('g9')
+    const { createdAt: _createdAt, ...withoutCreatedAt } = (group.candidates as Array<Record<string, unknown>>)[0]!
+    const bad = { ...group, candidates: [withoutCreatedAt] }
+    const error = thrown(() => parseBranchGroupStore(envelope([bad])))
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+  })
 })
