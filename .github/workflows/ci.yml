@@ -88,60 +88,61 @@ jobs:
         shell: pwsh
         run: ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
 
-      - name: Clean-profile install smoke (dsh CLI)
-        # Non-blocking on purpose — see the "why" inside the script:
-        #   1. `@deepseek-ai/dsh@0.1.0-rc.6` is pinned like every other DSH dep
-        #      (ADR-0001), but dsh is not preinstalled on runners, so we npm -g it.
-        #   2. The bundle tarball declares `@graycode/dsh-plugin@^0.1.0`, which
-        #      must resolve from the npm registry. Until the @graycode/* packages
-        #      are published this fails with ERR_PNPM_FETCH_404 — exactly what
-        #      this gate exists to catch. The step prints the failure loudly and
-        #      uploads the logs as an artifact (step below), so it is visible in
-        #      every PR, not silently swallowed.
-        #   3. The plugin tarball alone installs today (all its deps are
-        #      published rc.6) and its `--dump-config` still gets asserted.
-        #   Flip continue-on-error to false once the packages are published.
-        continue-on-error: true
+      - name: Clean-profile plugin install smoke (blocking)
+        # The plugin artifact is self-contained apart from published rc.6 DSH
+        # dependencies. Installation and a subsequent profile config load are
+        # release gates: any non-zero command must fail the job. The plugin is
+        # intentionally a plain dependency; only the bundle adds loader rows.
         env:
           DSH_HOME: ${{ runner.temp }}/dsh-home
         run: |
-          set -u
-          echo "::group::dsh clean-profile install smoke"
+          set -euo pipefail
+          echo "::group::dsh clean-profile plugin smoke"
           npm install --global @deepseek-ai/dsh@0.1.0-rc.6 >/dev/null 2>&1
           dsh --version
           rm -rf "$DSH_HOME"
           mkdir -p "$DSH_HOME"
 
-          PLUGIN_TGZ=$(ls graycode-dsh-plugin-*.tgz 2>/dev/null | head -n1)
-          BUNDLE_TGZ=$(ls graycode-dsh-*.tgz 2>/dev/null | grep -v dsh-plugin | head -n1)
+          PLUGIN_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-plugin-*.tgz' -print -quit)
+          test -n "$PLUGIN_TGZ"
           echo "plugin tarball: $PLUGIN_TGZ"
-          echo "bundle tarball: $BUNDLE_TGZ"
 
-          # 1) plugin tarball — must install into a fresh profile today
-          dsh plugin --profile graycode add "./$PLUGIN_TGZ" >dsh-smoke-plugin.log 2>&1
-          echo "plugin install exit: $?"
-          tail -n 5 dsh-smoke-plugin.log
-
-          # 2) bundle tarball — fails with 404 until @graycode/* is published
-          dsh plugin --profile graycode add "./$BUNDLE_TGZ" >dsh-smoke-bundle.log 2>&1
-          echo "bundle install exit: $?"
-          tail -n 5 dsh-smoke-bundle.log
-
-          # 3) dump-config + assert the Gray layer
-          #    The bundle patch (cordis.patch.yml) inserts `id: graycode` with
-          #    name '@graycode/dsh-plugin' — "仅增 Gray 行".
+          dsh plugin --profile graycode add "$PLUGIN_TGZ" >dsh-smoke-plugin.log 2>&1
+          tail -n 20 dsh-smoke-plugin.log
           dsh --profile graycode --dump-config >dsh-smoke-dump-config.log 2>&1
-          echo "dump-config exit: $?"
-          if grep -q "id: graycode" dsh-smoke-dump-config.log \
-             && grep -q "@graycode/dsh-plugin" dsh-smoke-dump-config.log; then
-            echo "GRAY_LAYER=present"
-          else
-            echo "GRAY_LAYER=missing"
-          fi
+          test -s dsh-smoke-dump-config.log
+          echo "GRAY_PLUGIN_INSTALL=ok"
+          echo "::endgroup::"
+
+      - name: Clean-profile bundle install probe (non-blocking until publish)
+        # The bundle resolves @graycode/dsh-plugin and @graycode/dsh-client from
+        # npm. Those packages are not published yet, so a registry 404 is an
+        # expected external-state failure. Unlike the blocking plugin smoke,
+        # this probe is isolated and may not hide any preceding failure. Remove
+        # continue-on-error immediately after the first npm publication.
+        continue-on-error: true
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+        run: |
+          set -euo pipefail
+          echo "::group::dsh clean-profile bundle probe"
+          rm -rf "$DSH_HOME"
+          mkdir -p "$DSH_HOME"
+
+          BUNDLE_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-*.tgz' ! -name 'graycode-dsh-plugin-*.tgz' -print -quit)
+          test -n "$BUNDLE_TGZ"
+          echo "bundle tarball: $BUNDLE_TGZ"
+          dsh plugin --profile graycode add "$BUNDLE_TGZ" >dsh-smoke-bundle.log 2>&1
+          tail -n 20 dsh-smoke-bundle.log
+
+          dsh --profile graycode --dump-config >dsh-smoke-bundle-dump-config.log 2>&1
+          grep -q "id: graycode" dsh-smoke-bundle-dump-config.log
+          grep -q "@graycode/dsh-plugin" dsh-smoke-bundle-dump-config.log
+          echo "GRAY_LAYER=present"
           echo "::endgroup::"
 
       - name: Upload dsh smoke diagnostics
-        # Collect logs even when the step above failed (or was skipped), so the
+        # Collect logs even when either smoke step failed (or was skipped), so the
         # 404/publish-gate condition stays visible in the run's artifacts.
         if: always()
         uses: actions/upload-artifact@v4

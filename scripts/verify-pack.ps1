@@ -15,6 +15,7 @@
        - path traversal (`..` segments)
        - entries outside the `package/` root (catches whole-repo junk tarballs)
        - `package/package.json` name/version matches the expected package
+       - every relative `exports` target resolves to a packed file/path
      and reports per-package summary: entry count, tarball size, uncompressed
      size, README/LICENSE presence.
   4. Missing README/LICENSE is a warning by default; pass -Strict to make it a
@@ -79,6 +80,24 @@ function Assert-Command([string]$name) {
     Write-Host "FAIL: required command '$name' not found on PATH" -ForegroundColor Red
     exit 1
   }
+}
+
+function Get-StringLeaves($value) {
+  if ($null -eq $value) { return @() }
+  if ($value -is [string]) { return @($value) }
+  $result = @()
+  if ($value -is [System.Collections.IDictionary]) {
+    foreach ($item in $value.Values) { $result += @(Get-StringLeaves $item) }
+    return $result
+  }
+  if ($value -is [System.Collections.IEnumerable]) {
+    foreach ($item in $value) { $result += @(Get-StringLeaves $item) }
+    return $result
+  }
+  foreach ($property in $value.PSObject.Properties) {
+    $result += @(Get-StringLeaves $property.Value)
+  }
+  return $result
 }
 
 function Get-TarEntries([string]$tgz) {
@@ -210,6 +229,7 @@ foreach ($tgzFile in $tarballs) {
   $hasLicense = $false
   $manifestName = $null
   $manifestVersion = $null
+  $m = $null
 
   foreach ($entry in $entries) {
     $raw = $entry
@@ -280,6 +300,26 @@ foreach ($tgzFile in $tarballs) {
           $violations.Add("package.json version mismatch: '$manifestVersion' != '$($srcPkg.version)'")
         }
       } catch { }
+    }
+  }
+
+  # Every relative package export must point at content that is actually in the
+  # tarball. This catches manifests such as `./src/* -> ./src/*` when `src` is
+  # excluded by the package `files` allowlist.
+  if ($m -and $m.exports) {
+    $normalizedEntries = @($entries | ForEach-Object { ($_ -replace '\\', '/').TrimStart('./') })
+    foreach ($target in (Get-StringLeaves $m.exports | Sort-Object -Unique)) {
+      if (-not $target.StartsWith('./')) { continue }
+      $targetRel = $target.Substring(2)
+      if ($targetRel.Contains('*')) {
+        $prefix = $targetRel.Substring(0, $targetRel.IndexOf('*'))
+        $found = @($normalizedEntries | Where-Object { $_.StartsWith("package/$prefix") }).Count -gt 0
+      } else {
+        $found = "package/$targetRel" -in $normalizedEntries
+      }
+      if (-not $found) {
+        $violations.Add("exports target '$target' is absent from the tarball")
+      }
     }
   }
 
