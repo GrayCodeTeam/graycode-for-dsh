@@ -17,6 +17,11 @@
 > 崩溃）；verify-pack 补 bundle patch 一致性检查；7 项 bug 修复（remote 日志滚动 /
 > delete_code 5MB 护栏 / checkpoints rename 重试 + token 上限 / staged-diff 保留名 /
 > resize 像素护栏 / migration 锁心跳 + 敏感键扩展）。
+> 本轮（Phase 5 复杂 scope 映射，D-1/D-4a/D-5b/D-6）：host 侧工作区记忆映射表
+> （buildScopeMap + 报告 markdown/machine 三节）+ scopeOverridesFile 覆盖导入
+> （global / 绝对路径，memoryTarget 应用）+ migration/scopeMap Remote 端点；
+> client ScopeMapPanel 可视化面板（Remote/Mock 双源，31 用例）；D-4a 会话工作区
+> 归属缺失报告清单、D-5b 会话存档点清单；ADR-0004 注册表立项。
 
 ## 版本锁定（ADR-0001）
 
@@ -316,6 +321,42 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   ctx.fs 读写 + staged-diff 钩子；参数/语义与老版 backend/tools/file/delete_code.ts 对齐。
   16 用例。
 
+### Phase 5 复杂 scope 映射 — 已落地（D-1 / D-4a / D-5b / D-6，2026-08）
+
+- **D-1 可视化 + 导入导出（✅ 已落地）**：`src/migration/domain/scopeMap.ts`（纯函数
+  域）产出映射建议表（`buildScopeMap`：hashDir / sourcePath / uri / status auto|unmapped /
+  suggestedTarget，按 hashDir 稳定排序；损坏 scope.json → unmapped 无建议，fail-closed）；
+  `resolveScopeOverride` 三态（auto / global / 绝对路径→workspace）。报告 markdown 增
+  「工作区记忆映射」节（含覆盖指引），机器 JSON 增 `scopeMap`。`migration_apply` 新增
+  `scopeOverridesFile` 参数（JSON 文件 `{ "<hashDir>": "global" | "/abs" }`，工具层
+  node:fs 读取解析，非法 JSON fail-closed 拒绝执行）；memoryTarget 按覆盖选择目标
+  （global → `memory://global`；绝对路径 → 该路径哈希出的工作区目录，scope.json
+  fsPath=覆盖路径；未覆盖 → 沿用 scope.json fsPath 自动映射）；覆盖路径的目录名与
+  getWorkspace 同算法（sha256(normalizeWorkspaceKey(cwd)) 前 16 hex），台账 targetRef
+  如实记录，journalKey 保持 legacyId 维度（幂等不变）。dsh-tools 参数 schema 不支持
+  object 类型 → 覆盖仅文件入口（不提供内联对象参数）。10 用例
+  （`tests/migration/scopeOverrides.test.ts`）。
+- **D-2 可视化面板（✅ 已落地，client ScopeMapPanel）**：`src/client/scopeMap/`
+  （types/query/wire/errors/viewModel/overrides/dataSource/locales/ScopeMapPanel/README），
+  仿 activityHeatmap Remote/Mock 双源模式：`dataSource: 'remote' | 'mock'` prop +
+  transport/sourceDir；表格（hashDir/source/status + 目标单选：默认建议/全局记忆/自定义
+  绝对路径）；overrides JSON 导出只含手动改过的行（供 scopeOverridesFile 输入）；空态/
+  replay 退化；独立 locale 命名空间 `graycode.scopeMap`。31 用例
+  （`tests/scopeMapPanel.spec.ts`）。
+- **D-3 不变**：scope.json 缺失/损坏 → unmapped 跳过（fail-closed，见 workspaceScope 批次）。
+- **D-4a 维持现状 + 报告透明化（✅ 已落地）**：workspaceUri 无法派生 DSH cwd 的会话
+  （vscode-remote:// 等远程/损坏 URI）迁移后无 cwd、原值随附 artifact；报告「会话工作区
+  归属缺失（已接受降级）」节列出 legacyId + workspaceUri 清单（机器 JSON
+  `conversationCwdIssues`）。cwd 派生逻辑下沉 domain（`deriveWorkspaceUriCwd`）。
+- **D-5b 会话历史存档点清单（✅ 已落地）**：报告「会话历史存档点」节列出每个会话
+  custom.checkpoints 的 id 清单（机器 JSON `conversationCheckpointLists`），供
+  会话 ↔ 存档检索（DSH 侧 checkpoint 与会话无外键，现状接受）。
+- **D-6 注册表立项（✅ ADR-0004）**：稳定 workspaceId 注册表（cwd → stableId 权威
+  映射，stableId 与现有目录哈希同算法 → 零目录迁移），跨 memory/checkpoints/
+  migration/stagedWrite 四域；本期只落手动脉冲（scopeOverrides），实施另立计划。
+- host 侧新增 `migration/scopeMap` Remote 端点（POST `{sourceDir}` → `{entries}`，
+  dry-run scan 消费；仅 allowLegacyReaders=true 时注册，遵守安全门）。
+
 ## fakeThought / 提示词编排调研结论（P0-14 复查）
 
 - DSH rc.6 **无请求构造注入面**（P0-14 复查确认）：
@@ -362,15 +403,15 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：100 文件 1470 用例全绿（1465 通过 / 5 skipped；本地实测连续多次运行一致）——
-workflows 171 / client 386（含 activityHeatmap 33）/ branches 125 / prompt 88 / migration 100 /
-memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 / stagedDiff 48 / shared 47 /
-spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ fault-injection 19 / providers 13 /
-agentScope 9 / persona 8 / e2e 5 / todo 25 / file 17。
+`pnpm test`：120 文件 1716 用例全绿（1711 通过 / 5 skipped；本地实测连续多次运行一致）——
+workflows 171 / client 417（含 activityHeatmap 33 + scopeMapPanel 31）/ branches 125 /
+prompt 88 / migration 110 / memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 /
+stagedDiff 48 / shared 47 / spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ 
+fault-injection 19 / providers 13 / agentScope 9 / persona 8 / e2e 5 / todo 25 / file 17。
 5 skipped 分布：spike/subagents.probe 1、migrationHarden 3（Windows 无 symlink）、
 stagedDiff/tools 1（Windows 无 symlink）。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
-`scripts/verify-pack.ps1`：PASS（3 tarball，violations: none）。
+`scripts/verify-pack.ps1`：PASS（3 tarball，violations: none，warnings 0）。
 
 ## 打磨批次（2026-08：clean-room 安装验证 + bug 修复）
 

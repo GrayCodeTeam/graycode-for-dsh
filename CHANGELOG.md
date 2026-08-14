@@ -38,6 +38,20 @@
   `settingsSummary.writeResult`。
 - **迁移增强 B3**：snapshots 接线——旧快照经 `SessionStore.create`（seed 历史 + header
   lineage `parentSession`/`seedLength`）导入为 DSH session，孤儿快照照常导入，幂等由台账保证。
+- **迁移增强 B4/D-1（scope 映射 + 覆盖导入导出）**：`src/migration/domain/scopeMap.ts`
+  映射建议表（hashDir/sourcePath/status auto|unmapped/suggestedTarget）+ `resolveScopeOverride`
+  三态；报告 markdown「工作区记忆映射」节与机器 JSON `scopeMap`；`migration_apply` 新增
+  `scopeOverridesFile`（JSON `{ "<hashDir>": "global" | "/abs" }`，非法 fail-closed）；
+  memoryTarget 按覆盖写目标（global → 全局记忆；绝对路径 → 该路径哈希目录）；
+  `migration/scopeMap` Remote 端点（仅 allowLegacyReaders=true 注册）。
+- **Client ScopeMapPanel（D-2 可视化）**：`src/client/scopeMap/`——表格（hashDir/source/
+  status + 目标单选）+ overrides JSON 导出（只含手动行，供 scopeOverridesFile 输入）+
+  空态/replay 退化；Remote/Mock 双源；locale 命名空间 `graycode.scopeMap`；31 用例。
+- **迁移报告归属透明化（D-4a/D-5b）**：报告「会话工作区归属缺失（已接受降级）」
+  （`conversationCwdIssues`：workspaceUri 无法派生 cwd 的会话清单）与「会话历史存档点」
+  （`conversationCheckpointLists`：custom.checkpoints id 清单）两节；cwd 派生下沉 domain。
+- **ADR-0004（D-6 立项）**：稳定 workspaceId 注册表决策记录（stableId 与现有目录哈希
+  同算法 → 零目录迁移；四域接入点；scopeOverrides 为其手动脉冲；实施另立计划）。
 - **Subagents 薄适配层（C1）**：`graycode-subagents` 子插件挂进 composition root——G1
   hop 熔断（默认 5，老 Gray MAX_HOP_DEPTH）、G2 子→父寻址（直接父/main+root 支持，其余
   fail-closed）、G3 maxConcurrent（默认 2）；配置 `subagents.maxHopDepth/maxConcurrent`。
