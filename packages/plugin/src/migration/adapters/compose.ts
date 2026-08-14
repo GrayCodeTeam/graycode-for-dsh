@@ -3,7 +3,8 @@
  *
  * 把领域/应用/适配器接成一个 LegacyImportService：
  * - legacy 只读解析器（inventory / validator / parsers）；
- * - 写入侧：conversations（artifact 暂存）、checkpoints（BlobStore +
+ * - 写入侧：conversations（DSH session seed / artifact 暂存）、snapshots（DSH
+ *   session seed + lineage header，B3）、checkpoints（BlobStore +
  *   ManifestRepository）、memory（MemoryService 公开方法）、settings（建议配置）；
  * - 幂等台账与 run 提交点存储（<dataRoot>/migration/…）。
  */
@@ -23,7 +24,7 @@ import {
   createConversationTargetWriter,
   type SessionPersistenceLike,
 } from './storage/conversationTarget.ts'
-import { createNoopWriter } from './storage/noopTarget.ts'
+import { createSnapshotTargetWriter } from './storage/snapshotTarget.ts'
 import type { DshHostContextLike } from './storage/settingsTarget.ts'
 import { MemoryService } from '../../memory/service.ts'
 
@@ -61,7 +62,11 @@ export function createMigrationService(options: MigrationServiceOptions): Legacy
           sessions: options.ctx?.sessions,
           persistence: sessionPersistence,
         }),
-        snapshots: createNoopWriter('snapshots'),
+        snapshots: createSnapshotTargetWriter({
+          importsRoot,
+          sessions: options.ctx?.sessions,
+          persistence: sessionPersistence,
+        }),
         checkpoints: createCheckpointTargetWriter({ dataRoot: options.dataRoot }),
         // H1b：memory 目标侧去重台账（ledger.put 失败后重跑不重复追加）
         memory: createMemoryTargetWriter(memoryService, { journalPath: path.join(migrationRoot, 'applied.json') }),

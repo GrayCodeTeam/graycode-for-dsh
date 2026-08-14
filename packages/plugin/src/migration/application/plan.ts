@@ -2,11 +2,13 @@
  * GrayCode - migration 计划器（纯函数，§7.5 冲突策略落点）
  *
  * 每个有效对象按 objectType 走冲突判定：
- * - conversation / checkpoint / memory-* / settings：台账判定
+ * - conversation / snapshot / checkpoint / memory-* / settings：台账判定
  *   （import / already-imported / conflict）；
- * - snapshot：目标（DSH lineage）未接线 → unmapped（显式跳过并记录原因）；
  * - memory-workspace scope.json 缺失/损坏：unmapped（无法映射工作区）；
  * - 源对象损坏：outcome=error（errorCode 保留）。
+ *
+ * snapshots 目标（B3）已由 adapters/storage/snapshotTarget.ts 接线为 DSH session
+ * （seed 快照历史 + header lineage parentSession/seedLength），不再 unmapped。
  */
 
 import {
@@ -58,21 +60,6 @@ export class DefaultPlanner implements PlanPort {
           outcome: 'error',
           errorCode: validated.errorCode,
           data: validated.data,
-        })
-        continue
-      }
-
-      // snapshot：目标（DSH lineage/legacy artifact 归属）未接线 → 显式跳过
-      if (validated.objectType === 'snapshot') {
-        objects.push({
-          ...base,
-          outcome: 'unmapped',
-          skipReason: '快照目标（DSH lineage）尚未接线，记为 intentional skip；可重建数据不迁移',
-        })
-        skips.push({
-          objectType: validated.objectType,
-          legacyId: validated.legacyId,
-          reason: 'snapshots 目标未接线（DSH lineage），暂不导入',
         })
         continue
       }

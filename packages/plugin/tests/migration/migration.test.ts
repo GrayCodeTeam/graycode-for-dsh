@@ -22,7 +22,7 @@ import { createMemoryTargetWriter } from '../../src/migration/adapters/storage/m
 import { createCheckpointTargetWriter } from '../../src/migration/adapters/storage/checkpointTarget.ts'
 import { createSettingsTargetWriter } from '../../src/migration/adapters/storage/settingsTarget.ts'
 import { createConversationTargetWriter } from '../../src/migration/adapters/storage/conversationTarget.ts'
-import { createNoopWriter } from '../../src/migration/adapters/storage/noopTarget.ts'
+import { createSnapshotTargetWriter } from '../../src/migration/adapters/storage/snapshotTarget.ts'
 import type { SettingsProviderLike } from '../../src/migration/adapters/storage/settingsTarget.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import { renderMarkdownReport } from '../../src/migration/domain/report.ts'
@@ -184,7 +184,7 @@ function makeService(): ServiceFixture {
     planner: new DefaultPlanner(),
     writers: {
       conversations: createConversationTargetWriter({ importsRoot }),
-      snapshots: createNoopWriter('snapshots'),
+      snapshots: createSnapshotTargetWriter({ importsRoot }),
       checkpoints: createCheckpointTargetWriter({ dataRoot }),
       memory: createMemoryTargetWriter(memoryService),
       settings: createSettingsTargetWriter({ importsRoot }),
@@ -224,11 +224,11 @@ describe('migration scan（dry-run）', () => {
       expect(byType.get('checkpoint')?.outcome).toBe('import')
       expect(byType.get('memory-global')?.outcome).toBe('import')
       expect(byType.get('settings')?.outcome).toBe('import')
-      // snapshot 目标未接线 → unmapped
-      expect(byType.get('snapshot')?.outcome).toBe('unmapped')
+      // snapshot（B3）：接线为 DSH session seed + lineage → import
+      expect(byType.get('snapshot')?.outcome).toBe('import')
 
-      expect(report.counts.import).toBe(4)
-      expect(report.counts.unmapped).toBe(1)
+      expect(report.counts.import).toBe(5)
+      expect(report.counts.unmapped).toBe(0)
 
       // dry-run 不写盘：目标根下不应有任何导入产物
       expect(fs.existsSync(path.join(fx.dataRoot, 'migration', 'ledger.json'))).toBe(false)
@@ -466,7 +466,7 @@ describe('settings 脱敏', () => {
         planner: new DefaultPlanner(),
         writers: {
           conversations: createConversationTargetWriter({ importsRoot }),
-          snapshots: createNoopWriter('snapshots'),
+          snapshots: createSnapshotTargetWriter({ importsRoot }),
           checkpoints: createCheckpointTargetWriter({ dataRoot }),
           memory: createMemoryTargetWriter(memoryService),
           settings: createSettingsTargetWriter({ importsRoot, ctx: { settings: mockSettings } }),
@@ -541,7 +541,7 @@ describe('settings 脱敏', () => {
         planner: new DefaultPlanner(),
         writers: {
           conversations: createConversationTargetWriter({ importsRoot }),
-          snapshots: createNoopWriter('snapshots'),
+          snapshots: createSnapshotTargetWriter({ importsRoot }),
           checkpoints: createCheckpointTargetWriter({ dataRoot }),
           memory: createMemoryTargetWriter(memoryService),
           settings: createSettingsTargetWriter({ importsRoot, ctx: { credentials } }),
@@ -596,7 +596,7 @@ describe('settings 脱敏', () => {
         planner: new DefaultPlanner(),
         writers: {
           conversations: createConversationTargetWriter({ importsRoot }),
-          snapshots: createNoopWriter('snapshots'),
+          snapshots: createSnapshotTargetWriter({ importsRoot }),
           checkpoints: createCheckpointTargetWriter({ dataRoot }),
           memory: createMemoryTargetWriter(memoryService),
           settings: createSettingsTargetWriter({ importsRoot, ctx: { credentials } }),
