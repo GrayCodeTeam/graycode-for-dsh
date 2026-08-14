@@ -57,11 +57,11 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Nine namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = eighteen registrations. Covers the base `graycode` ns,
-    // the workflow node ns, all six Phase 4 management surfaces and the
-    // activity heatmap surface (C6).
-    expect(localeRegister).toHaveBeenCalledTimes(18)
+    // Ten namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = twenty registrations. Covers the base `graycode` ns,
+    // the workflow node ns, all six Phase 4 management surfaces, the
+    // activity heatmap surface (C6) and the notifications surface (C4).
+    expect(localeRegister).toHaveBeenCalledTimes(20)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -73,6 +73,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.stagedDiffCard',
       'graycode.settingsContribution',
       'graycode.activityHeatmap',
+      'graycode.notifications',
     ]) {
       // Each namespace is registered exactly twice: dict + ja placeholder.
       expect(namespaces.filter((n) => n === ns)).toHaveLength(2)
