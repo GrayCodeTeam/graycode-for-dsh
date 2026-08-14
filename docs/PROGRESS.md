@@ -6,6 +6,10 @@
 > P0-08 已落地；P3D 决策完成（ADR-0003，staged-diff 首发工作包已实现，写工具适配已完成）；
 > Phase 4 Client UI（P4-01~P4-07）已交付；Phase 5 迁移器已交付；审计批次完成（docs/review/）；
 > D-1（模板对齐）/ D-4（toolPolicy 执行链）已落地；D-5/D-6 已文档化。
+> 本轮：plan 工具（P3A 扩展）已注册；activity 域（get_activity_stats）与 media 域
+> （3 本地工具）已挂载；渠道配置导入直写 DSH 已落地（Phase 5 收尾）；subagents 验证完成
+> （docs/SUBAGENTS_VERIFICATION.md，缺口 G1-G3 接受差异）；跨 7 域 bug 修复批次完成；
+> fakeThought 调研结论已记录（路线决策待定）。
 
 ## 版本锁定（ADR-0001）
 
@@ -115,6 +119,17 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   白名单与旧版 preflight 逐字一致，resolve 抛错 fail-closed；接线测试 4 用例）
 - 已知降级点（D-11 = c 语义差异）见 `packages/plugin/src/prompt/README.md`；DSH 升级重跑探针
 
+### 新功能域（plan / activity / media）— 已实现并挂载
+
+- **plan 工具（P3A 扩展）**：create_plan / update_plan 已注册（workflows/tools/plan.ts，
+  `.graycode/plans/**.md` 文档写入）：TODO LIST 区块、sourceArtifact 四种新鲜度 + 2MB 内容
+  护栏、revision / progress_sync 双模式、autoSync 联动；已入 modeToolsPolicy 白名单
+- **activity 域**：get_activity_stats 已挂载（activity/，按 agentScope 安装）：agent/inbox +
+  agent/pre-step 事件采样、惰性心跳回算、按天 JSON 原子写、24h 热力 / 月度 / 连续会话聚合
+- **media 域**：crop_image / resize_image / rotate_image 已挂载（media/）：sharp 执行时动态
+  加载 + 缺失降级、归一化坐标、14 个稳定错误码、ctx.fs 读写；generate_image /
+  remove_background 设计已记录 deferred
+
 ### Phase 4 Client UI — P4-01~P4-07 已交付（契约驱动消费点 + 可挂接组件）
 
 - `packages/client`（@graycode/dsh-client）：`dsh.client` manifest（`platform:"web"` + `exports["./client"]`，
@@ -141,8 +156,18 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - 14 类脱敏 fixture（tests/migration/fixtures/，114 文件，F-b 交付）
 - **收尾已完成**：会话导入接入 DSH session 公开 API（确定性 seed、幂等、失败可重跑，标题/分支图/
   子代理转录仍走 artifact 随附）；checkpoint 增量链跨目录回溯（沿 backupSourceCheckpointId 逐级
-  解析，环/缺失/损坏隔离）；domainNotes 并入导入报告；settings 仍只产出建议配置（不直接改 DSH）
-- 未完成：复杂 scope 映射待用户确认；settings 直写 DSH 待决策
+  解析，环/缺失/损坏隔离）；domainNotes 并入导入报告；settings 直写 DSH 已落地（见下节）
+- 未完成：复杂 scope 映射待用户确认
+
+### Phase 5 收尾：渠道配置导入直写 DSH — 已落地
+
+- channelConfigs → DSH `llm-pi-ai` settings 命名空间直写（`ctx.settings.mutate('llm-pi-ai',
+  [{op:'set', path:['providers', route], value: profile}])`，merge 语义、不覆盖已有 route）；
+  渠道 route 命名 google / openai / anthropic，凭据引用占位 `GRAYCODE_*_API_KEY`（无明文）
+- 降级链：settings 服务未挂载 / `llm-pi-ai` 命名空间未注册 / get 抛错 → 回退「只出建议文件」；
+  mutate 被拒（settings-rejected）→ 回退；disabled / 不受支持渠道 → draft 降级不写入
+- 脱敏：凭据与 url/CLI 参数一律脱敏，报告不输出密钥
+- 实现：packages/plugin/src/migration/adapters/storage/settingsTarget.ts
 
 ### Phase 6 发布 — pending（CI 就绪；npm 发布、三平台验收、升级/回滚演练待做）
 
@@ -153,6 +178,82 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - 8 个子插件均经 registrar 注册（migration/stagedDiff 复用同模式）
 - 验证：headless 真实启动中模型可列出全部工具（roots 模式）
 
+## Subagents 能力覆盖验证 — 完成（docs/SUBAGENTS_VERIFICATION.md）
+
+- 探针测试 tests/spike/subagents.probe.spec.ts（15 用例 / 1 skipped，零网络零模型）+ 包内
+  代码走查：DSH subagent 工具族（subagent / subagent_fork / send_message / interrupt_agent /
+  list_agents / report）覆盖老 Gray 的 subagents / agent_send_message ≈90%
+- 结论：无需在 graycode-for-dsh 新建 subagents 实现；bundle 无需改动（base 层已挂载完整
+  subagent 行族，探针含防重复挂载守卫）
+- 缺口 G1-G3（接受差异，不阻断）：无 threadId/hopDepth 跳数熔断；子→父 report 仅直接父
+  代理（框架化）；老 Gray subagents.maxConcurrent 无直接对应
+
+## 已定案待实施（产品决策批次，全部暂缓，仅记录）
+
+> 决策批次（2026-08）：以下事项均已定案方向，但**全部暂不实施**，仅在此记录，
+> 待另行排期。执行顺序与优先级由后续产品排期决定，不受本记录影响。
+
+### 提示词编排（A 组）
+
+- **A1 真临时消息 + typed thought（fakeThought 不降级，定案：可行，暂缓实现）**：
+  经产品核实 DeepSeek 官方 API 文档，思维链在无工具调用回合同样保留（serialize 丢弃系
+  DSH 实现取舍），typed reasoning 上 wire 在官方语义下可行。路线：llm/stream waterfall
+  发送侧改写——识别 agent-loop 请求（isAgentLoopRequest + sessionId）→ 构造临时
+  user/assistant 消息（assistant 条目 + fakeThought 用 createAssistantMessage +
+  {type:'reasoning'} 块）→ 按 chat_history before/after 锚点插入真实历史 →
+  sendHistoryThoughts 构造时剥离 → WeakSet 防递归 short-circuit 重发。
+  实现要点：与 llm-retry/llm-replay 挂载顺序探针、非契约用法需 ADR 记录、
+  渠道差异（pi-ai 通道保留 reasoning；deepseek 官方通道依赖官方 passback 语义）。
+
+### 迁移增强（B 组）
+
+- **B1 凭据一键迁移（已允许）**：渠道导入支持用户显式授权后，把旧 apiKey 经
+  `ctx.credentials.set(ref, value)` 写入 DSH（引用名 `GRAYCODE_<TYPE>_<ID>_API_KEY`）；
+  当前实现只生成引用占位 + credentialReentryRequired 重录清单。定案：允许迁移；
+  注意旧 key 可能已过期/轮换，写入前需用户确认授权。
+- **B2 settings 写时信息合流**：渠道导入的写时结果（已写入 routes / 冲突跳过 /
+  凭据引用）目前只进 `report.run.notes` 与建议文件，不进机器 JSON 的
+  `settingsSummary`（需改 `importService.buildReport` 合流）。定案：要合流。
+- **B3 snapshots 迁移接线**：旧 snapshots 解析器已就绪（parseSnapshot），但 plan 层
+  恒 unmapped（noopTarget fail-closed）。定案：尽量接 DSH lineage / session fork
+  语义（探明 DSH 公开 API 后实现）。
+
+### 功能补缺（C 组）
+
+- **C1 subagents 补齐（定案：补）**：DSH 覆盖 ≈90%（见上节与 docs/SUBAGENTS_VERIFICATION.md），
+  缺口三项需补 Gray 适配层：G1 消息 hop 熔断（老 Gray threadId+hopDepth≤5）、
+  G2 子→父任意寻址（老 Gray agent_send_message 可发 main/任意 agent；DSH report 仅
+  直接父代理）、G3 maxConcurrent 并发上限（老 Gray settings subagents.maxConcurrent）。
+- **C2 media generate_image / remove_background（优先级较低）**：设计已记录于
+  media/README.md（deferred）；需模型渠道调用设计（ctx.llm 或独立 provider）。
+- **C3 todo_update 薄适配（定案：要）**：DSH tool-todo 仅整表替换（todo_write），
+  老 Gray todo_update 增量 ops（add/set_status/set_content/cancel/remove）无等价物；
+  补薄工具：读最近 todo/write 事件后合并整表重写。
+- **C4 多平台系统通知（定案：做）**：整合进本插件（非独立插件），支持多平台——
+  Windows 原生 toast（参考老 Gray WinRtLingerToastAdapter / toast-linger 方案）+
+  浏览器 Notification API（含安卓浏览器/WebView 场景）；host 工具触发 → client 通知展示。
+- **C5 branch_rename 工具面 + branches Remote 端点（定案：补）**：service 层已有
+  renameCandidate，缺 branch_rename 工具与 Remote 管理端点（client 无法管理分支）。
+- **C6 activity 前端面板（定案：加）**：host 侧 get_activity_stats 已实现；补 client
+  可视化面板（老 Gray 7×24 作息热力图 + 每日/月度条形图）+ activity host Remote 端点。
+- **C7 delete_code 工具（定案：补）**：DSH str_replace_editor 有 insert 无 delete；
+  补 delete_code（行级删除，走 ctx.fs 读改写 + staged-diff 钩子）。
+
+## fakeThought / 提示词编排调研结论（P0-14 复查）
+
+- DSH rc.6 **无请求构造注入面**（P0-14 复查确认）：
+  - pre-step 仅 UserMessage 且必落盘，第三方插件无法在 pre-step 构造带 reasoning 的请求；
+  - llm/stream waterfall 是唯一可达成全语义（reasoning 等）的公开面，属非契约用法；
+  - 注：dsh-llm-deepseek serialize 在普通回合丢弃 assistant reasoning 块（注释称
+    “ignored on plain turns”）；**经产品核实 DeepSeek 官方 API 文档：思维链在无工具调用
+    回合同样保留，不会被丢弃**——该丢弃系 DSH 实现侧的省 token 取舍，与官方语义不符；
+    因此 typed reasoning 上 wire 在官方语义下可行（pi-ai 通道本就保留 assistant reasoning）；
+  - rc.6 即 npm 最新（next），无升级目标
+- 现状：P3F 按 D-11 = c（system-prompt 文本注入）落地，fakeThought 注入时门默认关闭
+- **定案（暂缓实现，仅记录）**：真临时消息路线（llm/stream 发送侧改写：临时 user/assistant
+  消息 + typed reasoning 块 + chat_history 位置 + sendHistoryThoughts 发送侧剥离）确认可行，
+  见「已定案待实施」A1；ADR-0002 后续动作保留
+
 ## 审计批次（2025，docs/review/）
 
 | 报告 | 问题 | 处置 |
@@ -162,6 +263,7 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 | audit-branches-prompt.md | 4H/8M/11L + 20 声明外差异 | 已修复（见 Phase 3E/3F）；H1 内置模板对齐（D-1）与 H3 toolPolicy（D-4）待产品决策 |
 | audit-bugs.md | 1H/4M/6L + 7 疑似 + 12 建议 | HIGH/MED 已修复；LOW 已修复；疑似项 S-01~07 部分已加固，其余记录 |
 | audit-tests.md | 3H/9M/3L | 补测项列入后续批次；恒真断言已清理；typecheck 已覆盖 tests/** |
+| 本轮修复批次（跨 7 域） | — | 已修复：checkpoints / migration / branches / prompt / 生命周期 / client / workflows（详见 CHANGELOG [Unreleased] Fixed） |
 
 决策待办（D-1~D-6）：D-1 模板对齐（✅ 已落地）、D-2 reroll 激活（✅ 已按旧语义落地）、
 D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-4 toolPolicy 执行链（✅ 已落地，
@@ -183,8 +285,10 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：74 文件 1051 用例全绿（workflows 89 / memory 101 / checkpoints 67 / branches 89 /
-prompt 76 / stagedDiff 46 / migration 41 / remote 66 / fault-injection 19 / e2e 5 / spike 8 /
-agentScope / persona / providers / client 343 等）。
+`pnpm test`：94 文件 1370 用例全绿（1369 通过 / 1 skipped；本地实测，三次运行一致）——
+workflows 171 / client 353 / branches 110 / prompt 88 / migration 97 / memory 96 / media 85 /
+checkpoints 78 / remote 68 / activity 53 / stagedDiff 47 / shared 47 / spike 23（staged-diff 8 +
+subagents.probe 15，1 skipped）/ fault-injection 19 / providers 13 / agentScope 9 / persona 8 /
+e2e 5。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
 `scripts/verify-pack.ps1`：PASS（2 tarball，violations: none）。

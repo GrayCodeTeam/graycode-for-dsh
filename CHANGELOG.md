@@ -71,6 +71,20 @@
   （golden 测试守护），渲染管道不变。
 - **测试补强（审计 R5 批次）**：CheckpointOperationLock/跨进程锁、checkpoints/prompt 工具层、
   MemoryLogStore、regexGuard 等缺失面补测试（+86 用例）。
+- **Plan 工具（P3A 扩展）**：create_plan / update_plan（`.graycode/plans/**.md` 文档写入、
+  TODO LIST 区块、sourceArtifact 四种新鲜度 + 2MB 内容护栏、revision / progress_sync 双模式、
+  autoSync 联动）。
+- **Activity 域**：get_activity_stats（agent/inbox + agent/pre-step 事件采样、惰性心跳回算、
+  按天 JSON 原子写、24h 热力 / 月度 / 连续会话聚合）。
+- **Media 域**：crop_image / resize_image / rotate_image（sharp 执行时动态加载 + 缺失降级、
+  归一化坐标、14 个稳定错误码、ctx.fs 读写）；generate_image / remove_background 设计已记录
+  deferred。
+- **渠道配置导入（Phase 5 收尾）**：channelConfigs → DSH `llm-pi-ai` settings 直写
+  （mutate 路径 set、route 命名 google/openai/anthropic、凭据引用占位 GRAYCODE_*_API_KEY、
+  disabled draft 降级、settings-rejected 回退、凭据与 url/CLI 参数脱敏）。
+- **Subagents 验证**：探针测试（tests/spike/subagents.probe.spec.ts，15 用例 / 1 skipped）+
+  docs/SUBAGENTS_VERIFICATION.md（DSH 覆盖度 ≈90%，缺口 G1-G3 接受差异：无 hop 熔断 /
+  report 仅直接父 / 无 maxConcurrent 等价）。
 
 ### Changed（变更）
 
@@ -110,6 +124,29 @@
 - **stagedDiff**：grayRemote 改为可选注入（`ctx.inject` 延迟挂载），独立挂载/测试不再因
   缺少 grayRemote 服务而失败。
 - **migration**：importService 的 domainNotes（审计备注）并入 run.notes（此前被收集但从未写入）。
+- **checkpoints**：驱逐基座保护（有后继拒绝驱逐）、幽灵记录修复（提交顺序调整 +
+  recordCommitted 回收）、部分快照符号链接排除（lstat）、unlink ENOENT 幂等、GC 孤儿
+  manifest 调和、blobRefs 数值净化、POSIX reused 统计、取消错误映射、records 损坏留证。
+- **migration**：幂等窗口（LEDGER_CORRUPT 拒绝服务 + appliedJournal 目标侧去重 + apply
+  跨进程文件锁）、symlink 穿越 / 无限递归防护（lstat + 深度/文件数上限 + inode 集合）、
+  decodeURIComponent 隔离、二进制原始字节哈希、输入规模上限、scan 描述修正与取消支持、
+  TREE 幻影摘要、settings 固定布局匹配。
+- **branches**：messageSent 据实上报（无 agent 返回 false）、initialize 错误处理
+  （loadError 状态）、sidecar 逐组校验、fork 边界按真实 seq 定位、Windows rename 退避重试、
+  fork 孤儿携带 sessionId 与权威 revision。
+- **prompt**：customPrefix / customSuffix 走渲染清洗（B3-P2 不变量）、parseStore 逐 mode
+  校验（STORAGE_CORRUPT）。
+- **生命周期**：grayRemote 端点注销（register 返回 disposer + 批内回滚）、prompt dispose
+  后异步泄漏守卫、stagedWriteHook 模块级单例消除（插件 scope 管理器 + clearIfCurrent）、
+  sessionState dataRoot 隔离、agentScope 追加定义补装、autoInject 按 agent 串行化、
+  service disposed 标志。
+- **client**：stagedDiff 决策失败不再被操作 id 永久缓存（可重试）、memoryManage /
+  workflowOverview loadMore 代际守卫、previewToken 遮盖、checkpointList reload 排队、
+  cursor 解析容错、unmount setState 守卫。
+- **workflows**：review scope 未闭合围栏三重防御（输入校验 / 渲染转义 / 双扫描）、
+  mergeFindingRecords 显式字段覆盖、milestone/risk 文本 marker 转义、staged 模式下会话
+  状态延迟保存、compare key 含 severity、finding 标题清洗、冒号分割修正、plan 模式
+  multi-root 前缀。
 
 ### Security（安全）
 
