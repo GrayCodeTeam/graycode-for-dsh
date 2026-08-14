@@ -173,6 +173,9 @@ export function createPromptInjector(
   }
 
   const install = (agent: Agent): void => {
+    // dispose 后到达的调用（如 pending getCurrentMode().then 回调触发的 refresh）
+    // 一律忽略：不得向存活 agent 泄漏 section 注册
+    if (!active) return
     const state = getState()
     if (!state.mode) {
       disposeInstall(agent)
@@ -241,6 +244,8 @@ export function createPromptInjector(
   activate()
   return {
     refresh: () => {
+      // dispose 后置 active=false，pending 异步回调触发的 refresh 直接短路
+      if (!active) return
       for (const agent of ctx.agents.list()) {
         if (targets(agent)) install(agent)
       }

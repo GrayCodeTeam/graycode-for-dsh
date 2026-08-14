@@ -215,6 +215,37 @@ describe('createScopedToolRegistrar', () => {
     expect(root.scope.registered.size).toBe(2)
   })
 
+  test('已 active 时再次 register：既有 agent 补装新增定义（增量安装，不重复旧定义）', () => {
+    const root = makeFakeAgent('root-1', true)
+    const ctx = makeFakeCtx([root])
+
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
+    registrar.register(fakeDefinitions(2))
+    expect([...root.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1'])
+
+    // 第二次 register（追加两个新定义）：既有 agent 立即获得新定义，旧定义不重装
+    const appended = fakeDefinitions(2).map((definition, index) => ({
+      ...definition,
+      name: `fake_tool_${index + 2}`,
+    }))
+    registrar.register(appended)
+    expect([...root.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1', 'fake_tool_2', 'fake_tool_3'])
+
+    // 后创建的 agent 获得全部定义（含追加部分）
+    const lateRoot = makeFakeAgent('root-2', true)
+    ctx.agents.list = () => [root.agent, lateRoot.agent]
+    ctx.agents.roots = () => [root.agent, lateRoot.agent]
+    emitCreated(ctx, lateRoot)
+    expect([...lateRoot.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1', 'fake_tool_2', 'fake_tool_3'])
+
+    // 卸载后新实例可整体重装（HMR：dispose → 重载 → register）
+    registrar.dispose()
+    expect(root.scope.registered.size).toBe(0)
+    const reloaded = createScopedToolRegistrar(toContext(ctx), 'roots')
+    reloaded.register(fakeDefinitions(4))
+    expect([...root.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1', 'fake_tool_2', 'fake_tool_3'])
+  })
+
   test('agentScopeSchema 默认 roots 且只接受三档值（经域 Config 组合）', async () => {
     const config = (await import('../src/workflows/index.ts')).Config
     // schemastery 在运行时校验并应用默认值，允许传入缺省字段的部分配置；此处仅补类型。

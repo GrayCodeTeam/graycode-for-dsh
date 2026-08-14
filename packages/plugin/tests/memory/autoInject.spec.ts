@@ -175,6 +175,65 @@ describe('createMemoryPreStepListener', () => {
     }
   })
 
+  test('快照构建完成后 signal 已 abort → 不注入（abort 复查）', async () => {
+    const { service, dataRoot } = makeService()
+    try {
+      await service.getGlobal().then(mgr => mgr.note('mem-x'))
+      const listener = createMemoryPreStepListener(service)
+      const controller = new AbortController()
+
+      // 门控 getGlobal：让快照构建挂在 await 上，构建期间 abort
+      let release!: () => void
+      const gate = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const originalGetGlobal = service.getGlobal.bind(service)
+      service.getGlobal = (() => gate.then(() => originalGetGlobal())) as typeof service.getGlobal
+
+      const decisionPromise = listener(
+        { ...stepPayload(fakeAgent('agent-1', WS)), signal: controller.signal },
+        () => enterDecision(1),
+      )
+      controller.abort() // 快照构建期间取消
+      release()
+
+      const decision = await decisionPromise
+      // 构建完成后复查 aborted：不注入（原样透传 1 条消息）
+      expect(decision.kind).toBe('enter')
+      if (decision.kind === 'enter') expect(decision.messages).toHaveLength(1)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('同 agent 并发 pre-step 只注入一次（按 agent 串行化，检查+写入原子）', async () => {
+    const { service, dataRoot } = makeService()
+    try {
+      await service.getGlobal().then(mgr => mgr.note('mem-one'))
+      const listener = createMemoryPreStepListener(service)
+      const agent = fakeAgent('agent-1', WS)
+
+      const [a, b] = await Promise.all([
+        listener(stepPayload(agent), () => enterDecision(1)),
+        listener(stepPayload(agent), () => enterDecision(1)),
+      ])
+
+      const injected = [a, b].filter(
+        (decision): decision is Extract<PreStepDecision, { kind: 'enter' }> =>
+          decision.kind === 'enter' && decision.messages.length === 2
+      )
+      // 只有一个调用真正注入（另一个被 revision 去重短路）
+      expect(injected).toHaveLength(1)
+
+      // 后续步骤不再重复注入
+      const third = await listener(stepPayload(agent), () => enterDecision(1))
+      expect(third.kind).toBe('enter')
+      if (third.kind === 'enter') expect(third.messages).toHaveLength(1)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
   test('快照生成失败优雅降级：原样透传并记录 warn', async () => {
     const { service, dataRoot } = makeService()
     try {

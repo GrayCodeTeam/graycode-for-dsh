@@ -128,4 +128,28 @@ describe('损坏隔离与边界', () => {
 
     expect(loadReviewSessionState('session-g')).toBeNull()
   })
+
+  it('dataRoot 切换：旧库状态不残留（按 dataRoot 隔离），新库独立读写', async () => {
+    const otherRoot = await mkdtemp(path.join(os.tmpdir(), 'graycode-session-state-b-'))
+    try {
+      initReviewSessionStore(dataRoot)
+      saveReviewSessionState('session-h', STATE)
+      await flushReviewSessionStore()
+
+      // 切换到另一个 dataRoot：旧库内存状态不得残留
+      initReviewSessionStore(otherRoot)
+      expect(loadReviewSessionState('session-h')).toBeNull()
+
+      // 新库独立写入/读取
+      saveReviewSessionState('session-h', { ...STATE, reviewPath: '.graycode/review/new.md' })
+      expect(loadReviewSessionState('session-h')?.reviewPath).toBe('.graycode/review/new.md')
+      await flushReviewSessionStore()
+
+      // 切回旧库：读到的是旧库磁盘数据（互不污染）
+      initReviewSessionStore(dataRoot)
+      expect(loadReviewSessionState('session-h')?.reviewPath).toBe('.graycode/review/active.md')
+    } finally {
+      await rm(otherRoot, { recursive: true, force: true })
+    }
+  })
 })

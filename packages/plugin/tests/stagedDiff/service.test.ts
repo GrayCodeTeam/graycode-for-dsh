@@ -439,4 +439,31 @@ describe('restoreFromSidecar（重启重建）', () => {
       StagedDiffErrorCode.STORAGE_CORRUPT
     )
   })
+
+  it('dispose 与在途 restore 竞态：完成后不回填已弃用实例、不写盘', async () => {
+    const { store, applier, service } = setup()
+    await service.initialize()
+    // 制造 accepted 条目（崩溃窗口形态）：restore 若执行会 reapply 并触发写盘
+    const e1 = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x' })
+    const accepted = { ...e1, status: 'accepted' as const, revision: 2, updatedAt: Date.now() }
+    store.entries = store.entries.map(e => (e.id === e1.id ? accepted : e))
+    const savesBefore = store.saves
+
+    // 第二个实例：门控 load，模拟「initialize 未 await、dispose 先到」的 HMR 卸载竞态
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const originalLoad = store.load.bind(store)
+    store.load = () => gate.then(() => originalLoad())
+    const serviceB = new StagedDiffService(store, applier)
+
+    const initPromise = serviceB.initialize()
+    serviceB.dispose() // 在途加载完成前弃用
+    release()
+    const result = await initPromise
+
+    // 已弃用实例不回填：loaded 未置位（requireLoaded 抛错）、不触发 reapply 写盘
+    expect(result).toEqual({ restored: 0, reapply: 0 })
+    expect(() => serviceB.listEntries()).toThrow(/not initialized/)
+    expect(store.saves).toBe(savesBefore)
+  })
 })

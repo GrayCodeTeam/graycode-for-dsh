@@ -51,9 +51,11 @@ export function apply(ctx: Context, config: Config): () => void {
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createCheckpointToolDefinitions(service))
   // Phase 4 host 侧 Remote 查询/命令层（checkpoint 列表/恢复预览）：注册端点；
-  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。
-  ctx.grayRemote?.register(createCheckpointsRemoteHandlers(service))
+  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。注销函数随本 fiber
+  // 卸载（HMR：旧端点先注销，新实例同 key 可重新注册）。
+  const disposeRemote = ctx.grayRemote?.register(createCheckpointsRemoteHandlers(service))
   return () => {
+    disposeRemote?.()
     registrar.dispose()
     service.dispose()
   }

@@ -34,10 +34,14 @@ import * as workflowsPlugin from '../../src/workflows/index.ts'
 import * as stagedDiffPlugin from '../../src/stagedDiff/adapters/dsh/index.ts'
 import {
   createStagedWriteHookFromHandle,
+  createStagedWriteHookManager,
   getStagedWriteHook,
+  installStagedWriteHookManager,
   setStagedWriteHook,
 } from '../../src/workflows/stagedWriteHook.ts'
 import { executeCreateDesign, executeUpdateDesign } from '../../src/workflows/tools/design.ts'
+import { executeCreateReview, executeRecordReviewMilestone } from '../../src/workflows/tools/review.ts'
+import { loadReviewSessionState, resetReviewSessionStatesForTest } from '../../src/workflows/sessionState.ts'
 import { executeCreateProgress } from '../../src/workflows/tools/progress.ts'
 import type { ToolDeps } from '../../src/workflows/workspace.ts'
 
@@ -203,6 +207,41 @@ describe('写前钩子（enabled=true：写入意图先 staged，接受后才落
     expect(await targetExistsOnDisk('.graycode/progress.md')).toBe(false)
     expect(service.listEntries().some(e => e.path === '.graycode/progress.md')).toBe(true)
   })
+
+  it('create_review staged 时不记录 in_progress 会话（拒绝后门闸不指向不存在的文档）', async () => {
+    resetReviewSessionStatesForTest()
+    const { service, hook } = makeHook(true)
+    await service.initialize()
+    setStagedWriteHook(hook)
+
+    const created = await executeCreateReview(deps, {
+      title: 'Staged Review',
+      review: 'scope',
+    }) as { path: string; staged?: { entryId: string }; warnings?: string[] }
+
+    expect(created.staged).toBeDefined()
+    expect(await targetExistsOnDisk(created.path)).toBe(false)
+    // 写入意图未落盘：不得把会话门闸指向不存在的文档（修复前 saveReviewSessionState
+    // 无条件执行，reject 后 create_review 被悬空门闸拦截、record 读盘失败）
+    expect(loadReviewSessionState(deps.sessionId)).toBeNull()
+
+    // 无悬空门闸：同一会话可继续创建第二个 staged review
+    const second = await executeCreateReview(deps, {
+      title: 'Staged Review B',
+      review: 'scope b',
+      path: '.graycode/review/staged-b.md',
+    }) as { staged?: { entryId: string } }
+    expect(second.staged).toBeDefined()
+
+    // accept 落盘后 record 正常读取文档并继续（门闸不指向不存在的文档）
+    await service.acceptEntry({ entryId: created.staged!.entryId, workspaceRoot: tmpDir })
+    const recorded = await executeRecordReviewMilestone(deps, {
+      path: created.path,
+      milestoneTitle: '第一轮',
+      summary: '摘要',
+    }) as { totalMilestones: number; staged?: { entryId: string } }
+    expect(recorded.totalMilestones).toBe(1)
+  })
 })
 
 describe('写前钩子（enabled=false / 未安装：与现状完全一致，默认关闭）', () => {
@@ -231,6 +270,42 @@ describe('写前钩子（enabled=false / 未安装：与现状完全一致，默
     expect(created.staged).toBeUndefined()
     expect(created.warnings).toBeUndefined()
     expect(await readDisk(created.path)).toBe('v1')
+  })
+})
+
+describe('写前钩子管理器（插件 scope 实例化；模块级读取面原子替换）', () => {
+  it('clearIfCurrent：旧实例清理不覆盖新实例已安装的钩子（原子替换，不先置 null）', () => {
+    const manager = createStagedWriteHookManager()
+    const hookA = makeHook(true).hook
+    const hookB = makeHook(true).hook
+
+    manager.set(hookA)
+    manager.set(hookB) // 新实例原子替换（不经 null 中间态）
+    manager.clearIfCurrent(hookA) // 旧实例卸载：当前钩子已是 hookB → no-op
+    expect(manager.get()).toBe(hookB)
+
+    manager.clearIfCurrent(hookB) // 新实例卸载：清理自己的钩子
+    expect(manager.get()).toBeNull()
+  })
+
+  it('installStagedWriteHookManager：卸载恢复前一个读取面；模块级读取面跟随当前实例', () => {
+    const managerA = createStagedWriteHookManager()
+    const managerB = createStagedWriteHookManager()
+    const hookA = makeHook(true).hook
+    const hookB = makeHook(true).hook
+
+    const restoreA = installStagedWriteHookManager(managerA)
+    managerA.set(hookA)
+    expect(getStagedWriteHook()).toBe(hookA)
+
+    const restoreB = installStagedWriteHookManager(managerB)
+    managerB.set(hookB)
+    expect(getStagedWriteHook()).toBe(hookB)
+
+    restoreB() // B 卸载 → 恢复 A
+    expect(getStagedWriteHook()).toBe(hookA)
+    restoreA() // A 卸载 → 无读取面
+    expect(getStagedWriteHook()).toBeNull()
   })
 })
 
@@ -318,6 +393,58 @@ describe('cordis 跨域接线（workflows ↔ staged-diff service，与根 index
     }) as { path: string; staged?: unknown; warnings?: string[] }
     expect(created.staged).toBeUndefined()
     expect(await readDisk(created.path)).toBe('v1')
+
+    for (const fiber of mounted.reverse()) {
+      await fiber.dispose()
+    }
+  })
+
+  it('HMR 重载（重新执行插件装配）：旧 stagedDiff 卸载后新实例重新 provide，钩子仍生效', async () => {
+    const ctx = new Context()
+    new GrayRemoteService(ctx)
+    const mounted: Array<{ dispose(): Promise<void> }> = []
+    mounted.push(await ctx.plugin(LocalFileSystem, { cwd: tmpDir }))
+    mounted.push(await ctx.plugin(SessionStore))
+    mounted.push(await ctx.plugin(AgentRegistry))
+    mounted.push(await ctx.plugin(SystemPrompt))
+    mounted.push(await ctx.plugin(ToolRuntime))
+    mounted.push(await ctx.plugin(LlmRuntime))
+    mounted.push(await ctx.plugin(AgentLoop, { agents: [] }))
+    mounted.push(await ctx.plugin(workflowsPlugin, { dataRoot, documentRoot: '.graycode', agentScope: 'disabled' }))
+    // 第一个 stagedDiff 实例（HMR 前的旧实例）；cordis 同 key 只允许一个 provider，
+    // 重载序列为「旧实例卸载 → 新实例挂载」（与 ctx.plugin 重载语义一致）
+    const fiberA = await ctx.plugin(stagedDiffPlugin, { dataRoot, enabled: true, agentScope: 'disabled' })
+    mounted.push(fiberA)
+    await vi.waitFor(() => {
+      expect(getStagedWriteHook()?.enabled).toBe(true)
+    })
+
+    // 旧实例卸载 → 钩子随 inject 纤维回收被移除（clearIfCurrent 清理自己的钩子）
+    await fiberA.dispose()
+    await vi.waitFor(() => {
+      expect(getStagedWriteHook()).toBeNull()
+    })
+
+    // 新实例挂载（模拟 HMR 重载后的新 provide）→ 钩子重新安装并生效
+    const fiberB = await ctx.plugin(stagedDiffPlugin, { dataRoot, enabled: true, agentScope: 'disabled' })
+    mounted.push(fiberB)
+    await vi.waitFor(() => {
+      expect(getStagedWriteHook()?.enabled).toBe(true)
+    })
+
+    // 钩子仍生效：写入意图被 staged（不直接落盘）
+    const created = await executeCreateDesign(deps, {
+      title: 'Reloaded',
+      design: 'v1',
+    }) as { path: string; staged?: { entryId: string }; warnings?: string[] }
+    expect(created.staged).toBeDefined()
+    expect(await targetExistsOnDisk(created.path)).toBe(false)
+
+    // 新实例也卸载 → 钩子彻底移除
+    await fiberB.dispose()
+    await vi.waitFor(() => {
+      expect(getStagedWriteHook()).toBeNull()
+    })
 
     for (const fiber of mounted.reverse()) {
       await fiber.dispose()

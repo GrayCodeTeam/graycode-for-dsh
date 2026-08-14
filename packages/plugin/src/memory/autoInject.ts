@@ -96,21 +96,42 @@ export function createMemoryPreStepListener(
 ): (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision> {
   /** Last injected revision per agent; unset agents inject on first qualified step. */
   const lastRevisions = new WeakMap<Agent, string>()
+  /** 每 agent 串行链：并发 pre-step 按到达顺序执行，使「检查 revision → 注入 → 写入」成为原子段 */
+  const chains = new WeakMap<Agent, Promise<unknown>>()
 
-  return async (payload, next): Promise<PreStepDecision> => {
-    const downstream = await next()
-    if (downstream.kind !== 'enter' || downstream.messages.length === 0) return downstream
-    if (payload.signal.aborted) return downstream
-    let snapshot: MemorySnapshot | null
-    try {
-      snapshot = await buildMemorySnapshot(service, payload.agent.session.header.cwd)
-    } catch (error: unknown) {
-      logger.warn(`graycode-memory: memory snapshot injection degraded: ${error instanceof Error ? error.message : String(error)}`)
-      return downstream
-    }
-    if (!snapshot) return downstream
-    if (lastRevisions.get(payload.agent) === snapshot.revision) return downstream
-    lastRevisions.set(payload.agent, snapshot.revision)
-    return { kind: 'enter', messages: [...downstream.messages, snapshot.message] }
+  /** 按 agent 串行化执行（并发调用排队，前一个完成后才执行下一个） */
+  const runSerialized = (agent: Agent, fn: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {
+    const previous = chains.get(agent) ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(fn)
+    chains.set(agent, next)
+    // 队列排空后清理条目，避免 WeakMap 随并发量堆积
+    next
+      .finally(() => {
+        if (chains.get(agent) === next) {
+          chains.delete(agent)
+        }
+      })
+      .catch(() => undefined)
+    return next
   }
+
+  return (payload, next): Promise<PreStepDecision> =>
+    runSerialized(payload.agent, async () => {
+      const downstream = await next()
+      if (downstream.kind !== 'enter' || downstream.messages.length === 0) return downstream
+      if (payload.signal.aborted) return downstream
+      let snapshot: MemorySnapshot | null
+      try {
+        snapshot = await buildMemorySnapshot(service, payload.agent.session.header.cwd)
+      } catch (error: unknown) {
+        logger.warn(`graycode-memory: memory snapshot injection degraded: ${error instanceof Error ? error.message : String(error)}`)
+        return downstream
+      }
+      // 快照构建完成后复查取消：构建期间 signal 被 abort 则不再注入
+      if (payload.signal.aborted) return downstream
+      if (!snapshot) return downstream
+      if (lastRevisions.get(payload.agent) === snapshot.revision) return downstream
+      lastRevisions.set(payload.agent, snapshot.revision)
+      return { kind: 'enter', messages: [...downstream.messages, snapshot.message] }
+    })
 }

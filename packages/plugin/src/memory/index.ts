@@ -53,14 +53,16 @@ export function apply(ctx: Context, config: Config): void {
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createMemoryTools(service))
   // Phase 4 host 侧 Remote 查询/命令层（memory 管理）：注册端点；
-  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。
-  ctx.grayRemote?.register(createMemoryRemoteHandlers(service))
+  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。注销函数随本 fiber
+  // 卸载（HMR：旧端点先注销，新实例同 key 可重新注册）。
+  const disposeRemote = ctx.grayRemote?.register(createMemoryRemoteHandlers(service))
   // Auto-injection is independent of the tool install scope: on the first
   // qualified pre-step of each agent (and again only when memory content
   // changes) a bounded snapshot enters the request; failures degrade to no
   // injection. The listener unregisters with this fiber.
   const detachInjector = ctx.on('agent/pre-step', createMemoryPreStepListener(service, ctx.logger))
   ctx.effect(() => () => {
+    disposeRemote?.()
     registrar.dispose()
     detachInjector()
   })

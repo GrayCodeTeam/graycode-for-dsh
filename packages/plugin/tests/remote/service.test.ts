@@ -116,6 +116,39 @@ describe('GrayRemoteService', () => {
     expect(() => service.register({ 'test/dup': () => 2 })).toThrow(/already registered/)
   })
 
+  it('register 返回注销函数：注销后同 key 可重新注册，旧端点不可达（HMR 域级重载语义）', async () => {
+    const { service } = makeService()
+    const unregister = service.register({ 'test/lifecycle': () => 'v1' })
+    expect(await service.invoke('test', 'lifecycle', {})).toEqual({ ok: true, value: 'v1' })
+
+    // 注销：旧端点不可达（ENDPOINT_NOT_FOUND），has/listEndpoints 同步反映
+    unregister()
+    expect(service.has('test/lifecycle')).toBe(false)
+    const missing = await service.invoke('test', 'lifecycle', {})
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) {
+      expect(missing.error.code).toBe(GRAY_REMOTE_ERROR_CODES.ENDPOINT_NOT_FOUND)
+    }
+
+    // 注销后同 key 重新注册成功（旧端点不悬垂）
+    service.register({ 'test/lifecycle': () => 'v2' })
+    expect(await service.invoke('test', 'lifecycle', {})).toEqual({ ok: true, value: 'v2' })
+
+    // 注销函数幂等：重复调用不抛错；按 key 注销后新端点同样不可达
+    unregister()
+    unregister()
+    expect(service.has('test/lifecycle')).toBe(false)
+  })
+
+  it('register 批内重复端点抛错并回滚本批已注册端点（批量注册原子化）', () => {
+    const { service } = makeService()
+    service.register({ 'a/one': () => 1 })
+    expect(() => service.register({ 'b/two': () => 2, 'a/one': () => 99 })).toThrow(/already registered/)
+    // 本批先注册的 b/two 一并回滚：不残留半批状态
+    expect(service.has('b/two')).toBe(false)
+    expect(service.has('a/one')).toBe(true)
+  })
+
   it('handler 抛普通 Error 时投影仍记录失败事件（尽力通道）', async () => {
     const { service } = makeService()
     service.register({

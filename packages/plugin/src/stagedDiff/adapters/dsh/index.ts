@@ -91,7 +91,9 @@ export function apply(ctx: Context, config: Config): () => void {
   // 依赖不存在时本回调不执行，插件本身照常加载。
   ctx.inject(['grayRemote'], (child) => {
     const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
-    grayRemote?.register(createStagedDiffRemoteHandlers(service))
+    const disposeRemote = grayRemote?.register(createStagedDiffRemoteHandlers(service))
+    // 随 inject 纤维卸载注销端点（HMR：域级重载后同 key 可重新注册）
+    child.effect(() => () => disposeRemote?.())
   })
   return () => {
     disposeService()

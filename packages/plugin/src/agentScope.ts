@@ -26,7 +26,8 @@ export interface ScopedToolRegistrar {
   /**
    * Install the definitions on every targeted live agent (backfill included)
    * and arm the `agent/created` listener for later agents. Subsequent calls
-   * append definitions and re-arm a disposed registrar.
+   * append definitions (name-deduped), backfill the delta onto already-installed
+   * agents, and re-arm a disposed registrar.
    */
   register(definitions: readonly ToolDefinition[]): void
   /** Remove the listener and unregister every scoped tool (idempotent). */
@@ -50,12 +51,14 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
   }
 
   const definitions: ToolDefinition[] = []
-  /** Agent -> disposers of its scoped registrations; purged on agent disposal. */
-  const installed = new Map<Agent, ReadonlyArray<() => void>>()
+  /**
+   * Agent -> 已安装 disposers 与该 agent 已装定义数。追加注册（register 再次调用）
+   * 时只给已安装 agent 补装增量（记录索引，避免重复注册同名工具）。
+   */
+  const installed = new Map<Agent, { disposers: ReadonlyArray<() => void>; installedCount: number }>()
   let active = false
   let detachListener: (() => void) | undefined
   let detachDisposedListener: (() => void) | undefined
-  let detachEffect: (() => void) | undefined
 
   /** Whether this agent receives the registrations under the current mode. */
   const targets = (agent: Agent): boolean =>
@@ -64,7 +67,16 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
   const install = (agent: Agent): void => {
     if (installed.has(agent)) return
     const disposers = definitions.map(definition => agent.ctx.tools.register(definition))
-    installed.set(agent, disposers)
+    installed.set(agent, { disposers, installedCount: definitions.length })
+  }
+
+  /** 给已安装 agent 补装 [fromIndex, definitions.length) 的新定义（跳过已装部分）。 */
+  const installAppended = (agent: Agent, fromIndex: number): void => {
+    const entry = installed.get(agent)
+    if (!entry || entry.installedCount >= definitions.length) return
+    const start = Math.max(fromIndex, entry.installedCount)
+    const added = definitions.slice(start).map(definition => agent.ctx.tools.register(definition))
+    installed.set(agent, { disposers: [...entry.disposers, ...added], installedCount: definitions.length })
   }
 
   const deactivate = (): void => {
@@ -74,8 +86,7 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
     detachListener = undefined
     detachDisposedListener?.()
     detachDisposedListener = undefined
-    detachEffect = undefined
-    for (const disposers of installed.values()) {
+    for (const { disposers } of installed.values()) {
       for (const dispose of disposers) {
         dispose()
       }
@@ -103,13 +114,27 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
       if (targets(agent)) install(agent)
     }
     // Bind teardown to this plugin's fiber so unload never leaks.
-    detachEffect = ctx.effect(() => () => deactivate())
+    ctx.effect(() => () => deactivate())
   }
 
   return {
     register(definitionsToAdd) {
-      definitions.push(...definitionsToAdd)
+      // 按工具名去重：同一实例重复 register 同名定义不重复安装（dsh-tools 按名唯一）
+      const fromIndex = definitions.length
+      const added: ToolDefinition[] = []
+      for (const definition of definitionsToAdd) {
+        if (definitions.some(existing => existing.name === definition.name)) continue
+        added.push(definition)
+      }
+      definitions.push(...added)
       activate()
+      // activate 对已 active 实例是幂等短路（不重新回填）：既有 agent 拿不到新定义，
+      // 这里按增量补装（每个 agent 记录已装定义索引，只装 [fromIndex, end) 的新增部分）
+      if (fromIndex < definitions.length) {
+        for (const agent of installed.keys()) {
+          installAppended(agent, fromIndex)
+        }
+      }
     },
     dispose: deactivate,
   }

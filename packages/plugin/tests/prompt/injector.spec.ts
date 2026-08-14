@@ -285,6 +285,31 @@ describe('createPromptInjector', () => {
     injector.dispose()
   })
 
+  test('BUG-01：customPrefix 含非法 {{...}}（{{$TOOLS}}/{{Foo}}）时注入不炸、产物无非法变量（B3-P2）', async () => {
+    const { ctx, host } = await makeWorld()
+    const mode = makeMode({
+      template: 'tpl',
+      customPrefix: 'PREFIX {{$TOOLS}} and {{Foo}}',
+      customSuffix: '{{Bar}} SUFFIX',
+    })
+    let state = { mode, sendHistoryThoughts: false }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-1', WS)
+    const { sections, assembly } = await assembleFor(root)
+    const text = promptSection(sections)!.text
+    expect(text).toContain('PREFIX')
+    expect(text).toContain('SUFFIX')
+    // 非法引用已被确定性说明替换：section 文本不含 {{$TOOLS}}/{{Foo}}/{{Bar}}
+    // （否则 DSH 装配器会在渲染时抛 malformed prompt variable reference）
+    expect(text).not.toContain('{{$TOOLS}}')
+    expect(text).not.toContain('{{Foo}}')
+    expect(text).not.toContain('{{Bar}}')
+    // 注入不炸：完整 prompt 渲染（DSH interpolate）不再抛 malformed 错误
+    expect(() => renderPrompt(assembly)).not.toThrow()
+    injector.dispose()
+  })
+
   test('mode=undefined：不注入；随后出现模式并 refresh 后回填', async () => {
     const { ctx, host } = await makeWorld()
     let state: { mode: PromptMode | undefined; sendHistoryThoughts: boolean } = {
@@ -343,6 +368,26 @@ describe('createPromptInjector', () => {
 
     expect(promptSection((await assembleFor(first)).sections)).toBeUndefined()
 
+    const late = await makeAgent(host, 'root-2', WS)
+    expect(promptSection((await assembleFor(late)).sections)).toBeUndefined()
+  })
+
+  test('dispose 后 pending refresh（异步回调结算）不再注册 section（异步泄漏防护）', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = { mode: makeMode(), sendHistoryThoughts: false }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-1', WS)
+    expect(promptSection((await assembleFor(root)).sections)).toBeDefined()
+
+    // 模拟 prompt/index.ts 的 dispose 竞态：dispose 之后才结算的
+    // service.getCurrentMode().then(() => injector.refresh()) 回调
+    injector.dispose()
+    injector.refresh()
+
+    // 存活 agent 的 section 不得被重新注册（不泄漏）
+    expect(promptSection((await assembleFor(root)).sections)).toBeUndefined()
+    // 新 agent 也不得被注入
     const late = await makeAgent(host, 'root-2', WS)
     expect(promptSection((await assembleFor(late)).sections)).toBeUndefined()
   })

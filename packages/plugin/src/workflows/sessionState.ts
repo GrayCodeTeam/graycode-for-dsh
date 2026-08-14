@@ -92,8 +92,15 @@ export function initReviewSessionStore(dataRoot: string): () => void {
     // 无私有数据根：退化为纯内存（与原进程内实现一致）
     return () => undefined
   }
-  storeDir = path.join(dataRoot, 'workflows')
-  storePath = path.join(storeDir, REVIEW_SESSIONS_STORE_FILE)
+  const nextStoreDir = path.join(dataRoot, 'workflows')
+  const nextStorePath = path.join(nextStoreDir, REVIEW_SESSIONS_STORE_FILE)
+  if (storePath !== nextStorePath) {
+    // dataRoot 切换：丢弃旧库的内存状态（按 dataRoot 隔离，避免旧状态残留串扰）；
+    // 同 root 的 HMR 重载不清空——清空会让在途 flush 把空库写回磁盘（丢数据）
+    sessionStates.clear()
+  }
+  storeDir = nextStoreDir
+  storePath = nextStorePath
   hydrated = false
   // 异步预取（可选优化）；首次同步访问（load/save）也会兜底 hydration，两者幂等
   persistChain = persistChain

@@ -74,6 +74,8 @@ export class StagedDiffService {
   private loaded = false;
   /** 进程内串行互斥：让 CAS 在单进程内有效 */
   private mutationChain: Promise<unknown> = Promise.resolve();
+  /** 已弃用标志：dispose 后（未 await 的 restoreFromSidecar 在途完成时）不再回填状态/落盘 */
+  private disposed = false;
 
   constructor(
     private readonly store: EntryStorePort,
@@ -87,6 +89,8 @@ export class StagedDiffService {
   async restoreFromSidecar(): Promise<{ restored: number; reapply: number }> {
     return this.mutate(async () => {
       const loaded = await this.store.load();
+      // dispose 与在途加载竞态：已弃用实例不再回填状态、不写盘
+      if (this.disposed) return { restored: 0, reapply: 0 };
       const now = Date.now();
       let reapply = 0;
       const entries = loaded.map(entry => {
@@ -99,6 +103,8 @@ export class StagedDiffService {
       if (reapply > 0) {
         await this.store.save(entries);
       }
+      // 保存期间被 dispose：也不再回填
+      if (this.disposed) return { restored: 0, reapply: 0 };
       this.entries = entries.map(entry => ({ ...entry }));
       this.loaded = true;
       return { restored: entries.length, reapply };
@@ -111,6 +117,7 @@ export class StagedDiffService {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.entries = [];
     this.loaded = false;
   }
@@ -365,6 +372,7 @@ export class StagedDiffService {
   }
 
   private persist(entries: StagedEntry[]): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     return this.store.save(entries);
   }
 
