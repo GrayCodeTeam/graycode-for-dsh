@@ -12,6 +12,7 @@
  */
 
 import { buildIdempotencyKey, computePlanToken } from '../domain/idempotency.ts'
+import { decideLedgerOutcome } from '../domain/conflict.ts'
 import {
   appendNote,
   createImportRun,
@@ -24,6 +25,9 @@ import {
   buildConversationCheckpointLists,
   buildConversationCwdIssues,
   buildScopeMap,
+  hasScopeOverride,
+  parseScopeOverrideMap,
+  ScopeOverrideValidationError,
   type ScopeOverrideMap,
 } from '../domain/scopeMap.ts'
 import {
@@ -172,10 +176,19 @@ export class LegacyImportService {
     options: { signal?: AbortSignal; credentialsAuthorized?: boolean; scopeOverrides?: ScopeOverrideMap } = {},
   ): Promise<ScanResult> {
     this.assertNotCancelled(options.signal)
+    let scopeOverrides: ScopeOverrideMap | undefined
+    try {
+      scopeOverrides = parseScopeOverrideMap(options.scopeOverrides)
+    } catch (err) {
+      if (err instanceof ScopeOverrideValidationError) {
+        throw new MigrationError(MIGRATION_ERROR_CODES.MEMORY_SCOPE_INVALID, err.message)
+      }
+      throw err
+    }
     // H1c：apply 全程持跨进程文件锁（防并发 apply 重复写目标）；finally 保证释放
     const release = await this.acquireApplyLock(options.signal)
     try {
-      return await this.applyInner(sourceDir, confirmToken, options.signal, options.credentialsAuthorized, options.scopeOverrides)
+      return await this.applyInner(sourceDir, confirmToken, options.signal, options.credentialsAuthorized, scopeOverrides)
     } finally {
       await release()
     }
@@ -208,7 +221,23 @@ export class LegacyImportService {
     }
     await this.deps.runStore.save(run)
 
-    const objects = plan.objects
+    // D-1：scan 时无法定位的 workspace memory 默认仍是 unmapped；只有用户在
+    // apply 显式给出合法覆盖时才恢复为可写对象。恢复后重新查询幂等台账，确保
+    // 二次 apply 得到 already-imported/conflict，而不是重复写入。
+    const rescuedScopeIds = new Set(
+      plan.objects
+        .filter(obj =>
+          obj.outcome === 'unmapped'
+          && obj.objectType === 'memory-workspace'
+          && hasScopeOverride(scopeOverrides, obj.legacyId))
+        .map(obj => obj.legacyId),
+    )
+    const objects = await Promise.all(plan.objects.map(async obj => {
+      if (!rescuedScopeIds.has(obj.legacyId) || obj.objectType !== 'memory-workspace') return obj
+      const key = buildIdempotencyKey(plannedRun.sourceFingerprint, obj.objectType, obj.legacyId)
+      const outcome = decideLedgerOutcome(await this.deps.ledger.get(key), obj.sourceHash)
+      return { ...obj, outcome, skipReason: undefined }
+    }))
     let anyCommitted = false
     // B2：settings 域写时结果（脱敏）收集，最终合流进 report.settingsSummary.writeResult
     const settingsWriteSummaries: Record<string, unknown>[] = []
@@ -227,6 +256,9 @@ export class LegacyImportService {
       let failed = 0
       const domainNotes: string[] = []
       for (const obj of domainObjects) {
+        if (obj.objectType === 'memory-workspace' && rescuedScopeIds.has(obj.legacyId)) {
+          domainNotes.push(`scope override 恢复映射: ${obj.objectType}:${obj.legacyId}`)
+        }
         const key = buildIdempotencyKey(run.sourceFingerprint, obj.objectType, obj.legacyId)
         if (obj.outcome === 'already-imported') {
           domainNotes.push(`already-imported: ${obj.objectType}:${obj.legacyId}`)
@@ -309,6 +341,17 @@ export class LegacyImportService {
       ...scanReport,
       run,
       counts: summarizeCounts(objects),
+      objects: scanReport.objects.map(reportObject => {
+        if (reportObject.objectType !== 'memory-workspace' || !rescuedScopeIds.has(reportObject.legacyId)) {
+          return reportObject
+        }
+        const effective = objects.find(obj =>
+          obj.objectType === reportObject.objectType && obj.legacyId === reportObject.legacyId)
+        const { skipReason: _skipReason, ...rest } = reportObject
+        return { ...rest, outcome: effective?.outcome ?? reportObject.outcome }
+      }),
+      skips: scanReport.skips.filter(skip =>
+        skip.objectType !== 'memory-workspace' || !rescuedScopeIds.has(skip.legacyId)),
       ...(settingsWriteSummaries.length > 0
         ? {
             settingsSummary: {

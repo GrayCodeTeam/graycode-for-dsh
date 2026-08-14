@@ -41,6 +41,58 @@ export interface ScopeMapEntry {
 /** 用户覆盖表：hashDir → 'global' | 绝对路径。 */
 export type ScopeOverrideMap = Readonly<Record<string, string>>
 
+/** scopeOverrides 输入不满足稳定契约。 */
+export class ScopeOverrideValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ScopeOverrideValidationError'
+  }
+}
+
+/**
+ * 跨平台判断 scope 覆盖路径：迁移可能在与旧数据不同的宿主 OS 上运行，因此
+ * 同时接受 POSIX、Windows 盘符与 UNC 绝对路径，而不依赖当前 process.platform。
+ */
+export function isAbsoluteScopeOverridePath(value: string): boolean {
+  return path.posix.isAbsolute(value) || path.win32.isAbsolute(value)
+}
+
+/**
+ * 把不可信输入收窄为 scope 覆盖表。值只允许 `global` 或跨平台绝对路径；
+ * 返回 null-prototype 对象，避免 `__proto__` 等键影响原型链。
+ */
+export function parseScopeOverrideMap(value: unknown): ScopeOverrideMap | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ScopeOverrideValidationError('scope 覆盖必须是 JSON 对象')
+  }
+
+  const normalized: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const [hashDir, rawTarget] of Object.entries(value)) {
+    if (hashDir.trim().length === 0) {
+      throw new ScopeOverrideValidationError('scope 覆盖的 hashDir 不能为空')
+    }
+    if (typeof rawTarget !== 'string') {
+      throw new ScopeOverrideValidationError(`scope 覆盖 ${hashDir} 的值必须是字符串`)
+    }
+    const target = rawTarget.trim()
+    if (target === 'global') {
+      normalized[hashDir] = target
+      continue
+    }
+    if (!isAbsoluteScopeOverridePath(target)) {
+      throw new ScopeOverrideValidationError(`scope 覆盖 ${hashDir} 必须是 global 或绝对路径`)
+    }
+    normalized[hashDir] = target
+  }
+  return normalized
+}
+
+/** 是否存在用户显式覆盖（只认 own property，不读取对象原型链）。 */
+export function hasScopeOverride(overrides: ScopeOverrideMap | undefined, hashDir: string): boolean {
+  return overrides !== undefined && Object.prototype.hasOwnProperty.call(overrides, hashDir)
+}
+
 /** 解析后的覆盖结果（memoryTarget 消费）。 */
 export type ResolvedScopeOverride =
   | { kind: 'auto' } // 无覆盖 → 沿用 scope.json fsPath
@@ -101,8 +153,8 @@ export function resolveScopeOverride(
   overrides: ScopeOverrideMap | undefined,
   hashDir: string,
 ): ResolvedScopeOverride {
-  const override = overrides?.[hashDir]
-  if (override === undefined) return { kind: 'auto' }
+  if (!hasScopeOverride(overrides, hashDir)) return { kind: 'auto' }
+  const override = overrides![hashDir]!
   if (override === 'global') return { kind: 'global' }
   return { kind: 'workspace', cwd: override }
 }

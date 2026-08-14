@@ -14,7 +14,11 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import * as fs from 'node:fs/promises'
 import { renderMarkdownReport } from './domain/report.ts'
 import type { MigrationReport } from './domain/types.ts'
-import type { ScopeOverrideMap } from './domain/scopeMap.ts'
+import {
+  parseScopeOverrideMap,
+  ScopeOverrideValidationError,
+  type ScopeOverrideMap,
+} from './domain/scopeMap.ts'
 import type { LegacyImportService } from './application/importService.ts'
 
 export interface MigrationToolOptions {
@@ -188,10 +192,14 @@ export function createMigrationTools(
         } catch (err) {
           throw new Error(`scopeOverridesFile 解析失败（须为 JSON 对象 { "<hashDir>": "global" | "绝对路径" }）: ${(err as Error).message}`)
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          throw new Error('scopeOverridesFile 必须是 JSON 对象')
+        try {
+          merged = parseScopeOverrideMap(parsed)
+        } catch (err) {
+          if (err instanceof ScopeOverrideValidationError) {
+            throw new Error(`scopeOverridesFile 内容非法: ${err.message}`)
+          }
+          throw err
         }
-        merged = parsed as ScopeOverrideMap
       }
       const { report } = await service.apply(sourceDir, confirmToken, {
         signal: exec.signal,

@@ -37,10 +37,16 @@ import {
   buildConversationCheckpointLists,
   buildConversationCwdIssues,
   buildScopeMap,
+  parseScopeOverrideMap,
   resolveScopeOverride,
   type ScopeOverrideMap,
 } from '../../src/migration/domain/scopeMap.ts'
-import type { LedgerEntry, PlannedObject } from '../../src/migration/domain/types.ts'
+import {
+  MIGRATION_ERROR_CODES,
+  MigrationError,
+  type LedgerEntry,
+  type PlannedObject,
+} from '../../src/migration/domain/types.ts'
 
 const FIXTURES_DIR = fileURLToPath(new URL('./fixtures', import.meta.url))
 
@@ -101,6 +107,29 @@ describe('resolveScopeOverride（D-1 覆盖解析三态）', () => {
     // 未覆盖的 hashDir 不受其他条目影响
     expect(resolveScopeOverride({ abc: 'global' }, 'def')).toEqual({ kind: 'auto' })
   })
+
+  test('覆盖表只接受 global 或跨平台绝对路径，并清理首尾空白', () => {
+    expect(parseScopeOverrideMap({
+      globalScope: ' global ',
+      posixScope: ' /srv/project ',
+      windowsScope: String.raw` C:\Users\demo\project `,
+      uncScope: String.raw` \\server\share\project `,
+    })).toEqual({
+      globalScope: 'global',
+      posixScope: '/srv/project',
+      windowsScope: String.raw`C:\Users\demo\project`,
+      uncScope: String.raw`\\server\share\project`,
+    })
+  })
+
+  test.each([
+    ['非对象', []],
+    ['非字符串值', { abc: 42 }],
+    ['相对路径', { abc: '../project' }],
+    ['空 hashDir', { ' ': 'global' }],
+  ])('%s 覆盖表 fail-closed', (_label, value) => {
+    expect(() => parseScopeOverrideMap(value)).toThrow()
+  })
 })
 
 // ─── 2. domain：映射表与报告事实 ─────────────────────────
@@ -136,7 +165,7 @@ describe('buildScopeMap / 报告事实派生', () => {
     const map = buildScopeMap(objects)
     expect(map.map(e => e.hashDir)).toEqual(['aaa', 'mmm', 'zzz']) // 稳定排序
     expect(map[0]).toMatchObject({ hashDir: 'aaa', status: 'unmapped', suggestedTarget: null })
-    expect(map[0].sourcePath).toBe('c:/users/demo/aa')
+    expect(map[0]!.sourcePath).toBe('c:/users/demo/aa')
     expect(map[1]).toMatchObject({ hashDir: 'mmm', status: 'auto', suggestedTarget: 'c:/users/demo/mm' })
     expect(map[2]).toMatchObject({ hashDir: 'zzz', status: 'auto', suggestedTarget: 'c:/users/demo/zz' })
   })
@@ -275,6 +304,51 @@ describe('F11 + scopeOverrides（D-1 覆盖写）', () => {
       fx.cleanup()
     }
   })
+
+  test('F14k 的 unmapped 项可由合法覆盖恢复导入，重复执行保持幂等', async () => {
+    const fx = makeService()
+    const corruptSource = path.join(FIXTURES_DIR, 'F14-corrupt', 'F14k-scope-corrupt', 'dataRoot')
+    const corruptId = 'ac7b5428e043adac'
+    try {
+      const scan = await fx.service.scan(corruptSource)
+      expect(scan.report.objects.find(obj => obj.legacyId === corruptId)?.outcome).toBe('unmapped')
+
+      const first = await fx.service.apply(corruptSource, scan.report.planToken, {
+        scopeOverrides: { [corruptId]: 'global' },
+      })
+      expect(first.run.status).toBe('complete')
+      expect(first.report.objects.find(obj => obj.legacyId === corruptId)?.outcome).toBe('import')
+      expect(first.report.skips.some(skip => skip.legacyId === corruptId)).toBe(false)
+      expect(readLedgerEntries(fx.dataRoot).find(entry => entry.legacyId === corruptId)?.targetRef).toBe('memory://global')
+
+      const memory = new MemoryService({ dataRoot: fx.dataRoot })
+      expect(await (await memory.getGlobal()).totalEntries()).toBe(1)
+
+      const secondScan = await fx.service.scan(corruptSource)
+      const second = await fx.service.apply(corruptSource, secondScan.report.planToken, {
+        scopeOverrides: { [corruptId]: 'global' },
+      })
+      expect(second.report.objects.find(obj => obj.legacyId === corruptId)?.outcome).toBe('already-imported')
+      expect(await (await memory.getGlobal()).totalEntries()).toBe(1)
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test('service 入口对绕过工具层的非法覆盖仍 fail-closed', async () => {
+    const fx = makeService()
+    try {
+      const scan = await fx.service.scan(sourceDir)
+      const invalid = { '158ee4e93a4e1c71': '../relative-project' } as ScopeOverrideMap
+      const apply = fx.service.apply(sourceDir, scan.report.planToken, { scopeOverrides: invalid })
+      await expect(apply).rejects.toMatchObject({
+        name: MigrationError.name,
+        code: MIGRATION_ERROR_CODES.MEMORY_SCOPE_INVALID,
+      })
+    } finally {
+      fx.cleanup()
+    }
+  })
 })
 
 // ─── 4. 报告三节（scopeMap / 归属缺失 / 存档点） ─────────────────────────
@@ -323,7 +397,10 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
     const overridesPath = path.join(os.tmpdir(), `scope-overrides-${Date.now()}.json`)
     try {
       const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
-      const [scanTool, applyTool] = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const tools = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const scanTool = tools.find(tool => tool.name === 'migration_scan')
+      const applyTool = tools.find(tool => tool.name === 'migration_apply')
+      if (!scanTool || !applyTool) throw new Error('migration tools 未完整注册')
       expect(scanTool.name).toBe('migration_scan')
       expect(applyTool.name).toBe('migration_apply')
 
@@ -337,7 +414,7 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
         },
         { signal: undefined } as never,
       )
-      expect(result.status).toBe('complete')
+      expect(result).toMatchObject({ status: 'complete' })
 
       const byId = Object.fromEntries(
         readLedgerEntries(fx.dataRoot)
@@ -357,7 +434,9 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
     const badPath = path.join(os.tmpdir(), `scope-overrides-bad-${Date.now()}.json`)
     try {
       const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
-      const [_, applyTool] = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const applyTool = createMigrationTools(fx.service, { allowLegacyReaders: true })
+        .find(tool => tool.name === 'migration_apply')
+      if (!applyTool) throw new Error('migration_apply 未注册')
       fs.writeFileSync(badPath, '{broken', 'utf-8')
       await expect(
         applyTool.execute(
@@ -369,6 +448,32 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
           { signal: undefined } as never,
         ),
       ).rejects.toThrow(/scopeOverridesFile 解析失败/)
+    } finally {
+      fx.cleanup()
+      if (fs.existsSync(badPath)) fs.rmSync(badPath)
+    }
+  })
+
+  test.each([
+    ['非字符串值', { '158ee4e93a4e1c71': 42 }],
+    ['相对路径', { '158ee4e93a4e1c71': './project' }],
+  ])('scopeOverridesFile %s → 拒绝执行', async (_label, payload) => {
+    const fx = makeService()
+    const badPath = path.join(os.tmpdir(), `scope-overrides-invalid-${Date.now()}.json`)
+    try {
+      const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
+      const applyTool = createMigrationTools(fx.service, { allowLegacyReaders: true })
+        .find(tool => tool.name === 'migration_apply')
+      if (!applyTool) throw new Error('migration_apply 未注册')
+      fs.writeFileSync(badPath, JSON.stringify(payload), 'utf-8')
+      await expect(applyTool.execute(
+        {
+          sourceDir: path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'),
+          confirmToken: scan.report.planToken,
+          scopeOverridesFile: badPath,
+        },
+        { signal: undefined } as never,
+      )).rejects.toThrow(/scopeOverridesFile 内容非法/)
     } finally {
       fx.cleanup()
       if (fs.existsSync(badPath)) fs.rmSync(badPath)
