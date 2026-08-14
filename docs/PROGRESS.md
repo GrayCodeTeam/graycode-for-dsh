@@ -10,6 +10,9 @@
 > （3 本地工具）已挂载；渠道配置导入直写 DSH 已落地（Phase 5 收尾）；subagents 验证完成
 > （docs/SUBAGENTS_VERIFICATION.md，缺口 G1-G3 接受差异）；跨 7 域 bug 修复批次完成；
 > fakeThought 调研结论已记录（路线决策待定）。
+> 本轮（C 组功能补缺）：C7 delete_code（file 域）、C3 todo_update 薄适配（todo 域）、
+> C5 branch_rename 工具 + branches Remote 端点、C6 activity/stats Remote 端点 +
+> client 作息热力图面板 均已落地（分 commit 提交，测试全绿）。
 
 ## 版本锁定（ADR-0001）
 
@@ -190,8 +193,8 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 ## 已定案待实施（产品决策批次，全部暂缓，仅记录）
 
-> 决策批次（2026-08）：以下事项均已定案方向，但**全部暂不实施**，仅在此记录，
-> 待另行排期。执行顺序与优先级由后续产品排期决定，不受本记录影响。
+> 决策批次（2026-08）：以下事项均已定案方向。**A/B 组与 C1/C2/C4 暂不实施**，仅在此记录，
+> 待另行排期；**C3/C5/C6/C7 已落地**（见下）。执行顺序与优先级由后续产品排期决定。
 
 ### 提示词编排（A 组）
 
@@ -220,24 +223,32 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 ### 功能补缺（C 组）
 
-- **C1 subagents 补齐（定案：补）**：DSH 覆盖 ≈90%（见上节与 docs/SUBAGENTS_VERIFICATION.md），
-  缺口三项需补 Gray 适配层：G1 消息 hop 熔断（老 Gray threadId+hopDepth≤5）、
-  G2 子→父任意寻址（老 Gray agent_send_message 可发 main/任意 agent；DSH report 仅
-  直接父代理）、G3 maxConcurrent 并发上限（老 Gray settings subagents.maxConcurrent）。
+- **C1 subagents 补齐（定案：补，暂缓）**：DSH 覆盖 ≈90%（见上节与
+  docs/SUBAGENTS_VERIFICATION.md），缺口三项需补 Gray 适配层：G1 消息 hop 熔断
+  （老 Gray threadId+hopDepth≤5）、G2 子→父任意寻址（老 Gray agent_send_message 可发
+  main/任意 agent；DSH report 仅直接父代理）、G3 maxConcurrent 并发上限
+  （老 Gray settings subagents.maxConcurrent）。
 - **C2 media generate_image / remove_background（优先级较低）**：设计已记录于
   media/README.md（deferred）；需模型渠道调用设计（ctx.llm 或独立 provider）。
-- **C3 todo_update 薄适配（定案：要）**：DSH tool-todo 仅整表替换（todo_write），
-  老 Gray todo_update 增量 ops（add/set_status/set_content/cancel/remove）无等价物；
-  补薄工具：读最近 todo/write 事件后合并整表重写。
-- **C4 多平台系统通知（定案：做）**：整合进本插件（非独立插件），支持多平台——
+- **C3 todo_update 薄适配（✅ 已落地，2026-08）**：graycode-todo 域（src/todo/）——
+  读最近 todo/write 事件快照 → 内容 hash 合成稳定 id → 应用老 Gray 5 种增量 ops →
+  整表写回（append todo/write，turn-enclosed）。差异：DSH 无 cancelled（写回映射
+  completed，统计如实）；id 不落盘（结果返回带 id 快照供模型引用）。25 用例。
+- **C4 多平台系统通知（定案：做，暂缓）**：整合进本插件（非独立插件），支持多平台——
   Windows 原生 toast（参考老 Gray WinRtLingerToastAdapter / toast-linger 方案）+
   浏览器 Notification API（含安卓浏览器/WebView 场景）；host 工具触发 → client 通知展示。
-- **C5 branch_rename 工具面 + branches Remote 端点（定案：补）**：service 层已有
-  renameCandidate，缺 branch_rename 工具与 Remote 管理端点（client 无法管理分支）。
-- **C6 activity 前端面板（定案：加）**：host 侧 get_activity_stats 已实现；补 client
-  可视化面板（老 Gray 7×24 作息热力图 + 每日/月度条形图）+ activity host Remote 端点。
-- **C7 delete_code 工具（定案：补）**：DSH str_replace_editor 有 insert 无 delete；
-  补 delete_code（行级删除，走 ctx.fs 读改写 + staged-diff 钩子）。
+- **C5 branch_rename 工具面 + branches Remote 端点（✅ 已落地，2026-08）**：branch_rename
+  工具（1-200 字符对齐老版 renameBranchCandidate）+ branches/list、branches/rename 端点
+  （workspace 过滤 + 游标分页 + expectedRevision CAS）；BranchError → 稳定 Remote 码
+  （BRANCH_CODE_MAP）。remote.test.ts 新增 11 用例。
+- **C6 activity 前端面板（✅ 已落地，2026-08）**：host 侧 activity/stats Remote 端点 +
+  client graycode.activityHeatmap 面板（7×24 热力图 + 每日/月度条形图 + 汇总条，
+  Remote/Mock 双数据源、locale 独立命名空间）。host remote.test.ts 5 用例 +
+  client activityHeatmap.spec.ts 33 用例。
+- **C7 delete_code 工具（✅ 已落地，2026-08）**：graycode-file 域（src/file/）——files
+  数组批量行级删除（1-based 两端包含），逐文件校验 + 5MB 护栏 + per-path 写锁 +
+  ctx.fs 读写 + staged-diff 钩子；参数/语义与老版 backend/tools/file/delete_code.ts 对齐。
+  16 用例。
 
 ## fakeThought / 提示词编排调研结论（P0-14 复查）
 
@@ -285,10 +296,10 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：94 文件 1370 用例全绿（1369 通过 / 1 skipped；本地实测，三次运行一致）——
-workflows 171 / client 353 / branches 110 / prompt 88 / migration 97 / memory 96 / media 85 /
-checkpoints 78 / remote 68 / activity 53 / stagedDiff 47 / shared 47 / spike 23（staged-diff 8 +
-subagents.probe 15，1 skipped）/ fault-injection 19 / providers 13 / agentScope 9 / persona 8 /
-e2e 5。
+`pnpm test`：100 文件 1464 用例全绿（1459 通过 / 5 skipped；本地实测连续多次运行一致）——
+workflows 171 / client 386（含 activityHeatmap 33）/ branches 125 / prompt 88 / migration 97 /
+memory 96 / media 85 / checkpoints 78 / remote 68 / activity 58 / stagedDiff 47 / shared 47 /
+spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ fault-injection 19 / providers 13 /
+agentScope 9 / persona 8 / e2e 5 / todo 25 / file 16。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
-`scripts/verify-pack.ps1`：PASS（2 tarball，violations: none）。
+`scripts/verify-pack.ps1`：PASS（3 tarball，violations: none）。

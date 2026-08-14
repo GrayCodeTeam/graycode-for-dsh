@@ -85,9 +85,28 @@
 - **Subagents 验证**：探针测试（tests/spike/subagents.probe.spec.ts，15 用例 / 1 skipped）+
   docs/SUBAGENTS_VERIFICATION.md（DSH 覆盖度 ≈90%，缺口 G1-G3 接受差异：无 hop 熔断 /
   report 仅直接父 / 无 maxConcurrent 等价）。
+- **File 域（C7）**：delete_code 工具（graycode-file 域）——`files` 数组批量行级删除
+  （path/start_line/end_line，1-based 两端包含），逐文件校验（存在性/行号范围/5MB 护栏）、
+  per-path 写锁、ctx.fs 读写 + staged-diff 钩子、逐文件失败不阻断批次。
+- **Todo 域（C3）**：todo_update 薄适配（graycode-todo 域）——DSH 整表快照
+  `todo/write` 事件上的增量 ops（add upsert / set_status / set_content / cancel / remove），
+  无 id 条目按内容 hash 合成稳定 id，per-session 串行写锁；DSH 无 cancelled →
+  写回映射为 completed（统计如实报告）；结果返回带 id 快照供模型后续引用。
+- **Branches 收尾（C5）**：branch_rename 工具（显示名 1-200 字符，对齐老版
+  renameBranchCandidate）+ branches/list、branches/rename host Remote 端点
+  （workspace 过滤、游标分页、expectedRevision CAS）；BranchError → 稳定 Remote 码映射
+  （BRANCH_CODE_MAP，causeCode 保留）。
+- **Activity 收尾（C6）**：activity/stats host Remote 端点（range/includeHourly/
+  includeMonthly 透传，ActivityError → 稳定码 ACTIVITY_CODE_MAP）+ client 作息热力图面板
+  （graycode.activityHeatmap 域：7×24 热力图 + 每日/月度条形图 + 汇总条，Remote/Mock 双
+  数据源、防御式 wire 读取、locale 独立命名空间）。
 
 ### Changed（变更）
 
+- **构建管线**：根 package.json 的 build/typecheck/pack 纳入 `@graycode/dsh-client`
+  （此前仅 plugin）；`pnpm ci:all` 三包全量。
+- **依赖**：plugin devDependencies 补 `@deepseek-ai/dsh-subagent@0.1.0-rc.6`
+  （subagents.probe.spec.ts 直接 import，上游遗漏导致 typecheck 失败）。
 - **Memory 存储格式换代**：写入路径从旧固定记录格式（LOG.txt 1024B / TREE 288B）改为
   按 scope 分文件的 JSONL 双层结构（records.jsonl + summaries.jsonl + meta.json）；
   旧 LOG.txt/TREE 仅保留为只读导入源（首次访问自动导入，幂等、损坏隔离）。
