@@ -24,6 +24,7 @@ DSH 负责 Agent 循环、会话、工具流水线、权限与 Web 宿主；本�
 | Notifications | `notify` | Windows 原生 toast + 浏览器通知中心/noop 降级 |
 | Subagents | — | hop 深度、父链寻址与并发守卫 |
 | Thoughts | — | 可选请求构造层（默认关闭，非契约适配） |
+| Settings | — | DSH 原生设置页「Gray Code」分区（`settings.section`）：Gray-Code 17 分类设置面板，`ctx.settings` 持久化 + `/graycode` 配置通道 |
 | Migration | `migration_scan/apply` | 旧 Gray Code 1.5.4 数据导入（dry-run 优先） |
 | Client | `shell.overlay` slot + locale + 10 个可挂接表面 | workflow/overview/memory/checkpoint/restore/staged diff/settings/activity/scope/notifications UI；rc.6 管理视图挂载与浏览器 Remote 通道仍受上游 GAP 限制 |
 

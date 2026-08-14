@@ -146,6 +146,15 @@
   includeMonthly 透传，ActivityError → 稳定码 ACTIVITY_CODE_MAP）+ client 作息热力图面板
   （graycode.activityHeatmap 域：7×24 热力图 + 每日/月度条形图 + 汇总条，Remote/Mock 双
   数据源、防御式 wire 读取、locale 独立命名空间）。
+- **设置面板（Gray-Code 前端复刻）**：DSH 原生设置页注册 `settings.section`（id `graycode`、
+  order 200），面板复刻 Gray Code 的 17 个设置分类页签（渠道 / 工具 / 自动执行 / MCP /
+  子代理 / 存档点 / 总结 / 图像生成 / 扩展依赖 / 上下文 / 提示词 / Token 计数 / 通知系统 /
+  外观 / 记忆 / 通用 / 用量统计）；Host 侧 `ctx.settings.register('graycode')` 持久化到
+  `$DSH_HOME/settings.yaml`（schemastery schema、全叶子默认、apiKey 标 `role('secret')`），
+  浏览器读写走插件自有 `/graycode` Connection RPC 通道（config.get/update/replace/reset），
+  规避 api-proxy 设置传输 namespace 白名单对第三方命名空间的 `settings-not-exposed` 限制；
+  支持渠道 / MCP 服务器 / 子代理列表编辑、配置导出导入（JSON）与一键重置；zh/en 双语 +
+  ja 占位。
 
 ### Changed（变更）
 
