@@ -16,7 +16,9 @@ import {
   OUTPUT_FORMATS,
   ROTATE_ANGLES,
   type CropTask,
+  type GenerateImageTask,
   type OutputFormat,
+  type RemoveBackgroundTask,
   type ResizeTask,
   type RotateAngle,
   type RotateTask,
@@ -202,5 +204,97 @@ export function validateRotateTask(raw: unknown): ValidationResult<RotateTask> {
     output_path: outputPath.value,
     angle: angle.value,
     format: format.value,
+  })
+}
+
+/** generate_image prompt 长度上限（透传但防渠道滥用；老版未限，此处设合理护栏） */
+export const MAX_PROMPT_LENGTH = 4096
+
+/**
+ * prompt 校验：必须是非空字符串（trim 后非空），长度 ≤ MAX_PROMPT_LENGTH。
+ * 通过后原样透传（不去除用户前后空白）。
+ */
+export function validateGeneratePrompt(prompt: unknown): ValidationResult<string> {
+  if (typeof prompt !== 'string') {
+    return fail('prompt is required and must be a string')
+  }
+  if (prompt.trim() === '') {
+    return fail('prompt must be a non-empty string')
+  }
+  if (prompt.length > MAX_PROMPT_LENGTH) {
+    return fail(`prompt cannot exceed ${MAX_PROMPT_LENGTH} characters (received ${prompt.length})`)
+  }
+  return ok(prompt)
+}
+
+/**
+ * size 校验（generate_image 可选）：`<width>x<height>` 形式、正整数字面量、
+ * 单边 ≤ MAX_IMAGE_DIMENSION（与 resize 的 16K 护栏同源）。缺省/空 → undefined。
+ */
+export function validateImageSize(size: unknown): ValidationResult<string | undefined> {
+  if (size === undefined || size === null || size === '') {
+    return ok(undefined)
+  }
+  if (typeof size !== 'string') {
+    return fail('size must be a string like "1024x1024"')
+  }
+  const trimmed = size.trim()
+  const match = /^(\d{1,5})x(\d{1,5})$/.exec(trimmed)
+  if (!match) {
+    return fail(`size must be a string like "1024x1024" (received ${JSON.stringify(size)})`)
+  }
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (width <= 0 || height <= 0) {
+    return fail('size dimensions must be positive integers')
+  }
+  if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+    return fail(`size dimensions cannot exceed ${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}`)
+  }
+  return ok(trimmed)
+}
+
+/**
+ * 校验并规范化 generate_image 任务（单任务，无批量模式）。
+ * prompt 必填；size/format/output_path 可选。
+ */
+export function validateGenerateImageTask(raw: unknown): ValidationResult<GenerateImageTask> {
+  if (typeof raw !== 'object' || raw === null) {
+    return fail('generate_image arguments must be an object')
+  }
+  const task = raw as Record<string, unknown>
+  const prompt = validateGeneratePrompt(task.prompt)
+  if (!prompt.ok) return fail(prompt.error)
+  const size = validateImageSize(task.size)
+  if (!size.ok) return fail(size.error)
+  const format = validateOutputFormat(task.format)
+  if (!format.ok) return fail(format.error)
+  const outputPath = validateOutputPath(task.output_path)
+  if (!outputPath.ok) return fail(outputPath.error)
+  return ok({
+    prompt: prompt.value,
+    size: size.value,
+    format: format.value,
+    output_path: outputPath.value,
+  })
+}
+
+/**
+ * 校验并规范化 remove_background 任务（单任务，无批量模式）。
+ * image_path 必填（工作区内图片，路径安全在工具层 resolveInsideWorkspace 兜底）；
+ * output_path 可选。
+ */
+export function validateRemoveBackgroundTask(raw: unknown): ValidationResult<RemoveBackgroundTask> {
+  if (typeof raw !== 'object' || raw === null) {
+    return fail('remove_background arguments must be an object')
+  }
+  const task = raw as Record<string, unknown>
+  const imagePath = validateImagePath(task.image_path)
+  if (!imagePath.ok) return fail(imagePath.error)
+  const outputPath = validateOutputPath(task.output_path)
+  if (!outputPath.ok) return fail(outputPath.error)
+  return ok({
+    image_path: imagePath.value,
+    output_path: outputPath.value,
   })
 }

@@ -34,6 +34,12 @@ export const MediaErrorCode = {
   NO_TASKS: 'GRAY_MEDIA_NO_TASKS',
   /** 用户取消（exec.signal aborted） */
   CANCELLED: 'GRAY_MEDIA_CANCELLED',
+  /** 模型渠道未接入/不可用（generate_image / remove_background fail-closed） */
+  MODEL_CHANNEL_UNAVAILABLE: 'GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE',
+  /** 模型渠道调用失败（非不可用：超时/限流/渠道内部错误等） */
+  MODEL_CHANNEL_FAILED: 'GRAY_MEDIA_MODEL_CHANNEL_FAILED',
+  /** 模型渠道返回非法/空响应（无图片字节） */
+  MODEL_RESPONSE_INVALID: 'GRAY_MEDIA_MODEL_RESPONSE_INVALID',
 } as const
 
 export type MediaErrorCodeValue = (typeof MediaErrorCode)[keyof typeof MediaErrorCode]

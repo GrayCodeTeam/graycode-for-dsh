@@ -68,6 +68,29 @@ export interface RotateTask {
 
 export type MediaTask = CropTask | ResizeTask | RotateTask
 
+/**
+ * generate_image 单任务（模型渠道；prompt 透传，size/format/output_path 可选）。
+ * 不走批量管线（老版为单张调用），任务由 validateGenerateImageTask 校验。
+ */
+export interface GenerateImageTask {
+  /** 透传提示词（非空字符串，trim 后校验；原样透传给渠道） */
+  prompt: string
+  /** 尺寸字符串（如 "1024x1024"），渠道按需透传；缺省由渠道决定 */
+  size?: string
+  /** 目标输出格式（png 优先；jpeg/jpg 归一为 jpeg） */
+  format?: OutputFormat
+  output_path?: string
+}
+
+/**
+ * remove_background 单任务（模型渠道）。输入为工作区内图片路径，
+ * 输出透明背景 PNG（默认 <workspace>/media-output/<name>-bg-removed-<ts>.png）。
+ */
+export interface RemoveBackgroundTask {
+  image_path: string
+  output_path?: string
+}
+
 /** 单个任务的执行结果（成功或失败；失败带稳定错误码） */
 export interface MediaTaskResult {
   /** 任务在本次调用中的序号（从 0 起，与老版 index 一致） */

@@ -82,3 +82,25 @@ export function buildDefaultOutputPath(
   const suffix = n > 0 ? `-${n}` : ''
   return path.join(cwd, 'media-output', `${safeStem}-${ts}${suffix}.${ext}`)
 }
+
+/**
+ * generate_image 默认输出路径：`<cwd>/media-output/gen-<ts>.<ext>`
+ * （README 约定；ext 由输出格式解析决定，缺省 png）。
+ */
+export function buildGeneratedOutputPath(cwd: string, ext: string, ts: number, n = 0): string {
+  const suffix = n > 0 ? `-${n}` : ''
+  return path.join(cwd, 'media-output', `gen-${ts}${suffix}.${ext}`)
+}
+
+/**
+ * remove_background 默认输出路径：`<cwd>/media-output/<name>-bg-removed-<ts>.png`
+ * （透明背景 PNG；`<name>` 为输入文件名去扩展名，控制字符/分隔符按
+ * buildDefaultOutputPath 同规则清理）。
+ */
+export function buildBackgroundRemovedOutputPath(cwd: string, inputPath: string, ts: number): string {
+  const inputBase = path.basename(inputPath)
+  const dotIndex = inputBase.lastIndexOf('.')
+  const stem = dotIndex > 0 ? inputBase.slice(0, dotIndex) : inputBase
+  const safeStem = stem.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_') || 'image'
+  return path.join(cwd, 'media-output', `${safeStem}-bg-removed-${ts}.png`)
+}
