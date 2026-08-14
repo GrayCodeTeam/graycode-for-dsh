@@ -113,6 +113,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     file: { enabled: true, agentScope: 'roots' },
     todo: { enabled: true, agentScope: 'roots' },
     subagents: { maxHopDepth: 5, maxConcurrent: 2 },
+    notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
   }
 }
 

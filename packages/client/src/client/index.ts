@@ -49,6 +49,15 @@ import {
   graycodeActivityHeatmapDictionaries,
   graycodeActivityHeatmapJaPlaceholder,
 } from './activityHeatmap/locales.ts'
+import {
+  GRAYCODE_NOTIFICATIONS_NS,
+  graycodeNotificationsDictionaries,
+  graycodeNotificationsJaPlaceholder,
+} from './notifications/locales.ts'
+import { NotificationCenter } from './notifications/NotificationCenter.tsx'
+import { BrowserNotificationPresenter } from './notifications/presenter.ts'
+import { createNotificationBus } from './notifications/source.ts'
+import { notificationsFromWindow } from './notifications/fold.ts'
 
 // Pluggable renderer surface for `kind: 'graycode.workflow'` chat nodes.
 // DSH rc.6 has no conversation-node renderer mount available to this package
@@ -80,6 +89,16 @@ export { SettingsContributionPanel } from './settingsContribution/SettingsContri
 export type { SettingsContributionPanelProps } from './settingsContribution/SettingsContributionPanel.tsx'
 export { ActivityHeatmapPanel } from './activityHeatmap/ActivityHeatmapPanel.tsx'
 export type { ActivityHeatmapPanelProps } from './activityHeatmap/ActivityHeatmapPanel.tsx'
+
+// C4 notifications surface: rc.6 has no host→client push channel, so the
+// surface ships as a mountable center + fold/presenter/source factories (the
+// client observes `notify` tool calls via the conversation event stream).
+// Mount recipe in notifications/README.md.
+export { NotificationCenter } from './notifications/NotificationCenter.tsx'
+export type { NotificationCenterProps } from './notifications/NotificationCenter.tsx'
+export { BrowserNotificationPresenter } from './notifications/presenter.ts'
+export { createNotificationBus, createFixtureNotificationSource } from './notifications/source.ts'
+export { notificationsFromWindow } from './notifications/fold.ts'
 
 /** Required client services (cordis fiber inject). */
 export const inject = ['slots', 'locale', 'conversationEvents']
@@ -133,6 +152,11 @@ export function apply(ctx: ClientContext): void {
   ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, 'ja', graycodeSettingsContributionJaPlaceholder)
   ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, graycodeActivityHeatmapDictionaries)
   ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
+
+  // C4 notifications locale namespace (own ns, same pattern as the other
+  // Phase 4 surfaces).
+  ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, graycodeNotificationsDictionaries)
+  ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, 'ja', graycodeNotificationsJaPlaceholder)
 
   ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
   ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)

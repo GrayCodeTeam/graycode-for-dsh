@@ -14,6 +14,7 @@ import * as media from './media/index.ts'
 import * as file from './file/index.ts'
 import * as todo from './todo/index.ts'
 import * as subagents from './subagents/index.ts'
+import * as notifications from './notifications/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -46,6 +47,8 @@ export interface Config {
   todo: todo.Config
   /** Subagents thin adapter (C1): hop circuit breaker / addressing / maxConcurrent guards. */
   subagents: subagents.Config
+  /** Notifications domain (C4): notify tool + multi-platform delivery backends. */
+  notifications: notifications.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -63,6 +66,7 @@ export const Config: z<Config> = z.object({
   file: file.Config,
   todo: todo.Config,
   subagents: subagents.Config,
+  notifications: notifications.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -91,4 +95,6 @@ export function apply(ctx: Context, config: Config): void {
   // Subagents thin adapter (C1): guards installed over the DSH `ctx.subagents` seam
   // (inject waits for `agents` + `subagents` services; absent seam degrades to a warn).
   ctx.plugin(subagents, { ...config.subagents })
+  // Notifications domain (C4): notify tool + Windows native toast / noop backends.
+  ctx.plugin(notifications, { ...config.notifications })
 }
