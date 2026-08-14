@@ -3,7 +3,7 @@
   "title": "Phase 5 迁移器脱敏测试 fixture 索引",
   "conventions": {
     "syntheticOnly": true,
-    "desensitization": "全部内容为合成占位数据：会话/记忆文本为 demo 占位，apiKey 一律 sk-test-*，URL 一律 https://example.invalid/，路径一律 demo 假名；严禁复制真实 limcode-settings.json 的任何值（其含真实密钥）。",
+    "desensitization": "全部内容为合成占位数据：会话/记忆文本为 demo 占位，apiKey 一律 demo-key-*（刻意避开 sk- 前缀等公开扫描器特征形态），URL 一律 https://example.invalid/，路径一律 demo 假名；严禁复制真实 limcode-settings.json 的任何值（其含真实密钥）。",
     "timeBase": 1700000000000,
     "deterministic": true,
     "sizeBudgetKB": 200,

@@ -56,7 +56,7 @@
       "id": "channel_demo_gemini",
       "type": "gemini",
       "name": "Demo Gemini",
-      "apiKey": "sk-test-demo-gemini-0001",
+      "apiKey": "demo-key-gemini-0001",
       "url": "https://example.invalid/v1",
       "model": "gemini-2.5-flash",
       "models": [
@@ -102,7 +102,7 @@
       "id": "channel_demo_openai",
       "type": "openai",
       "name": "Demo OpenAI",
-      "apiKey": "sk-test-demo-openai-0002",
+      "apiKey": "demo-key-openai-0002",
       "url": "https://example.invalid/v1",
       "model": "gpt-4.1-mini",
       "models": [
@@ -154,7 +154,7 @@
           "./mcp/demo/search.js"
         ],
         "env": {
-          "DEMO_SEARCH_API_KEY": "sk-test-demo-search-0003"
+          "DEMO_SEARCH_API_KEY": "demo-key-search-0003"
         }
       },
       "enabled": true,

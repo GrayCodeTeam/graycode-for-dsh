@@ -168,7 +168,7 @@
 - **来源**：`SettingsExporter.ts` L185-221（migrateFromLimCode）；真实结构参考仓库根 `limcode-settings.json`。
 - **合成方式**：基于真实样本**剥离敏感内容后**改写：
   - 保留结构：`version:"1.0"`、`exportedAt`、`limcodeVersion:"1.2.6"`、`vscodeSettings`（无前缀键 `toolsConfig/ui/skills/subagents/toolsEnabled/toolAutoExec/maxToolIterations/defaultToolMode/activeChannelId/lastReadAnnouncementVersion/proxy/storagePath`）、`channelConfigs`（2~3 条，gemini/openai 各一）、`mcpServers`（2 条 stdio）、`skills`（2 条，`source:"user-limcode"`）。
-  - **脱敏**：`apiKey` → `"sk-demo-<rand>"` / `"YOUR_API_KEY_HERE"`；`url` 内网地址 → `https://example.com/v1`；
+  - **脱敏**：`apiKey` → `"demo-key-<name>-<n>"`（刻意避开 `sk-` 前缀等公开扫描器特征形态）/ `"YOUR_API_KEY_HERE"`；`url` 内网地址 → `https://example.com/v1`；
     `transport.args` 绝对路径 → `./mcp/demo/server.py`；`env` 中的密钥 → `"demo-key"`；
     skills `content` 用 2~3 行占位文本（**不要**复制真实创作内容）。
 - **预期**：迁移器识别 limcodeVersion 并映射键/source 后导入。

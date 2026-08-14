@@ -5,7 +5,7 @@
   "title": "设置导出（旧 LimCode 格式）",
   "dataRoot": "dataRoot",
   "purpose": "limcodeVersion 迁移路径：无前缀键、machine 键、source 映射。",
-  "construction": "limcode-settings.json：version 1.0 + limcodeVersion 1.2.6；vscodeSettings 为无前缀键（toolsConfig/ui/skills/subagents/toolsEnabled/toolAutoExec/maxToolIterations/defaultToolMode/activeChannelId/lastReadAnnouncementVersion/proxy/storagePath）；channelConfigs 2 条（gemini/openai）；mcpServers 2 条 stdio；skills 2 条 source:user-limcode。同时提供 dataRoot/settings/settings.json（文件式旧设置迁移路径，内容相同）。全部脱敏：apiKey=sk-test-*、url=https://example.invalid/、transport.args=./mcp/demo/*、env=demo 占位、skills content 为占位文本。",
+  "construction": "limcode-settings.json：version 1.0 + limcodeVersion 1.2.6；vscodeSettings 为无前缀键（toolsConfig/ui/skills/subagents/toolsEnabled/toolAutoExec/maxToolIterations/defaultToolMode/activeChannelId/lastReadAnnouncementVersion/proxy/storagePath）；channelConfigs 2 条（gemini/openai）；mcpServers 2 条 stdio；skills 2 条 source:user-limcode。同时提供 dataRoot/settings/settings.json（文件式旧设置迁移路径，内容相同）。全部脱敏：apiKey=demo-key-*、url=https://example.invalid/、transport.args=./mcp/demo/*、env=demo 占位、skills content 为占位文本。",
   "expectedBehavior": "正常导入：识别 limcodeVersion 并映射键/source 后导入（无前缀键原样消费）。",
   "specSections": [
     "legacy-format.md §4.1",
