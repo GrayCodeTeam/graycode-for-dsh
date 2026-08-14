@@ -389,16 +389,26 @@ export class LegacyImportService {
         continue
       }
       try {
-        await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`, 'utf-8')
+        await handle.writeFile(this.lockPayload(Date.now(), Date.now()), 'utf-8')
       } catch {
         await handle.close().catch(() => {})
         await fs.unlink(lockFile).catch(() => {})
         continue
       }
+      // 心跳：周期重写 updatedAt，防止长 apply（大目录导入可能超过 staleMs）被
+      // 其他进程的陈旧锁判定误破（镜像 checkpoints 跨进程锁的心跳设计）。
+      const createdAt = Date.now()
+      const heartbeatMs = Math.max(1000, Math.floor(staleMs / 3))
+      const heartbeat = setInterval(() => {
+        handle.truncate(0)
+          .then(() => handle.writeFile(this.lockPayload(createdAt, Date.now()), 'utf-8'))
+          .catch(() => {})
+      }, heartbeatMs)
       let released = false
       return async () => {
         if (released) return
         released = true
+        clearInterval(heartbeat)
         // Windows：先 close 句柄再 unlink（句柄未释放时 unlink 可能 EPERM）
         await handle.close().catch(() => {})
         await fs.unlink(lockFile).catch(() => {})
@@ -406,13 +416,20 @@ export class LegacyImportService {
     }
   }
 
-  /** 陈旧锁检测与打破（createdAt 元数据优先，缺失回退 mtime） */
+  /** 锁文件载荷：pid + 创建时间 + 心跳更新时间（陈旧判定优先用 updatedAt） */
+  private lockPayload(createdAt: number, updatedAt: number): string {
+    return `${JSON.stringify({ pid: process.pid, createdAt, updatedAt })}\n`
+  }
+
+  /** 陈旧锁检测与打破（updatedAt 心跳优先，回退 createdAt，再回退 mtime） */
   private async tryBreakStaleApplyLock(lockFile: string, staleMs: number): Promise<boolean> {
     let stale = false
     try {
       const raw = await fs.readFile(lockFile, 'utf-8')
-      const parsed = JSON.parse(raw) as { createdAt?: number }
-      if (typeof parsed.createdAt === 'number') {
+      const parsed = JSON.parse(raw) as { createdAt?: number; updatedAt?: number }
+      if (typeof parsed.updatedAt === 'number') {
+        stale = Date.now() - parsed.updatedAt > staleMs
+      } else if (typeof parsed.createdAt === 'number') {
         stale = Date.now() - parsed.createdAt > staleMs
       } else {
         const stat = await fs.stat(lockFile)
@@ -506,3 +523,5 @@ function domainOfObjectType(objectType: string): TargetDomain {
       return 'conversations'
   }
 }
+
+

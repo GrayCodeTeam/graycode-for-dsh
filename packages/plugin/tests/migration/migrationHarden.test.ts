@@ -347,6 +347,34 @@ describe('H1 幂等窗口', () => {
       fs.rmSync(sourceDir, { recursive: true, force: true })
     }
   })
+
+  test('H1c：updatedAt 心跳存活（createdAt 陈旧但 updatedAt 新鲜）→ 锁不被打破', async () => {
+    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-lock-'))
+    const lockFile = path.join(lockDir, 'apply.lock')
+    const sourceDir = makeLegacyRoot({ withMemory: true })
+    const fx = makeService({ lockFile, lockTimeoutMs: 200, lockPollMs: 20, lockStaleMs: 5000 })
+    try {
+      const scan = await fx.service.scan(sourceDir)
+      // 模拟另一进程的长 apply：createdAt 已远超任何合理的 staleMs，但心跳
+      // （updatedAt）新鲜 → 锁必须被视为存活（按 updatedAt 判定，不用 createdAt）
+      fs.writeFileSync(
+        lockFile,
+        `${JSON.stringify({ pid: 999999, createdAt: Date.now() - 60_000, updatedAt: Date.now() })}\n`,
+        'utf-8',
+      )
+      await expect(fx.service.apply(sourceDir, scan.report.planToken)).rejects.toMatchObject({
+        code: 'LOCK_TIMEOUT',
+      })
+      // 持锁方释放（删除锁文件）后 apply 成功
+      fs.rmSync(lockFile)
+      const applied = await fx.service.apply(sourceDir, scan.report.planToken)
+      expect(applied.run.status).toBe('complete')
+      expect(fs.existsSync(lockFile)).toBe(false)
+    } finally {
+      fx.cleanup()
+      fs.rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ─── H2：symlink 路径穿越 / 无限递归 ─────────────────────────

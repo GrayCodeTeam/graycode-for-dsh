@@ -111,7 +111,8 @@ export interface ParsedSettingsExport {
 
 const MACHINE_KEYS = new Set(['proxy', 'storagePath'])
 
-const SECRET_KEY_RE = /api[_-]?key|token|secret|authorization|password|credential/i
+const SECRET_KEY_RE =
+  /api[_-]?key|token|secret|authorization|password|credential|access[_-]?key|consumer[_-]?key|private[_-]?key/i
 
 /** url query 凭据脱敏标记（保持 URL 可读；完整占位文本只用于值型字段） */
 const URL_REDACTED_MARK = '[REDACTED]'

@@ -32,6 +32,33 @@ describe('url query / CLI 凭据脱敏', () => {
     expect(parsed.credentialReentryRequired).toContain('ch1')
   })
 
+  test('accessKey / consumerKey / privateKey 形态的对象键值同样脱敏', () => {
+    const parsed = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        graycodeVersion: '1.5.4',
+        vscodeSettings: {
+          'graycode.channelConfigs': [
+            {
+              id: 'ch-aws',
+              type: 'openai',
+              apiKey: '',
+              headers: { accessKey: 'AKID-live-aws-1', consumerKey: 'ck-live-2', xConsumerKey: 'x-ck-3', privateKey: 'pk-live-4', acceptable: 'keep-me' },
+            },
+          ],
+        },
+      }),
+      'graycode-settings.json',
+    )
+    expect(parsed.ok).toBe(true)
+    const json = JSON.stringify(parsed)
+    for (const secret of ['AKID-live-aws-1', 'ck-live-2', 'x-ck-3', 'pk-live-4']) {
+      expect(json).not.toContain(secret)
+    }
+    // 非敏感键（acceptable 不含 secret 语义）原样保留
+    expect(json).toContain('keep-me')
+  })
+
   test('MCP transport command/args 的 --token=xxx / --api-key=xxx / auth=xxx 值脱敏', () => {
     const parsed = parseSettingsExport(
       JSON.stringify({
