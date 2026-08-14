@@ -38,6 +38,29 @@ DSH rc.6 无公开请求构造注入点（P0-14 GAP，ADR-0002），因此 D-11 
 4. **chat_history 位置语义丢失**：`assembleEntries` 仍按 order 报告标记（`chatHistoryMarkers` / `blocks` 保序），但 D-11=c 的单段注入无法把真实历史插到标记处；该字段为将来请求构造层预留。
 5. **编辑器专属占位符**：OPEN_TABS / ACTIVE_EDITOR / DIAGNOSTICS / MCP_TOOLS / CONTEXT_BADGE_FORMAT 无 DSH 宿主语义（ADR-0002 §3），渲染时替换为确定性说明文本；ENVIRONMENT 等保留模块由注入层提供值，未提供则原样保留。
 
+## 导入兼容（旧版 Gray Code 1.5.4 JSON）
+
+`importModes` 接受旧版导出负载（ImportModesDialog JSON）并做语义映射，返回 `{ modes, warnings }`：
+
+- **`type:'chat_history'` 条目**：旧版以 `type:'chat_history'` 表达真实历史插入点（role 仍为
+  system/user/assistant 之一）。导入时映射为 `role:'chat_history'`（新版 role 模型的原生角色），
+  不再被解析成 user 条目渲染出空标签段落；映射发生时在 `warnings` 中提示。
+- **导入即丢弃的旧字段**（无新版等价物；不报错，逐条列入 `warnings`）：
+  - 条目级：`name`（旧显示名）。
+  - 模式级：`icon`、`promptAssemblyMode`、`dynamicTemplateEnabled`、`dynamicTemplate`、
+    `dynamicContextStrategy`、`toolPolicy`、`toolPolicyCustomized`（toolPolicy allowlist 未迁移，
+    见审计 H3）。
+- 其余行为：kind 强制 custom、与既有 id 冲突重生成、**同一 payload 内重复 mode id 自动重命名**、
+  模板/条目内容归一化。
+
+## 渲染与占位符
+
+- 每次渲染（`renderPromptTemplate` 及段组合 `renderModeSectionText`）后应用旧版
+  `cleanupEmptyLines`（`\n{3,}` → `\n\n` + 整体 trim，对齐旧 `contextSections.ts:43-47`），
+  同一模板新旧输出字节一致（P3F golden 验收）。
+- 默认 `ENVIRONMENT` 占位符值对齐旧版静态环境段（`contextSections.generateStaticEnvironmentSection`
+  + `wrapSection`）：`====\n\nENVIRONMENT\n\nCurrent Workspace: <完整路径>\nOperating System: …\nTimezone: …\nUser Language: …\nPlease respond using the user's language by default.`；无工作区时为 `No workspace open`。语言取宿主 locale（DSH 无编辑器宿主），OS 取 `process.platform` + `os.release()`。
+
 ## 注入模型
 
 - `graycode:prompt` section，order = 1（紧随 `deployment:persona` order 0）：模式 = 模板 + 条目 + prefix/suffix 组合为一个文本段，作为 persona 之上的「模式预设」层（叠加而非替换）。
@@ -47,4 +70,4 @@ DSH rc.6 无公开请求构造注入点（P0-14 GAP，ADR-0002），因此 D-11 
 
 ## 测试
 
-`packages/plugin/tests/prompt/`：template（golden 字节级）/ entries（编排 + fakeThought 两态 + 指纹）/ service（真实临时目录 CRUD + 导入导出）/ injector（真实 Context + system-prompt + fake agent）。共 53 用例。
+`packages/plugin/tests/prompt/`：template（golden 字节级）/ entries（编排 + fakeThought 两态 + 指纹）/ service（真实临时目录 CRUD + 导入导出）/ injector（真实 Context + system-prompt + fake agent）。

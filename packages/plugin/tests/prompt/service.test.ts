@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
+import { renderModeSectionText } from '../../src/prompt/domain/entries.ts'
 import { PromptError, PromptErrorCode } from '../../src/prompt/domain/promptTypes.ts'
 import { PromptSettingsService } from '../../src/prompt/service.ts'
 
@@ -147,28 +148,98 @@ describe('模式 CRUD', () => {
 })
 
 describe('导入 / 导出', () => {
-  test('importModes 支持单对象与数组；kind 强制 custom；模板/条目归一化', async () => {
+  test('importModes 支持单对象与数组；kind 强制 custom；模板/条目归一化；无旧字段时 warnings 为空', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
-    const imported = await service.importModes([
+    const result = await service.importModes([
       { name: 'Imported A', template: 't\r\n', promptEntries: [{ role: 'assistant', order: 0, content: 'c  \r\n' }] },
       { name: 'Imported B', promptEntries: [] },
     ])
-    expect(imported).toHaveLength(2)
-    for (const mode of imported) {
+    expect(result.warnings).toEqual([])
+    expect(result.modes).toHaveLength(2)
+    for (const mode of result.modes) {
       expect(mode.kind).toBe('custom')
       expect(mode.id).toMatch(/^mode-/)
     }
-    expect(imported[0]?.template).toBe('t')
-    expect(imported[0]?.promptEntries[0]?.content).toBe('c')
-    expect(imported[0]?.promptEntries[0]?.role).toBe('assistant')
+    expect(result.modes[0]?.template).toBe('t')
+    expect(result.modes[0]?.promptEntries[0]?.content).toBe('c')
+    expect(result.modes[0]?.promptEntries[0]?.role).toBe('assistant')
     expect(await service.listModes()).toHaveLength(7)
+  })
+
+  test('P-H4：旧版导出 JSON 导入——type:chat_history 映射为 chat_history 角色；旧字段丢弃并列入 warnings', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+    // 旧版（Gray Code 1.5.4）模式/条目形状：type 表达历史插入点，
+    // name/icon/promptAssemblyMode/dynamicTemplateEnabled/dynamicTemplate/
+    // dynamicContextStrategy/toolPolicy 均为旧字段
+    const legacyPayload = {
+      id: 'old-mode',
+      name: 'Old Mode',
+      icon: 'star',
+      promptAssemblyMode: 'entries',
+      dynamicTemplateEnabled: true,
+      dynamicTemplate: 'dyn {{$WORKSPACE_FILES}}',
+      dynamicContextStrategy: 'preserve',
+      toolPolicy: ['read_file'],
+      toolPolicyCustomized: true,
+      template: 'tpl',
+      promptEntries: [
+        { id: 'chat-history', name: 'Chat History', type: 'chat_history', enabled: true, role: 'user', content: '', order: 0 },
+        { id: 'e1', name: 'Prompt 1', type: 'prompt', enabled: true, role: 'assistant', content: 'body', fakeThought: 'think', order: 1 },
+      ],
+    }
+    const result = await service.importModes(legacyPayload)
+    const mode = result.modes[0]!
+    expect(mode.id).toBe('old-mode')
+    expect(mode.kind).toBe('custom')
+
+    // 语义正确：chat_history 条目不再是 user 条目
+    const history = mode.promptEntries.find(entry => entry.id === 'chat-history')!
+    expect(history.role).toBe('chat_history')
+    expect(history.content).toBe('')
+    const assistant = mode.promptEntries.find(entry => entry.id === 'e1')!
+    expect(assistant.role).toBe('assistant')
+    expect(assistant.content).toBe('body')
+    expect(assistant.fakeThought).toBe('think')
+    // 渲染层面：不产出空的 `[GrayCode preset entry: role=user]` 段落
+    const rendered = renderModeSectionText(mode, { sendHistoryThoughts: true })
+    expect(rendered).not.toContain('[GrayCode preset entry: role=user]')
+    expect(rendered).toContain('[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]\n\nbody')
+
+    // warnings 列出全部丢弃字段 + chat_history 映射提示
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      'mode "Old Mode": dropped legacy field(s): icon, promptAssemblyMode, dynamicTemplateEnabled, dynamicTemplate, dynamicContextStrategy, toolPolicy, toolPolicyCustomized',
+      'entry dropped legacy field(s): name',
+      'entry mapped legacy type:chat_history to role:chat_history',
+    ]))
+    expect(result.warnings.filter(w => w.includes('dropped legacy field(s)'))).toHaveLength(3) // 1 条模式级 + 2 条条目级（两个条目都带 name）
+  })
+
+  test('BUG-06：importModes 同一 payload 内重复 mode id 自动重命名，store 中 id 唯一', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+    const result = await service.importModes([
+      { id: 'dup-id', name: 'First', promptEntries: [] },
+      { id: 'dup-id', name: 'Second', promptEntries: [] },
+      { id: 'dup-id', name: 'Third', promptEntries: [] },
+    ])
+    expect(result.modes).toHaveLength(3)
+    const ids = result.modes.map(mode => mode.id)
+    expect(ids[0]).toBe('dup-id')
+    expect(new Set(ids).size).toBe(3)
+    // store 中按 id 只命中一个
+    const listed = await service.listModes()
+    expect(listed.filter(mode => mode.id === 'dup-id')).toHaveLength(1)
+    // 与既有 id 冲突的语义仍保留
+    const collide = await service.importModes({ id: 'dup-id', name: 'Collide', promptEntries: [] })
+    expect(collide.modes[0]?.id).not.toBe('dup-id')
   })
 
   test('importModes 与既有 id 冲突时重新生成 id；无效负载抛 INVALID_PAYLOAD', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
-    const imported = await service.importModes({ id: 'code', name: 'Spoof', promptEntries: [] })
+    const imported = (await service.importModes({ id: 'code', name: 'Spoof', promptEntries: [] })).modes
     expect(imported[0]?.id).not.toBe('code')
 
     await expect(service.importModes({ name: '', promptEntries: [] })).rejects.toMatchObject({
@@ -193,9 +264,10 @@ describe('导入 / 导出', () => {
 
     const root2 = await makeDataRoot()
     const service2 = await serviceOf(root2)
-    const imported = await service2.importModes(exported.modes)
-    expect(imported).toHaveLength(6)
-    const round = imported.find(mode => mode.name === 'Round')
+    const result = await service2.importModes(exported.modes)
+    expect(result.modes).toHaveLength(6)
+    expect(result.warnings).toEqual([])
+    const round = result.modes.find(mode => mode.name === 'Round')
     expect(round?.template).toBe('tpl')
     expect(round?.promptEntries[0]?.content).toBe('body')
   })
@@ -235,6 +307,30 @@ describe('存储与事件', () => {
     expect(entries.filter(name => name.endsWith('.tmp'))).toEqual([])
     const parsed = JSON.parse(await readFile(storePath(root), 'utf8')) as { modes: unknown[] }
     expect(parsed.modes.length).toBe(7)
+  })
+
+  test('差距-1：setCurrentMode 写盘失败回滚内存，无 内存新/磁盘旧 分叉', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+
+    // 注入故障：把 prompt 目录替换成同名文件，persist 的 mkdir 必然失败
+    const promptDir = path.join(root, 'prompt')
+    await rm(promptDir, { recursive: true, force: true })
+    await writeFile(promptDir, 'not a directory', 'utf8')
+
+    await expect(service.setCurrentMode('plan')).rejects.toMatchObject({
+      code: PromptErrorCode.STORAGE_WRITE_FAILED,
+    })
+    // 内存回滚：仍是旧模式 code（与磁盘一致）
+    expect((await service.getCurrentMode()).id).toBe('code')
+
+    // 修复存储后切换正常
+    await rm(promptDir, { force: true })
+    await mkdir(promptDir, { recursive: true })
+    await service.setCurrentMode('plan')
+    expect((await service.getCurrentMode()).id).toBe('plan')
+    const reloaded = await serviceOf(root)
+    expect((await reloaded.getCurrentMode()).id).toBe('plan')
   })
 })
 

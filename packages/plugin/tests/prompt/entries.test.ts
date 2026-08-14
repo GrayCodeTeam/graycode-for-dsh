@@ -108,6 +108,17 @@ describe('fakeThoughtPolicy (D-11=c)', () => {
     expect(fakeThoughtPolicy(entry({ id: 'a', role: 'assistant', content: 'a' }), true))
       .toEqual({ text: 'a', thoughtIncluded: false })
   })
+
+  test('P-L3：fakeThought 保存/渲染时 trim，纯空白视为无（对齐旧 PromptManager.ts:832-833）', () => {
+    const trimmed = fakeThoughtPolicy(
+      entry({ id: 'a', role: 'assistant', content: 'body', fakeThought: '  secret thinking  ' }),
+      true,
+    )
+    expect(trimmed).toEqual({ text: '[thinking]\nsecret thinking\n[/thinking]\n\nbody', thoughtIncluded: true })
+    // 纯空白 fakeThought 视为无：不输出 [thinking] 块
+    expect(fakeThoughtPolicy(entry({ id: 'a2', role: 'assistant', content: 'body', fakeThought: '   \n  ' }), true))
+      .toEqual({ text: 'body', thoughtIncluded: false })
+  })
 })
 
 describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
@@ -149,6 +160,45 @@ describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
     const text = renderModeSectionText({ ...mode, customPrefix: undefined, customSuffix: '' }, {})
     expect(text.startsWith('Template with')).toBe(true)
     expect(text.endsWith('assistant entry')).toBe(true)
+  })
+
+  test('P-L4：user/assistant 空内容条目整条跳过，不渲染标签段落、不产出 block（对齐旧空文本 continue）', () => {
+    const result = assembleEntries(
+      [
+        entry({ id: 'empty-user', role: 'user', order: 0, content: '' }),
+        entry({ id: 'blank-assistant', role: 'assistant', order: 1, content: '   ' }),
+        entry({ id: 'real', role: 'user', order: 2, content: 'body' }),
+      ],
+      { systemText: 'base' },
+    )
+    expect(result.contextParagraphs).toEqual(['[GrayCode preset entry: role=user]\nbody'])
+    expect(result.blocks.map(block => block.id)).toEqual(['real'])
+    // 段落文本为空但 fakeThought 开启时仍渲染（thinking 块非空；段尾 \n\n 由
+    // renderModeSectionText 的 cleanupEmptyLines 最终 trim）
+    const thoughtOnly = assembleEntries(
+      [entry({ id: 't1', role: 'assistant', order: 0, content: '', fakeThought: 'think' })],
+      { systemText: '', sendHistoryThoughts: true },
+    )
+    expect(thoughtOnly.contextParagraphs).toEqual([
+      '[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]\n\n',
+    ])
+    expect(renderModeSectionText(
+      { template: '', promptEntries: [entry({ id: 't1', role: 'assistant', order: 0, content: '', fakeThought: 'think' })] },
+      { sendHistoryThoughts: true },
+    )).toBe('[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]')
+  })
+
+  test('M6：renderModeSectionText 输出经 cleanupEmptyLines（3+ 换行折叠 + 整体 trim）', () => {
+    const text = renderModeSectionText(
+      {
+        template: '\n\n\nTpl\n\n\n\n',
+        customPrefix: 'PREFIX\n\n\n',
+        customSuffix: '\n\n\nSUFFIX\n\n\n',
+        promptEntries: [entry({ id: 's1', role: 'system', order: 0, content: 'sys\n\n\n\nbody' })],
+      },
+      {},
+    )
+    expect(text).toBe('PREFIX\n\nTpl\n\nsys\n\nbody\n\nSUFFIX')
   })
 })
 

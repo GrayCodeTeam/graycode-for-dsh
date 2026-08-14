@@ -9,7 +9,7 @@
  * - fingerprint 去重（同状态 refresh 不重复注册）；
  * - dispose 清理与后加载回填。
  */
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AgentRegistry, assembleContextFor } from '@deepseek-ai/dsh-agent'
@@ -211,6 +211,54 @@ describe('createPromptInjector', () => {
     injector.dispose()
   })
 
+  test('P-M7：默认 ENVIRONMENT 占位符值对齐旧版静态环境段（完整路径/OS/时区/语言提示）', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = { mode: makeMode({ template: '{{$ENVIRONMENT}}' }), sendHistoryThoughts: false }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-1', WS)
+    const text = promptSection((await assembleFor(root)).sections)!.text
+    expect(text.startsWith('====\n\nENVIRONMENT\n\nCurrent Workspace: ' + WS)).toBe(true)
+    expect(text).toContain('Operating System: ')
+    expect(text).toContain('Timezone: ')
+    expect(text).toContain('User Language: ')
+    expect(text).toContain("Please respond using the user's language by default.")
+
+    // 无 cwd 的 agent → No workspace open 分支
+    const noCwd = await makeAgent(host, 'root-2', undefined)
+    const noCwdText = promptSection((await assembleFor(noCwd)).sections)!.text
+    expect(noCwdText).toContain('No workspace open')
+    injector.dispose()
+  })
+
+  test('差距-2：variable 注册抛错 → 已注册的 section 被清理；重试不重复注入', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = { mode: makeMode({ id: 'm1', name: 'M1', template: 'OLD-TEMPLATE' }), sendHistoryThoughts: false }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-1', WS)
+    expect(promptSection((await assembleFor(root)).sections)!.text).toContain('OLD-TEMPLATE')
+
+    // 模式切换使 key 变化 → 走重注册路径；section 成功、variable 抛错（部分注册）
+    state = { mode: makeMode({ id: 'm2', name: 'M2', template: 'NEW-TEMPLATE' }), sendHistoryThoughts: false }
+    const variableSpy = vi.spyOn(root.ctx.systemPrompt, 'variable')
+      .mockImplementationOnce(() => { throw new Error('variable registration failed') })
+
+    expect(() => injector.refresh()).toThrow('variable registration failed')
+
+    // 已注册的 section 必须被清理：组装中无 graycode:prompt 段（不泄漏）
+    expect(promptSection((await assembleFor(root)).sections)).toBeUndefined()
+    variableSpy.mockRestore()
+
+    // 重试：恰好注入一次（不重复、不漏发）
+    injector.refresh()
+    const after = (await assembleFor(root)).sections.filter(s => s.name === PROMPT_SECTION_NAME)
+    expect(after).toHaveLength(1)
+    expect(after[0]!.text).toContain('NEW-TEMPLATE')
+    expect(after[0]!.text).not.toContain('OLD-TEMPLATE')
+    injector.dispose()
+  })
+
   test('{{graycode_prompt_mode}} 变量经 renderPrompt 插值为模式名', async () => {
     const { ctx, host } = await makeWorld()
     let state = { mode: makeMode({ name: 'Plan Mode' }), sendHistoryThoughts: false }
@@ -239,7 +287,10 @@ describe('createPromptInjector', () => {
 
   test('mode=undefined：不注入；随后出现模式并 refresh 后回填', async () => {
     const { ctx, host } = await makeWorld()
-    let state = { mode: undefined, sendHistoryThoughts: false }
+    let state: { mode: PromptMode | undefined; sendHistoryThoughts: boolean } = {
+      mode: undefined,
+      sendHistoryThoughts: false,
+    }
     const injector = createPromptInjector(ctx, 'roots', () => state)
 
     const root = await makeAgent(host, 'root-1', WS)

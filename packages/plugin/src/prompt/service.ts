@@ -34,12 +34,38 @@ export const PROMPT_STORE_FILE = 'modes.json'
 /** Change events emitted to subscribers (the injector re-registers on them). */
 export type PromptChangeEvent = { type: 'mode-changed' } | { type: 'modes-changed' }
 
+/** Result of an import: the imported modes plus human-readable legacy-field notes. */
+export interface PromptImportResult {
+  modes: PromptMode[]
+  /**
+   * Notes about legacy (Gray Code 1.5.4) fields that were silently dropped
+   * (no new-format equivalent) or remapped (`type:'chat_history'` →
+   * `role:'chat_history'`) during import. Empty when the payload had no
+   * legacy-only fields.
+   */
+  warnings: string[]
+}
+
 export interface PromptSettingsConfig {
   /** Plugin-private data root; the store lives under `<dataRoot>/prompt/`. */
   dataRoot: string
 }
 
 const BUILTIN_ROLE: readonly PromptEntryRole[] = ['system', 'user', 'assistant', 'chat_history']
+
+/** Legacy (Gray Code 1.5.4) entry fields with no new-format equivalent: dropped on import. */
+const LEGACY_ENTRY_DROPPED_FIELDS = ['name'] as const
+
+/** Legacy (Gray Code 1.5.4) mode fields with no new-format equivalent: dropped on import. */
+const LEGACY_MODE_DROPPED_FIELDS = [
+  'icon',
+  'promptAssemblyMode',
+  'dynamicTemplateEnabled',
+  'dynamicTemplate',
+  'dynamicContextStrategy',
+  'toolPolicy',
+  'toolPolicyCustomized',
+] as const
 
 /** Default templates of the five built-in modes (English, short). */
 export const BUILTIN_MODE_TEMPLATES: Record<BuiltinModeId, string> = {
@@ -112,14 +138,26 @@ function copyWithNewIds(mode: PromptMode): PromptMode {
   }
 }
 
-/** Validate + normalize one imported entry (tolerates partial shapes). */
-function parseImportedEntry(raw: unknown): PromptEntry {
+/**
+ * Validate + normalize one imported entry (tolerates partial shapes).
+ *
+ * Legacy (Gray Code 1.5.4) entries express the history insertion point via
+ * `type: 'chat_history'` (role stays system/user/assistant); the new role
+ * model has a dedicated `chat_history` role, so the type is mapped directly
+ * (a warning records the mapping). Legacy fields without a new-format
+ * equivalent (e.g. the display `name`) are silently dropped and reported
+ * through `warnings`.
+ */
+function parseImportedEntry(raw: unknown, warnings: string[]): PromptEntry {
   if (typeof raw !== 'object' || raw === null) {
     throw new PromptError('imported promptEntries must be an array of objects', PromptErrorCode.INVALID_PAYLOAD)
   }
   const record = raw as Record<string, unknown>
-  const role = record.role
-  if (typeof role !== 'string' || !(BUILTIN_ROLE as readonly string[]).includes(role)) {
+  let role = record.role
+  if (record.type === 'chat_history') {
+    role = 'chat_history'
+    warnings.push('entry mapped legacy type:chat_history to role:chat_history')
+  } else if (typeof role !== 'string' || !(BUILTIN_ROLE as readonly string[]).includes(role)) {
     throw new PromptError(
       `imported entry role must be one of ${BUILTIN_ROLE.join('/')}`,
       PromptErrorCode.INVALID_PAYLOAD,
@@ -137,6 +175,10 @@ function parseImportedEntry(raw: unknown): PromptEntry {
   if (order !== undefined && (typeof order !== 'number' || !Number.isFinite(order))) {
     throw new PromptError('imported entry order must be a finite number', PromptErrorCode.INVALID_PAYLOAD)
   }
+  const dropped = LEGACY_ENTRY_DROPPED_FIELDS.filter(field => record[field] !== undefined)
+  if (dropped.length > 0) {
+    warnings.push(`entry dropped legacy field(s): ${dropped.join(', ')}`)
+  }
   return {
     id: typeof record.id === 'string' && record.id.length > 0 ? record.id : newEntryId(),
     role: role as PromptEntryRole,
@@ -147,8 +189,13 @@ function parseImportedEntry(raw: unknown): PromptEntry {
   }
 }
 
-/** Validate + normalize one imported mode; ids collide with existing ones are regenerated. */
-function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>): PromptMode {
+/**
+ * Validate + normalize one imported mode; ids colliding with existing ones
+ * (or with earlier modes of the same payload) are regenerated. Legacy
+ * (1.5.4) mode fields without a new-format equivalent are silently dropped
+ * and reported through `warnings`.
+ */
+function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>, warnings: string[]): PromptMode {
   if (typeof raw !== 'object' || raw === null) {
     throw new PromptError('imported mode must be an object', PromptErrorCode.INVALID_PAYLOAD)
   }
@@ -177,6 +224,10 @@ function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>): Prom
   const rawId = record.id
   let id = typeof rawId === 'string' && rawId.length > 0 ? rawId : newModeId()
   if (existingIds.has(id)) id = newModeId()
+  const dropped = LEGACY_MODE_DROPPED_FIELDS.filter(field => record[field] !== undefined)
+  if (dropped.length > 0) {
+    warnings.push(`mode "${name.trim()}": dropped legacy field(s): ${dropped.join(', ')}`)
+  }
   return {
     id,
     name: name.trim(),
@@ -185,7 +236,7 @@ function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>): Prom
     template: normalizeTemplate(template ?? ''),
     customPrefix: customPrefix !== undefined ? normalizeTemplate(customPrefix) : undefined,
     customSuffix: customSuffix !== undefined ? normalizeTemplate(customSuffix) : undefined,
-    promptEntries: entries.map(entry => parseImportedEntry(entry)),
+    promptEntries: entries.map(entry => parseImportedEntry(entry, warnings)),
   }
 }
 
@@ -366,8 +417,16 @@ export class PromptSettingsService {
         throw new PromptError(`prompt mode "${id}" not found`, PromptErrorCode.MODE_NOT_FOUND)
       }
       if (store.currentModeId !== id) {
+        const previous = store.currentModeId
         store.currentModeId = id
-        await this.persist()
+        try {
+          await this.persist()
+        } catch (error) {
+          // 差距-1: never leave "memory new / disk old" — roll the in-memory
+          // id back so a failed persist keeps memory and disk consistent.
+          store.currentModeId = previous
+          throw error
+        }
         this.emit({ type: 'mode-changed' })
       }
       return deepCopyMode(mode)
@@ -496,19 +555,28 @@ export class PromptSettingsService {
 
   /**
    * Import one or many modes (ImportModesDialog JSON payload). Imported modes
-   * are always custom; colliding ids are regenerated; templates and entry
-   * content are normalized.
+   * are always custom; colliding ids are regenerated (including duplicates
+   * inside the same payload); templates and entry content are normalized;
+   * legacy-only fields are dropped and reported in `warnings`.
    */
-  async importModes(payload: unknown): Promise<PromptMode[]> {
+  async importModes(payload: unknown): Promise<PromptImportResult> {
     return this.mutate(async () => {
       const store = await this.requireStore()
       const raws = Array.isArray(payload) ? payload : [payload]
+      const warnings: string[] = []
       const existingIds = new Set(store.modes.map(mode => mode.id))
-      const imported = raws.map(raw => parseImportedMode(raw, existingIds))
+      const imported: PromptMode[] = []
+      for (const raw of raws) {
+        const mode = parseImportedMode(raw, existingIds, warnings)
+        // BUG-06: each parsed mode claims its final id inside the loop, so
+        // same-payload duplicates get regenerated instead of colliding.
+        existingIds.add(mode.id)
+        imported.push(mode)
+      }
       store.modes.push(...imported)
       await this.persist()
       this.emit({ type: 'modes-changed' })
-      return imported.map(mode => deepCopyMode(mode))
+      return { modes: imported.map(mode => deepCopyMode(mode)), warnings }
     })
   }
 

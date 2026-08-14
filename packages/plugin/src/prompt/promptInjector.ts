@@ -27,7 +27,7 @@
  *   skipped so HMR reloads and duplicate change events cannot double-inject.
  */
 
-import * as path from 'node:path'
+import * as os from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentScopeMode } from '../agentScope.ts'
@@ -61,12 +61,45 @@ export interface PromptInjector {
   dispose(): void
 }
 
-/** Default `{{$MODULE}}` values derivable from the agent session alone. */
+/** Best-effort user language: host locale (DSH has no editor host; fallback 'en'). */
+function userLanguage(): string {
+  const locale = Intl.DateTimeFormat().resolvedOptions().locale
+  return locale.length > 0 ? locale : 'en'
+}
+
+/** Operating-system description mirroring old contextSections.getOSInfo(). */
+function osDescription(): string {
+  const release = os.release()
+  switch (process.platform) {
+    case 'win32':
+      return `Windows ${release}`
+    case 'darwin':
+      return `macOS ${release}`
+    case 'linux':
+      return `Linux ${release}`
+    default:
+      return `${process.platform} ${release}`
+  }
+}
+
+/**
+ * Default `{{$MODULE}}` values derivable from the agent session alone. The
+ * ENVIRONMENT value mirrors the old static environment section
+ * (contextSections.generateStaticEnvironmentSection + wrapSection): full
+ * workspace path, operating system, timezone, user language and the
+ * "respond in the user's language" instruction, wrapped
+ * `====\n\nENVIRONMENT\n\n…`. All inside the D-11 = c text-injection frame
+ * (no DSH extension surface involved).
+ */
 function defaultPlaceholderValues(cwd: string | undefined): Record<string, string> {
-  const env = cwd
-    ? `workspace ${path.basename(cwd.replace(/\\/g, '/'))}`
-    : 'no workspace'
-  return { ENVIRONMENT: `${process.platform} / Node ${process.version} (${env})` }
+  const environment = [
+    cwd ? `Current Workspace: ${cwd}` : 'No workspace open',
+    `Operating System: ${osDescription()}`,
+    `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+    `User Language: ${userLanguage()}`,
+    "Please respond using the user's language by default.",
+  ].join('\n')
+  return { ENVIRONMENT: `====\n\nENVIRONMENT\n\n${environment}` }
 }
 
 /** The rendered section text of a state (template + entries + prefix/suffix). */
@@ -150,16 +183,28 @@ export function createPromptInjector(
     if (existing && existing.key === key) return
     if (existing) disposeInstall(agent)
 
-    const disposers = [
-      // Provider-style text: re-evaluated per assembly so placeholder values
-      // are always current; mode switches re-register via refresh().
-      agent.ctx.systemPrompt.section({
-        name: PROMPT_SECTION_NAME,
-        order: PROMPT_ORDER,
-        text: () => renderStateText(getState(), cwdOf(agent)),
-      }),
-      agent.ctx.systemPrompt.variable(PROMPT_MODE_VARIABLE, () => getState().mode?.name),
-    ]
+    const disposers: Array<() => void> = []
+    try {
+      // Push each registration separately: if variable() throws during
+      // argument evaluation of a combined push(), the already-obtained
+      // section disposer would be lost before push() ever runs.
+      disposers.push(
+        // Provider-style text: re-evaluated per assembly so placeholder values
+        // are always current; mode switches re-register via refresh().
+        agent.ctx.systemPrompt.section({
+          name: PROMPT_SECTION_NAME,
+          order: PROMPT_ORDER,
+          text: () => renderStateText(getState(), cwdOf(agent)),
+        }),
+      )
+      disposers.push(agent.ctx.systemPrompt.variable(PROMPT_MODE_VARIABLE, () => getState().mode?.name))
+    } catch (error) {
+      // 差距-2: unwind partial registration (e.g. section() succeeded but
+      // variable() threw); otherwise the next refresh would re-register the
+      // section and either leak or hit duplicate-name errors.
+      for (const dispose of disposers) dispose()
+      throw error
+    }
     installed.set(agent, { key, disposers })
   }
 

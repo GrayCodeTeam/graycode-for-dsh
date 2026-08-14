@@ -61,6 +61,16 @@ export function deprecatedPlaceholderText(token: string): string {
 }
 
 /**
+ * Post-render cleanup mirroring the old Gray pipeline
+ * (contextSections.cleanupEmptyLines, applied after every template render):
+ * runs of 3+ newlines collapse to `\n\n`, and leading/trailing whitespace is
+ * trimmed. Byte-identical to the old implementation (contextSections.ts:43-47).
+ */
+export function cleanupEmptyLines(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
  * Match `{{$MODULE}}`-style placeholders, robust to case, whitespace and a
  * missing `$` (`{{ $environment }}`, `{{ENVIRONMENT}}`, `{{  $  MODULE  }}`).
  */
@@ -74,6 +84,9 @@ const PLACEHOLDER_PATTERN = /\{\{\s*\$?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g
  *   uppercase module name); otherwise the placeholder is preserved verbatim.
  * - Unknown modules are preserved verbatim (decision: safer for custom
  *   templates written against future module names than failing the render).
+ * - The rendered text then goes through {@link cleanupEmptyLines} (old
+ *   `contextSections.ts:43-47` parity): 3+ consecutive newlines collapse to
+ *   `\n\n` and the result is trimmed.
  *
  * @param template - source template text.
  * @param values - module name → rendered text map (keys are canonical names).
@@ -82,12 +95,15 @@ export function renderPromptTemplate(
   template: string,
   values: Readonly<Record<PlaceholderModuleName, string>> = {},
 ): string {
-  return template.replace(PLACEHOLDER_PATTERN, (raw, name: string) => {
+  const rendered = template.replace(PLACEHOLDER_PATTERN, (raw, name: string) => {
     const canonical = name.trim().toUpperCase()
     if (placeholderModuleStatus(canonical) === 'deprecated') return deprecatedPlaceholderText(raw)
     const value = values[canonical]
     return value !== undefined ? value : raw
   })
+  // Old Gray applied cleanupEmptyLines after every render (PromptManager.ts:387/713);
+  // keep the same post-processing so templates render byte-compatibly.
+  return cleanupEmptyLines(rendered)
 }
 
 /**

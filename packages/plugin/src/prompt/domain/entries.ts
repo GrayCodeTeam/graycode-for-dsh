@@ -21,7 +21,7 @@
  * them after injection.
  */
 
-import { renderPromptTemplate } from './template.ts'
+import { cleanupEmptyLines, renderPromptTemplate } from './template.ts'
 import type { PromptEntry, PromptEntryRole, PromptMode } from './promptTypes.ts'
 
 export interface FakeThoughtResult {
@@ -44,7 +44,10 @@ export interface FakeThoughtResult {
  * Only role=assistant entries with a non-empty fakeThought are affected.
  */
 export function fakeThoughtPolicy(entry: PromptEntry, sendHistoryThoughts: boolean): FakeThoughtResult {
-  const thought = entry.fakeThought
+  // Old Gray trimmed the fake thought before attaching it
+  // (PromptManager.ts:832-833): pure-whitespace thoughts count as absent and
+  // surrounding whitespace never leaks into the injected text.
+  const thought = entry.fakeThought?.trim()
   if (entry.role !== 'assistant' || !thought || thought.length === 0 || !sendHistoryThoughts) {
     return { text: entry.content, thoughtIncluded: false }
   }
@@ -128,6 +131,9 @@ export function assembleEntries(
     }
     const role = entry.role === 'assistant' ? 'assistant' : 'user'
     const policy = fakeThoughtPolicy(entry, input.sendHistoryThoughts ?? false)
+    // Old Gray skipped entries whose rendered text was empty (PromptManager.ts:824-826):
+    // an empty user/assistant body must not produce a bare labeled paragraph.
+    if (policy.text.trim().length === 0) continue
     const paragraph = `${contextParagraphLabel(role)}\n${policy.text}`
     blocks.push({ id: entry.id, role: entry.role, order: entry.order, text: paragraph })
     paragraphs.push(paragraph)
@@ -178,5 +184,7 @@ export function renderModeSectionText(
   if (body.length > 0) parts.push(body)
   parts.push(...paragraphs)
   if (mode.customSuffix && mode.customSuffix.length > 0) parts.push(mode.customSuffix)
-  return parts.join('\n\n')
+  // Old Gray cleaned the whole assembled output; keep the same post-processing
+  // so prefix/suffix internal blank runs never leak 3+ consecutive newlines.
+  return cleanupEmptyLines(parts.join('\n\n'))
 }

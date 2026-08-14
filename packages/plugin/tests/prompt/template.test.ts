@@ -5,6 +5,7 @@
 import { describe, expect, test } from 'vitest'
 import {
   PLACEHOLDER_MODULES,
+  cleanupEmptyLines,
   deprecatedPlaceholderText,
   normalizeTemplate,
   placeholderModuleStatus,
@@ -94,6 +95,27 @@ describe('placeholder 模块目录', () => {
     expect(placeholderModuleStatus(' environment ')).toBe('resolved')
     expect(placeholderModuleStatus('Open_Tabs')).toBe('deprecated')
     expect(placeholderModuleStatus('NOT_A_MODULE')).toBeUndefined()
+  })
+})
+
+describe('cleanupEmptyLines（渲染后处理，对齐旧 contextSections.ts:43-47）', () => {
+  test('连续 3+ 换行压成 2 个、整体 trim（字节级）', () => {
+    expect(cleanupEmptyLines('\n\n\nHead\n\n\n\nBody\n\n\n')).toBe('Head\n\nBody')
+    expect(cleanupEmptyLines('  \nHead\n   \n\nBody  ')).toBe('Head\n   \n\nBody')
+    expect(cleanupEmptyLines('')).toBe('')
+  })
+
+  test('同一模板新旧输出字节一致：含 3+ 连续换行与首尾空白输入', () => {
+    // 旧实现 pipeline：先替换占位符，再 cleanupEmptyLines(result)
+    const template = '\n\n\nSystem:\n\n\n\n{{$ENVIRONMENT}}\n   \n\n\n'
+    const rendered = renderPromptTemplate(template, { ENVIRONMENT: 'env' })
+    const legacy = cleanupEmptyLines(template.replace('{{$ENVIRONMENT}}', 'env'))
+    expect(rendered).toBe(legacy)
+    expect(rendered).toBe('System:\n\nenv')
+  })
+
+  test('renderPromptTemplate 的 3+ 换行折叠对替换值也生效（旧 generateFromTemplate 同路径）', () => {
+    expect(renderPromptTemplate('a\n\n\n{{$MEMORY}}\n\n\n\nb', { MEMORY: 'm' })).toBe('a\n\nm\n\nb')
   })
 })
 
