@@ -12,8 +12,9 @@ import {
   type GrayRemoteFailure,
 } from './types.ts'
 import { StagedDiffError, StagedDiffErrorCode } from '../stagedDiff/domain/types.ts'
+import { BranchError, BranchErrorCode } from '../branches/domain/types.ts'
 
-/** 领域错误 → 稳定机器码的单点映射表（当前：stagedDiff；其余域直接抛 GrayRemoteError）。 */
+/** 领域错误 → 稳定机器码的单点映射表（当前：stagedDiff / branches；其余域直接抛 GrayRemoteError）。 */
 const STAGED_DIFF_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
   [StagedDiffErrorCode.ENTRY_NOT_FOUND]: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
   [StagedDiffErrorCode.ILLEGAL_TRANSITION]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
@@ -25,6 +26,22 @@ const STAGED_DIFF_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
   [StagedDiffErrorCode.APPLY_FAILED]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
   [StagedDiffErrorCode.STORAGE_CORRUPT]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
   [StagedDiffErrorCode.STORAGE_WRITE_FAILED]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
+}
+
+/** branches 域错误码 → 稳定码（BranchErrorCode 为 GRAY_* 域码，语义已对齐）。 */
+const BRANCH_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
+  [BranchErrorCode.GROUP_NOT_FOUND]: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
+  [BranchErrorCode.SESSION_NOT_IN_GROUP]: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
+  [BranchErrorCode.CANDIDATE_DELETED]: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
+  [BranchErrorCode.REVISION_CONFLICT]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
+  [BranchErrorCode.INVALID_INPUT]: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+  [BranchErrorCode.TARGET_TURN_NOT_FOUND]: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
+  [BranchErrorCode.NO_PREVIOUS_TURN]: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+  [BranchErrorCode.NO_USER_MESSAGE]: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+  [BranchErrorCode.CANDIDATE_LIMIT_EXCEEDED]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
+  [BranchErrorCode.FORK_REJECTED]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
+  [BranchErrorCode.STORAGE_CORRUPT]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
+  [BranchErrorCode.STORAGE_WRITE_FAILED]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
 }
 
 /** 带稳定机器码的 Remote 业务错误。 */
@@ -109,6 +126,17 @@ export function toGrayRemoteFailure(err: unknown, signal?: AbortSignal): GrayRem
       details: {
         causeCode: err.code,
         ...(err.entry ? { entry: err.entry } : {}),
+      },
+    }
+  }
+  if (err instanceof BranchError) {
+    const code = BRANCH_CODE_MAP[err.code] ?? GRAY_REMOTE_ERROR_CODES.INTERNAL
+    return {
+      code,
+      message: err.message,
+      details: {
+        causeCode: err.code,
+        ...(err.authoritativeGroup ? { authoritativeGroup: err.authoritativeGroup } : {}),
       },
     }
   }

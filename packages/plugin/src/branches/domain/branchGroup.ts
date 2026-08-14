@@ -14,6 +14,7 @@ import {
     BranchErrorCode,
     GrayBranchGroup,
     MAX_CANDIDATES_PER_PARENT,
+    MAX_CANDIDATE_LABEL_LENGTH,
 } from './types.ts';
 
 /** 新建分支组：root 会话即第一个候选（kind='root'） */
@@ -210,6 +211,14 @@ export function renameCandidate(
     assertRevision(group, expectedRevision);
     if (label.trim().length === 0) {
         throw new BranchError('candidate label must not be empty', BranchErrorCode.INVALID_INPUT);
+    }
+    // 与老版 renameBranchCandidate（backend/services/branchCandidateService.ts）一致：
+    // label 非空且 ≤ 200 字符
+    if (label.trim().length > MAX_CANDIDATE_LABEL_LENGTH) {
+        throw new BranchError(
+            `candidate label must be at most ${MAX_CANDIDATE_LABEL_LENGTH} characters`,
+            BranchErrorCode.INVALID_INPUT
+        );
     }
     const candidate = getCandidate(group, sessionId);
     if (candidate.label === label) return group;

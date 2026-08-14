@@ -1,8 +1,8 @@
 /**
  * GrayCode - 树状分支工具（DSH defineTool 表面，V2 §P3E）
  *
- * 7 个工具：branch_list / branch_create / branch_reroll / branch_edit_retry /
- * branch_switch / branch_delete / branch_restore。
+ * 8 个工具：branch_list / branch_create / branch_reroll / branch_edit_retry /
+ * branch_switch / branch_delete / branch_restore / branch_rename。
  *
  * 语义要点：
  * - 对话正文真源是 dsh Session；本工具只操作 Gray sidecar（分组/候选/激活指针）。
@@ -483,6 +483,50 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
           const result = await service.restoreCandidate({
             groupId,
             sessionId: args.sessionId,
+            expectedRevision: args.expectedRevision,
+          })
+          return { success: true, ...result }
+        } catch (error) {
+          return errorOf(error)
+        }
+      },
+    }),
+
+    defineTool({
+      name: 'branch_rename',
+      description:
+        'Rename the display label of a candidate branch (1-200 characters). The session log is not touched. Use expectedRevision (from branch_list) for optimistic concurrency; on conflict the authoritative group is returned in error.groupId data via a follow-up branch_list.',
+      parameters: {
+        sessionId: { type: 'string', required: true, description: 'Candidate session id to rename.' },
+        groupId: { type: 'string', description: 'Optional group id; defaults to the group containing the current session.' },
+        label: { type: 'string', required: true, description: 'New display label (1-200 characters, non-empty).' },
+        expectedRevision: { type: 'integer', description: 'Optional CAS token.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            success: { type: 'boolean', required: true },
+            groupId: { type: 'string' },
+            sessionId: { type: 'string' },
+            revision: { type: 'integer' },
+            activeSessionId: { type: 'string' },
+            error: { type: 'string' },
+            code: { type: 'string' },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: toText(_args, value) }],
+      },
+      isConcurrencySafe: () => false,
+      async execute(args, exec) {
+        try {
+          const current = args.groupId ? '' : sessionIdOf(exec)
+          const groupId = resolveGroupId(service, args.groupId, current || args.sessionId)
+          const result = await service.renameCandidate({
+            groupId,
+            sessionId: args.sessionId,
+            label: args.label,
             expectedRevision: args.expectedRevision,
           })
           return { success: true, ...result }

@@ -271,6 +271,71 @@ describe('branch tools', () => {
     const groups = listed.groups as Array<{ activeSessionId: string }>
     expect(groups[0]!.activeSessionId).toBe(result.sessionId)
   })
+
+  // ── C5：branch_rename ──
+
+  it('branch_rename updates the display label and bumps the revision', async () => {
+    const result = await execute('branch_rename', {
+      groupId: env.groupId,
+      sessionId: ROOT_SESSION,
+      label: '新名字',
+    })
+    expect(result.success).toBe(true)
+    expect(result.revision).toBeGreaterThan(0)
+
+    const listed = await execute('branch_list', { groupId: env.groupId })
+    const groups = listed.groups as Array<{ revision: number; candidates: Array<{ sessionId: string; label?: string }> }>
+    const candidate = groups[0]!.candidates.find(c => c.sessionId === ROOT_SESSION)!
+    expect(candidate.label).toBe('新名字')
+    expect(groups[0]!.revision).toBe(2)
+  })
+
+  it('branch_rename with an empty label fails with GRAY_INVALID_INPUT', async () => {
+    const result = await execute('branch_rename', {
+      groupId: env.groupId,
+      sessionId: ROOT_SESSION,
+      label: '   ',
+    })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.INVALID_INPUT)
+  })
+
+  it('branch_rename with a label longer than 200 characters fails with GRAY_INVALID_INPUT', async () => {
+    const result = await execute('branch_rename', {
+      groupId: env.groupId,
+      sessionId: ROOT_SESSION,
+      label: 'x'.repeat(201),
+    })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.INVALID_INPUT)
+  })
+
+  it('branch_rename with a stale expectedRevision fails with GRAY_BRANCH_REVISION_CONFLICT', async () => {
+    const result = await execute('branch_rename', {
+      groupId: env.groupId,
+      sessionId: ROOT_SESSION,
+      label: 'conflict',
+      expectedRevision: 99,
+    })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.REVISION_CONFLICT)
+  })
+
+  it('branch_rename on a session not in the group fails with GRAY_BRANCH_SESSION_NOT_IN_GROUP', async () => {
+    const result = await execute('branch_rename', {
+      groupId: env.groupId,
+      sessionId: 'foreign-session',
+      label: 'x',
+    })
+    expect(result.success).toBe(false)
+    expect(result.code).toBe(BranchErrorCode.SESSION_NOT_IN_GROUP)
+  })
+
+  it('branch_rename without groupId resolves the group from the current session', async () => {
+    const result = await execute('branch_rename', { sessionId: ROOT_SESSION, label: 'from-current' })
+    expect(result.success).toBe(true)
+    expect(result.groupId).toBe(env.groupId)
+  })
 })
 
 describe('branch tools with a corrupt sidecar', () => {

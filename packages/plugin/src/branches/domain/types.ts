@@ -63,6 +63,9 @@ export const MAX_CANDIDATES_PER_PARENT = 10;
 /** TREE-09：软删候选默认保留期（天）；超过保留期的 tombstone 惰性物理清理 */
 export const DEFAULT_BRANCH_RETENTION_DAYS = 30;
 
+/** 候选显示名长度上限（对齐老版 renameBranchCandidate ≤200 字符） */
+export const MAX_CANDIDATE_LABEL_LENGTH = 200;
+
 /** 软删保留期（毫秒） */
 export const BRANCH_RETENTION_MS = DEFAULT_BRANCH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
