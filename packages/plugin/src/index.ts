@@ -9,6 +9,8 @@ import * as persona from './persona.ts'
 import * as prompt from './prompt/index.ts'
 import * as migration from './migration/index.ts'
 import * as stagedDiff from './stagedDiff/adapters/dsh/index.ts'
+import * as activity from './activity/index.ts'
+import * as media from './media/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -31,6 +33,10 @@ export interface Config {
   migration: migration.Config
   /** Staged file diff review (ADR-0003): deferred accept/reject of workspace writes. */
   stagedDiff: stagedDiff.Config
+  /** Activity domain: usage-time stats sampled from user messages and agent steps. */
+  activity: activity.Config
+  /** Media domain: local sharp processing (crop/resize/rotate). */
+  media: media.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -43,6 +49,8 @@ export const Config: z<Config> = z.object({
   prompt: prompt.Config,
   migration: migration.Config,
   stagedDiff: stagedDiff.Config,
+  activity: activity.Config,
+  media: media.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -60,4 +68,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(prompt, { ...config.prompt, dataRoot })
   ctx.plugin(migration, { ...config.migration, dataRoot })
   ctx.plugin(stagedDiff, { ...config.stagedDiff, dataRoot })
+  // Activity domain: Config carries its own dataRoot field, forwarded from the composition root.
+  ctx.plugin(activity, { ...config.activity, dataRoot })
+  // Media domain: Config has no dataRoot (no persistence under the plugin root).
+  ctx.plugin(media, { ...config.media })
 }
