@@ -1,100 +1,22 @@
 {
-  "name": "graycode-for-dsh",
-  "displayName": "Gray Code for DSH",
+  "name": "graycode-dsh",
+  "private": true,
   "version": "0.1.0",
-  "description": "Gray-Code settings surface for DeepSeek Harness: the 17-category Gray-Code settings panel, mounted as a native DSH settings section and backed by a plugin-owned config channel.",
   "type": "module",
-  "main": "lib/index.js",
-  "exports": {
-    ".": "./lib/index.js",
-    "./client": "./lib/client.js",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "lib",
-    "cordis.patch.yml",
-    "README.md",
-    "LICENSE"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-slots"
-      ],
-      "platform": "web"
-    }
-  },
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "typecheck": "node scripts/gen-tsconfig-paths.mjs && tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "npm run build"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-client-connection": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-locale": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-ui-settings": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-web-react": ">=0.0.1-rc.1",
-    "@deepseek-ai/dsh-settings": ">=0.0.1-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "react": "^18.2.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-connection": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-locale": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-runtime": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-primitives": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-settings": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-ui-slots": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-web-react": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-settings": {
-      "optional": true
-    },
-    "@deepseek-ai/schemastery": {
-      "optional": true
-    },
-    "react": {
-      "optional": true
-    }
+    "build": "pnpm --filter @graycode/dsh-plugin build && pnpm --filter @graycode/dsh-client build",
+    "typecheck": "pnpm --filter @graycode/dsh-plugin typecheck && pnpm --filter @graycode/dsh-client typecheck",
+    "test": "vitest run",
+    "test:smoke": "vitest run packages/plugin/tests/agentScope.spec.ts packages/plugin/tests/persona.spec.ts packages/plugin/tests/e2e/loop.test.ts packages/plugin/tests/memory/scope.spec.ts packages/plugin/tests/prompt/template.test.ts packages/plugin/tests/workflows/modeToolsPolicy.test.ts",
+    "pack": "pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin --filter @graycode/dsh-client pack",
+    "verify:pack": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-pack.ps1",
+    "ci:all": "pnpm typecheck && pnpm test && pnpm build && pnpm verify:pack",
+    "dsh:plugin": "dsh plugin --profile graycode"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "@types/node": "^24.0.0",
-    "@types/react": "^18.3.1",
-    "esbuild": "^0.27.0",
-    "react": "^18.2.0",
-    "typescript": "^5.9.0"
-  },
-  "license": "MIT",
-  "allowScripts": {
-    "esbuild@0.27.7": true
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }

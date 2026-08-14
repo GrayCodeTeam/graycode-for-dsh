@@ -1,6 +1,8 @@
 node_modules/
 lib/
 dist/
-*.log
+*.tgz
 .DS_Store
-tsconfig.paths.json
+*.log
+
+__unused__/
