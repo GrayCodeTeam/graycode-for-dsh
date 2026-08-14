@@ -270,10 +270,12 @@ function formatEvidenceRefText(ref: ReviewEvidenceRef): string {
  * snapshot_section_count 或误定位 Snapshot 区。
  * heading 语义与 parseH2Sections 一致（## 后空白 + 至少一个非空字符）。
  */
-function findH2HeadingsOutsideFences(content: string): Array<{ index: number; heading: string }> {
-  const normalized = normalizeLineEndings(content);
+function scanH2HeadingsOutsideFences(
+  normalized: string,
+  startInFence: boolean
+): { results: Array<{ index: number; heading: string }>; endsInFence: boolean } {
   const results: Array<{ index: number; heading: string }> = [];
-  let inFence = false;
+  let inFence = startInFence;
   let offset = 0;
   for (const line of normalized.split('\n')) {
     if (/^```/.test(line)) {
@@ -286,7 +288,39 @@ function findH2HeadingsOutsideFences(content: string): Array<{ index: number; he
     }
     offset += line.length + 1;
   }
-  return results;
+  return { results, endsInFence: inFence };
+}
+
+/**
+ * 统计行首 ``` 围栏行数（与 scanH2HeadingsOutsideFences 的围栏判定口径一致）。
+ */
+function countLineStartFenceLines(content: string): number {
+  const normalized = normalizeLineEndings(content);
+  let count = 0;
+  for (const line of normalized.split('\n')) {
+    if (/^```/.test(line)) count += 1;
+  }
+  return count;
+}
+
+function findH2HeadingsOutsideFences(content: string): Array<{ index: number; heading: string }> {
+  const normalized = normalizeLineEndings(content);
+  const first = scanH2HeadingsOutsideFences(normalized, false);
+  // 文档以未闭合围栏结束（奇数个行首 ```，如 scope 手改后围栏未配对）时，
+  // 未闭合围栏会吞掉其后所有 H2 heading（含 `## Review Snapshot`），导致
+  // create_review / record / finalize 报误导性的「Missing Snapshot section」。
+  // 以相反初始状态（视文档开头已在围栏内）再扫一遍并合并两遍结果：两个扫描
+  // 的并集保证每个区段至少在其中一次被当作围栏外，Snapshot heading 不会被误吞。
+  // 成对围栏（偶数）的文档不触发第二次扫描，行为与之前完全一致。
+  if (!first.endsInFence) return first.results;
+  const second = scanH2HeadingsOutsideFences(normalized, true);
+  const merged = new Map<number, string>();
+  for (const match of [...first.results, ...second.results]) {
+    merged.set(match.index, match.heading);
+  }
+  return Array.from(merged.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, heading]) => ({ index, heading }));
 }
 
 function countSnapshotSectionHeadings(content: string): number {
@@ -877,9 +911,11 @@ function mergeFindingRecords(
 
     merged.set(key, {
       id: current.id || normalized.id,
-      severity: current.severity || normalized.severity,
-      category: current.category || normalized.category,
-      title: current.title || normalized.title,
+      // 显式传入的字段覆盖旧值：`current.severity || normalized.severity` 在
+      // current 恒 truthy 时更新永不生效（与 compare 工具能检测 severity 变化矛盾）。
+      severity: item.severity !== undefined ? normalized.severity : current.severity,
+      category: item.category !== undefined ? normalized.category : current.category,
+      title: item.title !== undefined ? normalized.title : current.title,
       description: (normalized.description || '').length > (current.description || '').length
         ? normalized.description
         : current.description,
@@ -1165,16 +1201,36 @@ function parseReviewSummarySection(body: string): ParsedReviewSummary {
 
 function parseStructuredFindingBlock(blockLines: string[]): ReviewFindingInput | null {
   const firstLine = blockLines[0]?.trim() || '';
-  const structuredMatch = /^- \[(high|medium|low)\]\s+([^:]+):\s+(.+)$/i.exec(firstLine);
+  const structuredMatch = /^- \[(high|medium|low)\]\s+(.+)$/i.exec(firstLine);
   if (!structuredMatch) {
     const legacyText = normalizeSingleLineText(firstLine.replace(/^-\s+/, ''));
     return legacyText ? convertLegacyFindingToStructured(legacyText) : null;
   }
 
+  // 用最后一个冒号分割 category 与 title：标题本身可含冒号（如 "修复: 按钮"）。
+  // 最后一个冒号前的整段能归一化为合法类别时取其为 category（category 不含冒号时
+  // 与第一个冒号分割结果一致）；否则回退第一个冒号，避免 category:title 常规格式
+  // 退化（category 丢失），也兼容冒号后无空白的紧凑格式（修复前整行回退为 legacy）。
+  const remainder = structuredMatch[2]!.trim();
+  const lastColon = remainder.lastIndexOf(':');
+  const firstColon = remainder.indexOf(':');
+  let categoryText = '';
+  let titleText = remainder;
+  if (lastColon > 0) {
+    const lastColonCategory = remainder.slice(0, lastColon).trim();
+    if (normalizeFindingCategory(lastColonCategory) !== 'other') {
+      categoryText = lastColonCategory;
+      titleText = remainder.slice(lastColon + 1).trim();
+    } else if (firstColon > 0) {
+      categoryText = remainder.slice(0, firstColon).trim();
+      titleText = remainder.slice(firstColon + 1).trim();
+    }
+  }
+
   const finding: ReviewFindingInput = {
     severity: normalizeFindingSeverity(structuredMatch[1]!.toLowerCase()),
-    category: normalizeFindingCategory(structuredMatch[2]!),
-    title: normalizeSingleLineText(structuredMatch[3]),
+    category: normalizeFindingCategory(categoryText),
+    title: normalizeSingleLineText(titleText),
     evidenceFiles: [],
     relatedMilestoneIds: [],
     trackingStatus: 'open'
@@ -2031,6 +2087,18 @@ function renderReviewSummary(snapshot: ReviewSnapshotV4): string {
   ].join('\n');
 }
 
+/**
+ * 清洗作为 markdown heading 使用的 finding 标题：转义 HTML 注释标记（裸 <!-- 会
+ * 吞掉其后渲染内容）、剥离行首 #（避免产生嵌套 heading）。快照内源数据不改写。
+ */
+function sanitizeFindingTitleForHeading(title: string): string {
+  return normalizeSingleLineText(title)
+    .replace(/<!--/g, '&lt;!--')
+    .replace(/-->/g, '--&gt;')
+    .replace(/^#{1,6}\s*/g, '')
+    .trim();
+}
+
 function renderReviewFindings(snapshot: ReviewSnapshotV4): string {
   const locale = resolveReviewDocumentLocale(snapshot.render.locale, 'en');
   const labels = getReviewDocumentMessages(locale).finding;
@@ -2040,7 +2108,7 @@ function renderReviewFindings(snapshot: ReviewSnapshotV4): string {
 
   return snapshot.findings.map((finding) => {
     const lines = [
-      `### ${finding.title}`,
+      `### ${sanitizeFindingTitleForHeading(finding.title)}`,
       '',
       `- ID: ${finding.id}`,
       `- ${labels.severity}: ${getDisplaySeverity(finding.severity, locale)}`,
@@ -2116,6 +2184,19 @@ function renderReviewFinalConclusion(snapshot: ReviewSnapshotV4): string {
   return snapshot.summary.latestConclusion || getLocalizedDefaultFinalConclusion(locale);
 }
 
+/**
+ * 渲染前对 scope 的行首代码围栏做防御：行首 ``` 数量为奇数（未配对，如手工编辑
+ * 破坏配对）时给每个行首 ``` 加一个前导空格转义，避免正文中的裸 ``` 吞掉其后
+ * 的 H2 heading（含 `## Review Snapshot` 区）。成对围栏原样保留。
+ */
+function escapeUnpairedScopeFences(markdown: string): string {
+  if (countLineStartFenceLines(markdown) % 2 === 0) return markdown;
+  return normalizeLineEndings(markdown)
+    .split('\n')
+    .map((line) => (/^```/.test(line) ? ` ${line}` : line))
+    .join('\n');
+}
+
 function renderReviewDocumentBody(snapshot: ReviewSnapshotV4): string {
   const normalizedSnapshot = reconcileReviewSnapshot(snapshot);
   const locale = resolveReviewDocumentLocale(normalizedSnapshot.render.locale, 'en');
@@ -2130,7 +2211,7 @@ function renderReviewDocumentBody(snapshot: ReviewSnapshotV4): string {
     '',
     headings.scope,
     '',
-    normalizedSnapshot.scope.markdown || getLocalizedDefaultReviewScope(locale),
+    escapeUnpairedScopeFences(normalizedSnapshot.scope.markdown) || getLocalizedDefaultReviewScope(locale),
     '',
     headings.summary,
     '',
@@ -2514,6 +2595,14 @@ export function getNextReviewMilestoneId(content: string): string {
 }
 
 export function buildInitialReviewDocument(input: ReviewDocumentTemplateInput, locale: ReviewDocumentLocale = 'en'): string {
+  // 输入校验：scope 的行首 ``` 必须配对。奇数围栏会让渲染后的正文吞掉
+  // `## Review Snapshot` heading，create_review/record/finalize 报误导性错误。
+  const fenceCount = countLineStartFenceLines(normalizeMarkdownText(input.review));
+  if (fenceCount % 2 === 1) {
+    throw new Error(
+      `Review scope contains an unpaired code fence: ${fenceCount} line-start \`\`\` markers (odd count). Code fences must be paired (open and close) before creating a review document.`
+    );
+  }
   const snapshot = createInitialSnapshot(input, locale);
   const content = buildReviewDocument(snapshot);
   ensureValidRenderedDocument(content);

@@ -52,6 +52,18 @@ function normalizeMarkdownBlock(value: unknown): string | null {
   return normalized || null;
 }
 
+/**
+ * 转义正文/元数据中的 GRAYCODE_PROGRESS marker 文本（`<!-- GRAYCODE_PROGRESS_* -->`）。
+ *
+ * 里程碑摘要/风险描述等自由文本若原样写入，marker 文本会让 validateProgressDocument 的
+ * 「每个 marker 恰出现一次」校验失败（正文与元数据 JSON 各出现一次）。此处把 marker 的
+ * `-->` 转义为 `--&gt;`：转义结果不会再被本正则匹配（幂等），可见正文与元数据 JSON 同时
+ * 得到保护，文档仍可通过自身校验。
+ */
+function escapeProgressMarkerTokens(text: string): string {
+  return (text || '').replace(/<!--\s*GRAYCODE_PROGRESS_[A-Z0-9_]+(?:\s*--)?>/gi, (marker) => marker.replace('-->', '--&gt;'));
+}
+
 function normalizeTimestamp(value: unknown, fallback: string): string {
   const normalized = normalizeSingleLineText(value);
   return normalized || fallback;
@@ -184,7 +196,7 @@ export function normalizeProgressTodos(value: unknown): ProgressTodoItem[] {
     if (!item || typeof item !== 'object') continue;
 
     const id = normalizeSingleLineText((item as Record<string, unknown>).id);
-    const content = normalizeSingleLineText((item as Record<string, unknown>).content);
+    const content = escapeProgressMarkerTokens(normalizeSingleLineText((item as Record<string, unknown>).content));
     const status = (item as Record<string, unknown>).status;
     if (!id || !content || !isProgressTodoStatus(status)) continue;
 
@@ -202,8 +214,8 @@ export function normalizeProgressRisks(value: unknown): ProgressRiskItem[] {
     if (!item || typeof item !== 'object') continue;
 
     const id = normalizeSingleLineText((item as Record<string, unknown>).id);
-    const title = normalizeSingleLineText((item as Record<string, unknown>).title);
-    const description = normalizeSingleLineText((item as Record<string, unknown>).description);
+    const title = escapeProgressMarkerTokens(normalizeSingleLineText((item as Record<string, unknown>).title));
+    const description = escapeProgressMarkerTokens(normalizeSingleLineText((item as Record<string, unknown>).description));
     const status = (item as Record<string, unknown>).status;
     if (!id || !title || !description || !isProgressRiskStatus(status)) continue;
 
@@ -223,7 +235,7 @@ export function normalizeProgressLogEntries(value: unknown): ProgressLogItem[] {
     const at = normalizeSingleLineText((item as Record<string, unknown>).at);
     const type = (item as Record<string, unknown>).type;
     const refId = normalizeSingleLineText((item as Record<string, unknown>).refId) || undefined;
-    const message = normalizeSingleLineText((item as Record<string, unknown>).message);
+    const message = escapeProgressMarkerTokens(normalizeSingleLineText((item as Record<string, unknown>).message));
     if (!at || !message || !isProgressLogType(type)) continue;
 
     entries.push({ at, type, refId, message });
@@ -255,8 +267,8 @@ function normalizeProgressMilestones(value: unknown): ProgressMilestoneRecord[] 
     if (!item || typeof item !== 'object') continue;
 
     const id = normalizeSingleLineText((item as Record<string, unknown>).id);
-    const title = normalizeSingleLineText((item as Record<string, unknown>).title);
-    const summary = normalizeMarkdownBlock((item as Record<string, unknown>).summary);
+    const title = escapeProgressMarkerTokens(normalizeSingleLineText((item as Record<string, unknown>).title));
+    const summary = escapeProgressMarkerTokens(normalizeMarkdownBlock((item as Record<string, unknown>).summary) || '');
     const status = (item as Record<string, unknown>).status;
     const recordedAt = normalizeSingleLineText((item as Record<string, unknown>).recordedAt);
     if (!id || !title || !summary || !recordedAt || !isProgressMilestoneStatus(status)) continue;
@@ -286,7 +298,7 @@ function normalizeProgressMilestones(value: unknown): ProgressMilestoneRecord[] 
       startedAt: normalizeOptionalProgressSingleLineText((item as Record<string, unknown>).startedAt) || undefined,
       completedAt: normalizeOptionalProgressSingleLineText((item as Record<string, unknown>).completedAt) || undefined,
       recordedAt,
-      nextAction: normalizeOptionalProgressText((item as Record<string, unknown>).nextAction)
+      nextAction: escapeProgressMarkerTokens(normalizeOptionalProgressText((item as Record<string, unknown>).nextAction) || '') || null
     });
   }
 
@@ -331,17 +343,17 @@ function normalizeProgressMetadataInput(
     formatVersion: 1,
     kind: 'graycode.progress',
     projectId: normalizeSingleLineText(value.projectId) || 'project',
-    projectName: normalizeOptionalProgressSingleLineText(value.projectName) || undefined,
+    projectName: escapeProgressMarkerTokens(normalizeOptionalProgressSingleLineText(value.projectName) || '') || undefined,
     createdAt: normalizeTimestamp(value.createdAt, now),
     updatedAt: normalizeTimestamp(value.updatedAt, now),
     status: isProgressStatus(value.status) ? value.status : 'active',
     // 修改原因：默认 phase 与 create_progress / autoSync 的 'design' 不一致。
     // 修改方式：统一为 'design'（项目创建初期处于设计阶段）。
     phase: isProgressPhase(value.phase) ? value.phase : 'design',
-    currentFocus: normalizeOptionalProgressSingleLineText(value.currentFocus),
-    latestConclusion: normalizeOptionalProgressText(value.latestConclusion),
-    currentBlocker: normalizeOptionalProgressText(value.currentBlocker),
-    nextAction: normalizeOptionalProgressText(value.nextAction),
+    currentFocus: escapeProgressMarkerTokens(normalizeOptionalProgressSingleLineText(value.currentFocus) || '') || null,
+    latestConclusion: escapeProgressMarkerTokens(normalizeOptionalProgressText(value.latestConclusion) || '') || null,
+    currentBlocker: escapeProgressMarkerTokens(normalizeOptionalProgressText(value.currentBlocker) || '') || null,
+    nextAction: escapeProgressMarkerTokens(normalizeOptionalProgressText(value.nextAction) || '') || null,
     activeArtifacts: normalizeProgressArtifactRef(value.activeArtifacts),
     todos,
     milestones,
@@ -379,16 +391,16 @@ function renderSummarySection(metadata: ProgressDocumentMetadataV1): string {
   ];
 
   if (metadata.currentFocus) {
-    lines.push(`- 当前焦点：${buildInlinePreview(metadata.currentFocus, 120)}`);
+    lines.push(`- 当前焦点：${buildInlinePreview(escapeProgressMarkerTokens(metadata.currentFocus), 120)}`);
   }
   if (metadata.latestConclusion) {
-    lines.push(`- 最新结论：${buildInlinePreview(metadata.latestConclusion, 180)}`);
+    lines.push(`- 最新结论：${buildInlinePreview(escapeProgressMarkerTokens(metadata.latestConclusion), 180)}`);
   }
   if (metadata.currentBlocker) {
-    lines.push(`- 当前阻塞：${buildInlinePreview(metadata.currentBlocker, 180)}`);
+    lines.push(`- 当前阻塞：${buildInlinePreview(escapeProgressMarkerTokens(metadata.currentBlocker), 180)}`);
   }
   if (metadata.nextAction) {
-    lines.push(`- 下一步：${buildInlinePreview(metadata.nextAction, 180)}`);
+    lines.push(`- 下一步：${buildInlinePreview(escapeProgressMarkerTokens(metadata.nextAction), 180)}`);
   }
 
   return [
@@ -422,7 +434,7 @@ function renderTodoLine(todo: ProgressTodoItem): string {
     : todo.status === 'cancelled'
       ? ' (cancelled)'
       : '';
-  return `- [${checkbox}] ${todo.content}  \`#${todo.id}\`${suffix}`;
+  return `- [${checkbox}] ${escapeProgressMarkerTokens(todo.content)}  \`#${todo.id}\`${suffix}`;
 }
 
 function renderTodosSection(metadata: ProgressDocumentMetadataV1): string {
@@ -438,7 +450,7 @@ function renderTodosSection(metadata: ProgressDocumentMetadataV1): string {
 
 function renderMilestone(metadata: ProgressMilestoneRecord): string {
   const lines: string[] = [
-    `### ${metadata.id} · ${metadata.title}`,
+    `### ${escapeProgressMarkerTokens(metadata.id)} · ${escapeProgressMarkerTokens(metadata.title)}`,
     `- 状态：${metadata.status}`,
     `- 记录时间：${metadata.recordedAt}`,
   ];
@@ -469,10 +481,15 @@ function renderMilestone(metadata: ProgressMilestoneRecord): string {
   }
 
   lines.push('- 摘要:');
-  lines.push(metadata.summary);
+  lines.push('');
+  // 摘要按块渲染：每行缩进两个空格（marker 文本转义、行首标题不再命中节标题检测），
+  // 即使摘要含 `## 项目里程碑` 或 `<!-- GRAYCODE_PROGRESS_* -->` 也不破坏文档结构。
+  for (const line of normalizeLineEndingsToLF(metadata.summary).split('\n')) {
+    lines.push(line ? `  ${escapeProgressMarkerTokens(line)}` : '');
+  }
 
   if (metadata.nextAction) {
-    lines.push(`- 下一步：${buildInlinePreview(metadata.nextAction, 180)}`);
+    lines.push(`- 下一步：${buildInlinePreview(escapeProgressMarkerTokens(metadata.nextAction), 180)}`);
   }
 
   return lines.join('\n');
@@ -493,7 +510,7 @@ function renderMilestonesSection(metadata: ProgressDocumentMetadataV1): string {
 }
 
 function renderRisksSection(metadata: ProgressDocumentMetadataV1): string {
-  const lines = metadata.risks.map((risk) => `- ${risk.id} | ${risk.status} | ${risk.title}：${risk.description}`);
+  const lines = metadata.risks.map((risk) => `- ${escapeProgressMarkerTokens(risk.id)} | ${escapeProgressMarkerTokens(risk.status)} | ${escapeProgressMarkerTokens(risk.title)}：${escapeProgressMarkerTokens(risk.description)}`);
   return [
     PROGRESS_RISKS_SECTION_TITLE,
     '',
@@ -506,7 +523,7 @@ function renderRisksSection(metadata: ProgressDocumentMetadataV1): string {
 function renderLogSection(metadata: ProgressDocumentMetadataV1): string {
   const lines = metadata.log.map((item) => {
     const refPart = item.refId ? ` | ${item.refId}` : '';
-    return `- ${item.at} | ${item.type}${refPart} | ${item.message}`;
+    return `- ${item.at} | ${item.type}${refPart} | ${escapeProgressMarkerTokens(item.message)}`;
   });
 
   return [

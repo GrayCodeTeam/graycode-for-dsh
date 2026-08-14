@@ -563,6 +563,48 @@ describe('review tools (lifecycle + session gate)', () => {
     const created = await executeCreateReview(deps, { title: 'NUL', review: 'scope' }) as { path: string }
     expect(created.path).toBe('.graycode/review/_nul.md')
   })
+
+  it('compare_review_documents treats same-title findings with different severity as distinct identities', async () => {
+    const a = await executeCreateReview(deps, { title: 'Compare Sev A', review: 'scope a' }) as { path: string }
+
+    await executeRecordReviewMilestone(deps, {
+      path: a.path,
+      milestoneTitle: '第一轮',
+      summary: '摘要',
+      structuredFindings: [
+        { severity: 'high', category: 'html', title: 'same title' },
+        { severity: 'low', category: 'html', title: 'same title' },
+      ],
+    })
+
+    const b = await executeCreateReview(makeDeps('session-sev-b'), { title: 'Compare Sev B', review: 'scope b' }) as { path: string }
+    // 目标文档只保留 high 版本：low 版本应从比较中「移除」，而不是被 high 的
+    // category+title key 覆盖后静默消失（key 加入 severity 后两版本身份不同）
+    await executeRecordReviewMilestone(makeDeps('session-sev-b'), {
+      path: b.path,
+      milestoneTitle: '第二轮',
+      summary: '摘要二',
+      structuredFindings: [
+        { severity: 'high', category: 'html', title: 'same title' },
+      ],
+    })
+
+    const compare = await executeCompareReviewDocuments(deps, {
+      basePath: a.path,
+      targetPath: b.path,
+      includeUnchanged: true,
+    }) as {
+      summary: { addedFindings: number; removedFindings: number; persistedFindings: number; severityChanged: number }
+      findings: { persisted: Array<{ changes: string[] }> }
+    }
+
+    expect(compare.summary.addedFindings).toBe(0)
+    expect(compare.summary.removedFindings).toBe(1)
+    expect(compare.summary.persistedFindings).toBe(1)
+    // high↔high 匹配：没有把 low 误配成 high 的 severity 变化
+    expect(compare.summary.severityChanged).toBe(0)
+    expect(compare.findings.persisted.filter((item) => item.changes.length > 0)).toHaveLength(0)
+  })
 })
 
 describe('fs write helpers', () => {

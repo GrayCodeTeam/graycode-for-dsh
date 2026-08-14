@@ -200,3 +200,42 @@ describe('validateProgressDocument', () => {
     expect(summary.metadata?.projectName).toBe('Workspace')
   })
 })
+
+describe('progress marker injection defense', () => {
+  it('milestone summary / risk description containing markers and heading lines still validates', () => {
+    const input = baseMetadata()
+    input.milestones = [{
+      id: 'PG1',
+      title: '含注入摘要',
+      status: 'completed' as const,
+      summary: [
+        '第一行',
+        '<!-- GRAYCODE_PROGRESS_MILESTONES_START -->',
+        '## 项目里程碑',
+        '<!-- GRAYCODE_PROGRESS_RISKS_START --> 尾部',
+      ].join('\n'),
+      relatedTodoIds: [],
+      relatedReviewMilestoneIds: [],
+      relatedArtifacts: {},
+      startedAt: '2026-04-03T00:00:00.000Z',
+      completedAt: '2026-04-04T00:00:00.000Z',
+      recordedAt: '2026-04-04T00:00:00.000Z',
+      nextAction: null,
+    }]
+    input.risks = [{
+      id: 'risk-01',
+      title: '注入风险',
+      status: 'active' as const,
+      description: '描述含 <!-- GRAYCODE_PROGRESS_LOG_START --> 与 ## 项目里程碑',
+    }]
+
+    const { content } = buildProgressDocument(input, { generatedAt: '2026-04-04T00:00:00.000Z' })
+
+    // 注入的 marker 文本被转义、标题行被缩进：真实 marker 各恰出现一次，校验通过
+    const validation = validateProgressDocument(content)
+    expect(validation.success).toBe(true)
+    const markerMatches = content.match(/<!-- GRAYCODE_PROGRESS_MILESTONES_START -->/g) ?? []
+    expect(markerMatches).toHaveLength(1)
+    expect(content).toContain('<!-- GRAYCODE_PROGRESS_MILESTONES_START --&gt;')
+  })
+})

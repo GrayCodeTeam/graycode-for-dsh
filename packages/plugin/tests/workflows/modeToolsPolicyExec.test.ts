@@ -217,6 +217,37 @@ describe('evaluateModeToolPolicy (执行判定)', () => {
     })
     expect(reason).toBe('Tool "write_file" is not allowed in mode "plan".')
   })
+
+  it('plan 模式 write_file 支持 multi-root 前缀（workspaceName 与首段一致时）', () => {
+    const planPolicyWithWrite = ['write_file', ...(BUILTIN_MODE_TOOL_POLICIES.plan ?? [])]
+
+    // 未提供 workspaceName 信息时保持原行为：带前缀路径仍拒绝
+    expect(evaluateModeToolPolicy({
+      toolName: 'write_file',
+      args: { path: 'my-project/.graycode/plans/foo.md' },
+      toolPolicy: planPolicyWithWrite,
+      modeId: 'plan',
+    })).toContain('only allowed to write')
+
+    // workspaceName 与首段一致时接受 multi-root 前缀（与 workspace.ts
+    // isScopedPathAllowedWithMultiRoot 的剥离口径一致）
+    expect(evaluateModeToolPolicy({
+      toolName: 'write_file',
+      args: { path: 'my-project/.graycode/plans/foo.md' },
+      toolPolicy: planPolicyWithWrite,
+      modeId: 'plan',
+      workspaceName: 'my-project',
+    })).toBeUndefined()
+
+    // 前缀与 workspace 名不匹配时仍拒绝
+    expect(evaluateModeToolPolicy({
+      toolName: 'write_file',
+      args: { path: 'other/.graycode/plans/foo.md' },
+      toolPolicy: planPolicyWithWrite,
+      modeId: 'plan',
+      workspaceName: 'my-project',
+    })).toContain('only allowed to write')
+  })
 })
 
 describe('createModeToolPolicyGuard (DSH 拦截器适配)', () => {
@@ -296,6 +327,17 @@ describe('createModeToolPolicyGuard (DSH 拦截器适配)', () => {
     })
     expect(guard(exec('search_in_files'))).toBeUndefined()
     expect(guard(exec('search_in_files', 'not-an-object'))).toBeUndefined()
+  })
+
+  it('createModeToolPolicyGuard 支持 resolveWorkspaceName 解析 multi-root 前缀', () => {
+    const guard = createModeToolPolicyGuard({
+      resolveToolPolicy: () => ['write_file'],
+      resolveModeId: () => 'plan',
+      resolveWorkspaceName: () => 'my-project',
+    })
+    expect(guard(exec('write_file', { path: 'my-project/.graycode/plans/foo.md' }))).toBeUndefined()
+    expect(guard(exec('write_file', { path: '.graycode/plans/foo.md' }))).toBeUndefined()
+    expect(guard(exec('write_file', { path: '.graycode/design/foo.md' }))).toContain('only allowed to write')
   })
 })
 

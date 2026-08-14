@@ -337,6 +337,29 @@ export interface ModeToolPolicyEvaluation {
   toolPolicy?: readonly string[] | undefined
   /** 当前模式 id（仅用于拒绝消息文案） */
   modeId?: string | undefined
+  /** 工作区 basename（multi-root 前缀剥离判定用；缺省时不剥离前缀） */
+  workspaceName?: string | undefined
+}
+
+/**
+ * multi-root 前缀剥离判定（与 workspace.ts isScopedPathAllowedWithMultiRoot 口径一致；
+ * 以 workspaceName 取代 ToolDeps 解耦，避免循环依赖）：先直接判定，首段与 workspace
+ * basename 一致时剥离前缀后再次判定（等价于单工作区下显式工作区前缀）。
+ */
+function isPlanPathAllowedWithWorkspacePrefix(pathStr: string, workspaceName: string | undefined): boolean {
+  if (isPlanPathAllowed(pathStr)) return true
+  if (!workspaceName) return false
+
+  const normalized = (pathStr || '').replace(/\\/g, '/')
+  const slashIndex = normalized.indexOf('/')
+  if (slashIndex <= 0) return false
+
+  const workspacePrefix = normalized.slice(0, slashIndex)
+  if (workspacePrefix === '.' || workspacePrefix === '..') return false
+  if (workspacePrefix.includes(':')) return false
+  if (workspacePrefix !== workspaceName) return false
+
+  return isPlanPathAllowed(normalized.slice(slashIndex + 1))
 }
 
 /**
@@ -347,12 +370,13 @@ export interface ModeToolPolicyEvaluation {
  * 2. search_in_files replace 越权：allowlist 含 search_in_files 但未授予任何通用
  *    写工具时，replace 模式拒绝（search 只读模式不受影响）；
  * 3. plan 模式 write_file 受控例外：即使 allowlist 允许 write_file，路径也必须
- *    落在 .graycode/plans/**.md（大小写不敏感，与 isPlanPathAllowed 口径一致）。
+ *    落在 .graycode/plans/**.md（大小写不敏感，与 isPlanPathAllowed 口径一致；
+ *    提供 workspaceName 时接受 workspaceName/.graycode/plans/**.md multi-root 前缀）。
  *
  * @returns 拒绝原因字符串；undefined 表示放行
  */
 export function evaluateModeToolPolicy(evaluation: ModeToolPolicyEvaluation): string | undefined {
-  const { toolName, args, toolPolicy, modeId } = evaluation
+  const { toolName, args, toolPolicy, modeId, workspaceName } = evaluation
   const modeLabel = modeId ?? 'unknown'
 
   // 1) allowlist 过滤（非空数组才启用，与旧 preflight.ts:128-134 一致）
@@ -375,7 +399,7 @@ export function evaluateModeToolPolicy(evaluation: ModeToolPolicyEvaluation): st
     if (typeof rawPath !== 'string' || !rawPath.trim()) {
       return 'In plan mode, write_file requires a non-empty "path" string.'
     }
-    if (!isPlanPathAllowed(rawPath)) {
+    if (!isPlanPathAllowedWithWorkspacePrefix(rawPath, workspaceName)) {
       return `In plan mode, write_file is only allowed to write ".graycode/plans/**.md". Rejected path: ${rawPath}`
     }
   }
@@ -418,6 +442,11 @@ export interface ModeToolPolicyGuardOptions {
    * 解析当前模式 id（仅用于拒绝消息文案；未提供时消息使用 'unknown'）。
    */
   resolveModeId?: () => string | undefined
+  /**
+   * 解析当前工作区 basename（plan 模式 write_file 的 multi-root 前缀剥离判定用；
+   * 未提供时不剥离前缀，行为与旧版一致）。
+   */
+  resolveWorkspaceName?: () => string | undefined
 }
 
 /**
@@ -452,14 +481,17 @@ export function createModeToolPolicyGuard(options: ModeToolPolicyGuardOptions = 
 
   const resolveToolPolicy = options.resolveToolPolicy ?? (() => undefined)
   const resolveModeId = options.resolveModeId ?? (() => undefined)
+  const resolveWorkspaceName = options.resolveWorkspaceName ?? (() => undefined)
 
   return (execution: Readonly<ToolExecutionLike>): string | undefined => {
     // fail-closed：策略解析失败时拒绝，而不是静默放行。
     let toolPolicy: readonly string[] | undefined
     let modeId: string | undefined
+    let workspaceName: string | undefined
     try {
       toolPolicy = resolveToolPolicy()
       modeId = resolveModeId()
+      workspaceName = resolveWorkspaceName()
     } catch {
       return `[graycode:mode-tool-policy] tool policy resolution failed; denying tool "${execution.name}" to stay fail-closed.`
     }
@@ -471,6 +503,6 @@ export function createModeToolPolicyGuard(options: ModeToolPolicyGuardOptions = 
         ? (rawArgs as Readonly<Record<string, unknown>>)
         : undefined
 
-    return evaluateModeToolPolicy({ toolName: execution.name, args, toolPolicy, modeId })
+    return evaluateModeToolPolicy({ toolName: execution.name, args, toolPolicy, modeId, workspaceName })
   }
 }

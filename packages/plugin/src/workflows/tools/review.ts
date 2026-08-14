@@ -224,14 +224,23 @@ export async function executeCreateReview(
         eventMessage: `同步审查文档：${outPath}`,
       })
 
-      if (summary.reviewSnapshot) {
-        saveReviewSessionState(deps.sessionId, {
-          reviewRunId: summary.reviewSnapshot.reviewRunId,
-          reviewPath: outPath,
-          status: summary.reviewSnapshot.status,
-          createdAt: summary.reviewSnapshot.createdAt,
-          finalizedAt: summary.reviewSnapshot.finalizedAt,
-        })
+      const warnings = [...progressWarnings]
+      // 写入意图只产生 staged 条目（未落盘）时不得记录 in_progress 会话：
+      // reject 后门闸会指向不存在的文档，导致 create_review 被拦截、
+      // record_review_milestone 读盘失败。会话状态只在真正落盘后记录。
+      // 会话保存是非关键步骤：失败降级为 warnings，不阻断已落盘的主流程。
+      if (summary.reviewSnapshot && !outcome.staged) {
+        try {
+          saveReviewSessionState(deps.sessionId, {
+            reviewRunId: summary.reviewSnapshot.reviewRunId,
+            reviewPath: outPath,
+            status: summary.reviewSnapshot.status,
+            createdAt: summary.reviewSnapshot.createdAt,
+            finalizedAt: summary.reviewSnapshot.finalizedAt,
+          })
+        } catch (error) {
+          warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
 
       return projectReviewToolResultData({
@@ -241,7 +250,7 @@ export async function executeCreateReview(
           type: 'created',
           changedFields: ['header', 'scope', 'reviewSnapshot', 'reviewSession'],
         },
-        extra: buildReviewExtra(progressWarnings, outcome),
+        extra: buildReviewExtra(warnings, outcome),
       })
     })
   })
@@ -303,13 +312,22 @@ export async function executeRecordReviewMilestone(
     eventMessage: `同步审查里程碑：${next.result.milestoneId}`,
   })
 
-  saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.result.reviewSnapshot.reviewRunId,
-    reviewPath: path,
-    status: next.result.reviewSnapshot.status,
-    createdAt: next.result.reviewSnapshot.createdAt,
-    finalizedAt: next.result.reviewSnapshot.finalizedAt,
-  })
+  const warnings = [...progressWarnings]
+  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新，
+  // 会话状态始终反映磁盘真相；保存失败降级为 warnings（非关键步骤）。
+  if (!next.outcome.staged) {
+    try {
+      saveReviewSessionState(deps.sessionId, {
+        reviewRunId: next.result.reviewSnapshot.reviewRunId,
+        reviewPath: path,
+        status: next.result.reviewSnapshot.status,
+        createdAt: next.result.reviewSnapshot.createdAt,
+        finalizedAt: next.result.reviewSnapshot.finalizedAt,
+      })
+    } catch (error) {
+      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   return projectReviewToolResultData({
     path,
@@ -321,7 +339,7 @@ export async function executeRecordReviewMilestone(
       changedFields: ['milestones', 'findings', 'summary', 'stats', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      ...(buildReviewExtra(warnings, next.outcome) ?? {}),
       milestoneId: next.result.milestoneId,
       findings: next.result.findings,
       structuredFindings: next.result.structuredFindings,
@@ -374,13 +392,22 @@ export async function executeFinalizeReview(
     eventMessage: `同步审查结论：${path}`,
   })
 
-  saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.result.reviewSnapshot.reviewRunId,
-    reviewPath: path,
-    status: next.result.reviewSnapshot.status,
-    createdAt: next.result.reviewSnapshot.createdAt,
-    finalizedAt: next.result.reviewSnapshot.finalizedAt,
-  })
+  const warnings = [...progressWarnings]
+  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
+  // 保存失败降级为 warnings（非关键步骤，文档已落盘不阻断主流程）。
+  if (!next.outcome.staged) {
+    try {
+      saveReviewSessionState(deps.sessionId, {
+        reviewRunId: next.result.reviewSnapshot.reviewRunId,
+        reviewPath: path,
+        status: next.result.reviewSnapshot.status,
+        createdAt: next.result.reviewSnapshot.createdAt,
+        finalizedAt: next.result.reviewSnapshot.finalizedAt,
+      })
+    } catch (error) {
+      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   return projectReviewToolResultData({
     path,
@@ -390,7 +417,7 @@ export async function executeFinalizeReview(
       changedFields: ['status', 'overallDecision', 'finalizedAt', 'summary', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      ...(buildReviewExtra(warnings, next.outcome) ?? {}),
       findings: next.result.findings,
       structuredFindings: next.result.structuredFindings,
     },
@@ -434,13 +461,22 @@ export async function executeReopenReview(
     eventMessage: `重新打开审查：${path}`,
   })
 
-  saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.result.reviewSnapshot.reviewRunId,
-    reviewPath: path,
-    status: next.result.reviewSnapshot.status,
-    createdAt: next.result.reviewSnapshot.createdAt,
-    finalizedAt: next.result.reviewSnapshot.finalizedAt,
-  })
+  const warnings = [...progressWarnings]
+  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
+  // 保存失败降级为 warnings（非关键步骤）。
+  if (!next.outcome.staged) {
+    try {
+      saveReviewSessionState(deps.sessionId, {
+        reviewRunId: next.result.reviewSnapshot.reviewRunId,
+        reviewPath: path,
+        status: next.result.reviewSnapshot.status,
+        createdAt: next.result.reviewSnapshot.createdAt,
+        finalizedAt: next.result.reviewSnapshot.finalizedAt,
+      })
+    } catch (error) {
+      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   return projectReviewToolResultData({
     path,
@@ -450,7 +486,7 @@ export async function executeReopenReview(
       changedFields: ['status', 'overallDecision', 'finalizedAt', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      ...(buildReviewExtra(warnings, next.outcome) ?? {}),
       findings: next.result.findings,
       structuredFindings: next.result.structuredFindings,
     },
@@ -537,17 +573,19 @@ function sortUnique(values: string[]): string[] {
 }
 
 /**
- * finding 匹配 key：只取稳定身份（category + title，归一化后哈希）。
+ * finding 匹配 key：稳定身份 = category + title + severity（归一化后哈希）。
  *
- * description / evidence / recommendation / severity / trackingStatus /
- * relatedMilestoneIds 等易变字段不参与 key——它们的变化必须走 persisted 分支的
- * changes 列表（description/evidence 等 diff 分支可达），而不是被误报为 added+removed。
- * title 属于身份的一部分：标题变化按「新增 + 删除」处理（identity 变更，语义正确）。
+ * severity 参与 key：同标题同类别但不同 severity 的是两个独立 finding（与领域层
+ * getFindingMergeKey 的 severity|category|title 口径一致）；修复前只取 category+title
+ * 时两者在 baseMap/targetMap 中互相覆盖，比较结果静默丢失其中一个。
+ * description / evidence / recommendation / trackingStatus / relatedMilestoneIds
+ * 等易变字段仍不参与 key——它们的变化走 persisted 分支的 changes 列表。
  */
-function hashFindingKey(finding: { category: string; title: string }): string {
+function hashFindingKey(finding: { category: string; title: string; severity: string }): string {
   const payload = [
     normalizeComparableText(finding.category),
     normalizeComparableText(finding.title),
+    normalizeComparableText(finding.severity),
   ].join('||')
 
   return `finding:${createHash('sha256').update(payload, 'utf8').digest('hex')}`
