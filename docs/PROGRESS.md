@@ -251,6 +251,12 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   （新 options + 新 messages，绝不 mutate 深冻结原对象）、WeakSet 防递归、fail-closed；
   ADR-0002 §4b 记录非契约用法与渠道差异。完整 A1（注入器 requestLayer 联动 + 挂载 +
   真实渠道验证）待排期。20 用例（rewrite 14 + llmStream 6）。
+  **requestLayer 联动 + 挂载（✅ 已落地，2026-09）**：prompt 注入器新增
+  `requestLayer`（默认 false，跳过 user/assistant 上下文段落防双注入）+ 跨域服务
+  `graycode.promptModes`；thoughts 已挂进 composition root（默认关闭），默认状态源从
+  promptModes 服务实时投影（服务缺失/无 mode 降级透传）。剩余：真实 profile 挂载顺序
+  探针 + 真实渠道验证（ADR-0002 §4b 后续动作）。26 用例（rewrite 14 + llmStream 6 +
+  apply 6）。
 
 ### 迁移增强（B 组）
 
