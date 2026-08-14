@@ -50,7 +50,7 @@ describe('MemoryManager.note → wake', () => {
         await mm.note(t)
       }
       await mm.compress('0-1', 'ab')
-      const error = await mm.wake(undefined, 8).catch(e => e as Error)
+      const error = (await mm.wake(undefined, 8).catch(e => e as Error)) as Error
       expect(error.message).toContain('needs #0-3')
       expect(error.message).toContain('Compress memories #0-3')
     } finally {
@@ -93,7 +93,7 @@ describe('MemoryManager.recall', () => {
     try {
       await mm.init()
       await mm.note('anything')
-      const error = await mm.recall('(a+)+').catch(e => e as Error)
+      const error = (await mm.recall('(a+)+').catch(e => e as Error)) as Error
       expect(error.message).toMatch(/bad regex/)
       expect(error.message).toMatch(/ReDoS|Dangerous/)
     } finally {
@@ -182,7 +182,7 @@ describe('MemoryManager.forget 各形态', () => {
       await mm.init()
       await mm.note('a')
       await mm.note('b')
-      const error = await mm.forget('0-1').catch(e => e as Error)
+      const error = (await mm.forget('0-1').catch(e => e as Error)) as Error
       expect(error.message).toMatch(/No summary at 0-1/)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -241,6 +241,33 @@ describe('MemoryManager.updateConfig 钳制', () => {
       expect(mm.getConfig().wakeLines).toBe(200)
       expect(mm.getConfig().entryChars).toBe(500)
       // 重读实例（同 config 文件）仍读到新值
+      const mm2 = new MemoryManager(dir)
+      expect((await mm2.loadConfig()).entryChars).toBe(500)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('写盘失败时内存配置不变，恢复后更新成功（BUG-08：先写盘后提交内存）', async () => {
+    const { mm, dir } = makeManager()
+    try {
+      await mm.init()
+      expect(mm.getConfig().entryChars).toBe(280)
+
+      // 注入故障：config 目标被外部替换为同名目录（原子写 rename 必失败，等价写盘失败）
+      const configPath = path.join(dir, 'config')
+      fs.rmSync(configPath)
+      fs.mkdirSync(configPath)
+
+      await expect(mm.updateConfig({ entryChars: 500 })).rejects.toThrow()
+
+      // 内存未提交：仍为旧值（无内存/磁盘分叉）
+      expect(mm.getConfig().entryChars).toBe(280)
+
+      // 故障消除后更新成功，内存与磁盘一致
+      fs.rmSync(configPath, { recursive: true, force: true })
+      await mm.updateConfig({ entryChars: 500 })
+      expect(mm.getConfig().entryChars).toBe(500)
       const mm2 = new MemoryManager(dir)
       expect((await mm2.loadConfig()).entryChars).toBe(500)
     } finally {

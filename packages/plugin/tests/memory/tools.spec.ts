@@ -5,13 +5,53 @@
 import * as os from 'os'
 import * as path from 'path'
 import * as fs from 'fs'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { createMemoryTools } from '../../src/memory/tools.ts'
 import { MemoryService } from '../../src/memory/service.ts'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { JsonValue, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+
+/* ------------------------------------------------------------------ *
+ * 各 memory 工具的规范返回值结构化断言：ToolDefinition.execute 在类型面
+ * 返回 unknown，这里按各工具的 output schema 收窄，避免 as any。        *
+ * ------------------------------------------------------------------ */
+
+/** memory_note 返回值 */
+interface NoteToolResult {
+  id: number
+  text: string
+}
+
+/** memory_wake 返回值（workspace 仅在工作区有记忆时出现） */
+interface WakeToolResult {
+  text: string
+  totalMemories: number
+  workspace?: { cwd: string; totalMemories: number }
+}
+
+/** memory_config 返回值 */
+interface ConfigToolResult {
+  config: { entryChars: number }
+}
+
+/** memory_forget 返回值 */
+interface ForgetToolResult {
+  removed: number
+  message: string
+}
+
+/** memory_recall 返回值 */
+interface RecallToolResult {
+  totalHits: number
+  text: string
+}
 
 function fakeExec(cwd: string): ToolRunContext {
   return { agent: { session: { header: { cwd } } } } as unknown as ToolRunContext
+}
+
+/** 会话无 cwd header（无工作区上下文）的执行上下文 */
+function fakeExecNoCwd(): ToolRunContext {
+  return { agent: { session: { header: {} } } } as unknown as ToolRunContext
 }
 
 function makeTools(): { tools: Map<string, ToolDefinition>; service: MemoryService; dataRoot: string } {
@@ -33,11 +73,11 @@ describe('memory 工具（经 service 闭包）', () => {
       const globalMgr = await service.getGlobal()
       await globalMgr.note('global-tool-mem')
 
-      const noted = await note.execute({ text: 'workspace-tool-mem' }, fakeExec(wsDir))
+      const noted = (await note.execute({ text: 'workspace-tool-mem' }, fakeExec(wsDir))) as NoteToolResult
       expect(noted.id).toBe(0)
       expect(noted.text).toContain('Saved as #0.')
 
-      const woke = await wake.execute({}, fakeExec(wsDir))
+      const woke = (await wake.execute({}, fakeExec(wsDir))) as WakeToolResult
       expect(woke.text).toContain('--- Global memory ---')
       expect(woke.text).toContain('global-tool-mem')
       expect(woke.text).toContain('--- Workspace memory (')
@@ -46,9 +86,9 @@ describe('memory 工具（经 service 闭包）', () => {
       expect(woke.totalMemories).toBe(2)
       expect(woke.workspace).toEqual({ cwd: wsDir, totalMemories: 1 })
 
-      // render 纯函数投影
-      const content = wake.output.render({}, woke)
-      expect(content[0].type).toBe('text')
+      // render 纯函数投影（woke 经结构化收窄后按 JsonValue 传入纯投影）
+      const content = wake.output.render({}, woke as unknown as JsonValue)
+      expect(content[0]!.type).toBe('text')
       expect((content[0] as { text: string }).text).toContain('workspace-tool-mem')
 
       // 数据确实落在工作区目录下（非内存态）
@@ -65,7 +105,7 @@ describe('memory 工具（经 service 闭包）', () => {
     const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-ws2-'))
     try {
       const note = tools.get('memory_note')!
-      const error = await note.execute({ text: 'x'.repeat(300) }, fakeExec(wsDir)).catch(e => e as Error)
+      const error = (await note.execute({ text: 'x'.repeat(300) }, fakeExec(wsDir)).catch(e => e as Error)) as Error
       expect(error.message).toContain('Too long')
       expect(error.message).toContain('memory_config')
     } finally {
@@ -82,19 +122,19 @@ describe('memory 工具（经 service 闭包）', () => {
       const note = tools.get('memory_note')!
 
       // 纯读：默认配置
-      const read = await config.execute({}, fakeExec(wsDir))
+      const read = (await config.execute({}, fakeExec(wsDir))) as ConfigToolResult
       expect(read.config.entryChars).toBe(280)
 
       // 更新 entryChars
-      const updated = await config.execute({ entryChars: 500 }, fakeExec(wsDir))
+      const updated = (await config.execute({ entryChars: 500 }, fakeExec(wsDir))) as ConfigToolResult
       expect(updated.config.entryChars).toBe(500)
 
       // 300 字节文本现在可记录
-      const noted = await note.execute({ text: 'y'.repeat(300) }, fakeExec(wsDir))
+      const noted = (await note.execute({ text: 'y'.repeat(300) }, fakeExec(wsDir))) as NoteToolResult
       expect(noted.id).toBe(0)
 
       // 非法值：显式传入 0 报可读错误
-      const bad = await config.execute({ entryChars: 0 }, fakeExec(wsDir)).catch(e => e as Error)
+      const bad = (await config.execute({ entryChars: 0 }, fakeExec(wsDir)).catch(e => e as Error)) as Error
       expect(bad.message).toMatch(/Invalid value for memory config "entryChars"/)
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
@@ -112,7 +152,7 @@ describe('memory 工具（经 service 闭包）', () => {
       await note.execute({ text: 'second' }, fakeExec(wsDir))
       await note.execute({ text: 'third' }, fakeExec(wsDir))
 
-      const forgotten = await forget.execute({ blockId: '1' }, fakeExec(wsDir))
+      const forgotten = (await forget.execute({ blockId: '1' }, fakeExec(wsDir))) as ForgetToolResult
       expect(forgotten.removed).toBe(1)
       expect(forgotten.message).toContain('Removed memory #1')
       expect(forgotten.message).toContain('renumbered')
@@ -134,14 +174,14 @@ describe('memory 工具（经 service 闭包）', () => {
       await tools.get('memory_note')!.execute({ text: 'shared-topic-workspace' }, fakeExec(wsDir))
 
       const recall = tools.get('memory_recall')!
-      const hit = await recall.execute({ regex: 'shared-topic' }, fakeExec(wsDir))
+      const hit = (await recall.execute({ regex: 'shared-topic' }, fakeExec(wsDir))) as RecallToolResult
       expect(hit.totalHits).toBe(2)
       expect(hit.text).toContain('--- Global memory ---')
       expect(hit.text).toContain('shared-topic-global')
       expect(hit.text).toContain('--- Workspace memory (')
       expect(hit.text).toContain('shared-topic-workspace')
 
-      const miss = await recall.execute({ regex: 'nothing-at-all' }, fakeExec(wsDir))
+      const miss = (await recall.execute({ regex: 'nothing-at-all' }, fakeExec(wsDir))) as RecallToolResult
       expect(miss.totalHits).toBe(0)
       expect(miss.text).toContain('No match.')
     } finally {
@@ -156,13 +196,62 @@ describe('memory 工具（经 service 闭包）', () => {
       const globalMgr = await service.getGlobal()
       await globalMgr.note('global-only')
       const wake = tools.get('memory_wake')!
-      const woke = await wake.execute({}, fakeExec('C:/workspace/never-created'))
+      const woke = (await wake.execute({}, fakeExec('C:/workspace/never-created'))) as WakeToolResult
       expect(woke.text).toContain('global-only')
       expect(woke.text).not.toContain('Workspace memory')
       expect(woke.workspace).toBeUndefined()
       // 无磁盘副作用
       expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces'))).toBe(false)
     } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('无 cwd 上下文的 memory_note/memory_wake 走全局记忆（而非 process.cwd() 伪工作区）', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    try {
+      const note = tools.get('memory_note')!
+      const wake = tools.get('memory_wake')!
+
+      const noted = (await note.execute({ text: 'no-cwd-global' }, fakeExecNoCwd())) as NoteToolResult
+      expect(noted.id).toBe(0)
+
+      // 落在全局存储（<dataRoot>/memory），而非 memory-workspaces 下的伪工作区
+      const globalMgr = await service.getGlobal()
+      expect((await globalMgr.listEntries()).map(e => e.text)).toEqual(['no-cwd-global'])
+
+      // wake 无 cwd：仅全局段、无工作区字段、无「workspace not initialized」提示
+      const woke = (await wake.execute({}, fakeExecNoCwd())) as WakeToolResult
+      expect(woke.text).toContain('no-cwd-global')
+      expect(woke.text).not.toContain('Workspace memory')
+      expect(woke.workspace).toBeUndefined()
+
+      // 无伪工作区副作用：memory-workspaces 目录从未创建
+      expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces'))).toBe(false)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('不同启动目录下无 cwd 的调用落在同一全局 scope（不再依赖 process.cwd()）', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    // 模拟两个不同宿主启动目录：修复前 cwdOf 按 process.cwd() 派生两个不同伪工作区 scope
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValueOnce('C:/startup-dir-a')
+      .mockReturnValueOnce('C:/startup-dir-b')
+      .mockReturnValue('C:/startup-dir-default')
+    try {
+      const note = tools.get('memory_note')!
+      await note.execute({ text: 'first' }, fakeExecNoCwd())
+      await note.execute({ text: 'second' }, fakeExecNoCwd())
+
+      // 两条都写入同一全局存储（id 连续 0/1），与 process.cwd() 完全无关
+      const globalMgr = await service.getGlobal()
+      expect((await globalMgr.listEntries()).map(e => e.text)).toEqual(['first', 'second'])
+      expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces'))).toBe(false)
+    } finally {
+      cwdSpy.mockRestore()
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })

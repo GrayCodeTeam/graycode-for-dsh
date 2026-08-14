@@ -55,7 +55,7 @@ describe('buildMemorySnapshot', () => {
       await service.getGlobal().then(mgr => mgr.note('global-auto-mem'))
       const globalOnly = await buildMemorySnapshot(service, undefined)
       expect(globalOnly).not.toBeNull()
-      const globalText = globalOnly!.message.content[0]!.text
+      const globalText = (globalOnly!.message.content[0]! as { text: string }).text
       expect(globalText).toContain('--- Global memory ---')
       expect(globalText).toContain('global-auto-mem')
       expect(globalText).not.toContain('Workspace memory')
@@ -64,7 +64,7 @@ describe('buildMemorySnapshot', () => {
       await wsMgr!.note('ws-auto-mem')
       const both = await buildMemorySnapshot(service, WS)
       expect(both).not.toBeNull()
-      const bothText = both!.message.content[0]!.text
+      const bothText = (both!.message.content[0]! as { text: string }).text
       expect(bothText).toContain('--- Global memory ---')
       expect(bothText).toContain('--- Workspace memory (graycode-project) ---')
       expect(bothText).toContain('ws-auto-mem')
@@ -88,7 +88,7 @@ describe('createMemoryPreStepListener', () => {
       expect(first.kind).toBe('enter')
       if (first.kind !== 'enter') return
       expect(first.messages).toHaveLength(2)
-      expect(first.messages[1]!.content[0]!.text).toContain('mem-one')
+      expect((first.messages[1]!.content[0]! as { text: string }).text).toContain('mem-one')
 
       const second = await listener(stepPayload(agent), () => enterDecision(1))
       expect(second.kind).toBe('enter')
@@ -100,7 +100,7 @@ describe('createMemoryPreStepListener', () => {
       expect(third.kind).toBe('enter')
       if (third.kind !== 'enter') return
       expect(third.messages).toHaveLength(2)
-      expect(third.messages[1]!.content[0]!.text).toContain('mem-two')
+      expect((third.messages[1]!.content[0]! as { text: string }).text).toContain('mem-two')
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }

@@ -128,8 +128,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 };
 
 /**
- * 固定宽度记录大小（LOG 文件，1024B/条；entryChars 上限 = LOG_REC - 1 - 记录头部最大字节）。
- * 历史版本为 320B/条：旧 LOG 文件在打开时由 MemoryManager.repairLog 无损迁移到新宽度。
+ * 旧版固定宽度记录大小（LOG 文件，1024B/条；entryChars 上限 = LOG_REC - 1 - 记录头部最大字节）。
+ * 历史版本为 320B/条。新运行时不再写 LOG.txt/TREE：旧文件仅在首次打开时由
+ * MemoryLogStore 只读导入到新 JSONL 格式（见 docs/memory-format.md），常量保留供
+ * 导入解析与配置边界（entryChars ≤ 1000）使用。
  */
 export const LOG_REC = 1024;
 export const TREE_REC = 288;

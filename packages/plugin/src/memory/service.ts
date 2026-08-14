@@ -6,10 +6,11 @@
  * cache (scope key = normalized cwd, sha256 first 16 hex chars), and the
  * shared config file (<dataRoot>/memory/config) all scopes read/write.
  *
- * Workspace identity comes from the executing agent session header `cwd`
- * (falling back to `process.cwd()`); scope-key normalization is ported
- * unchanged from the legacy modules/memory/index.ts (win32 lower-casing,
- * forward slashes, sha256 prefix).
+ * Workspace identity comes from the executing agent session header `cwd`;
+ * without a cwd the tool layer falls back to global memory (legacy
+ * getMemoryManagerForTool parity — no pseudo-workspace from process.cwd()).
+ * Scope-key normalization is ported unchanged from the legacy
+ * modules/memory/index.ts (win32 lower-casing, forward slashes, sha256 prefix).
  */
 
 import * as path from 'path'

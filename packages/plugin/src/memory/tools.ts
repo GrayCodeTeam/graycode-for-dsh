@@ -5,7 +5,8 @@
  * note, recall, compress, zoom, forget, config. Behavior and canonical
  * return shapes follow the source handlers; the module-level singletons are
  * replaced by the per-plugin MemoryService, and workspace identity comes
- * from the executing agent session header `cwd` (process.cwd() fallback).
+ * from the executing agent session header `cwd`; without a cwd header the
+ * tools fall back to global memory (legacy getMemoryManagerForTool parity).
  * Read-only tools never create workspace stores (no disk side effects).
  */
 
@@ -19,9 +20,14 @@ import {
 import { type MemoryManager } from './domain/MemoryManager.ts'
 import { MemoryService, type MemoryScope } from './service.ts'
 
-/** Workspace identity of the calling agent: session header cwd, else process cwd. */
-function cwdOf(exec: ToolRunContext): string {
-  return exec.agent?.session.header.cwd ?? process.cwd()
+/**
+ * Workspace identity of the calling agent: the session header `cwd`.
+ * No header -> undefined, and the callers route to global memory — never a
+ * pseudo-workspace derived from process.cwd() (legacy getMemoryManagerForTool
+ * parity: without a workspace context, tools use the global store).
+ */
+function cwdOf(exec: ToolRunContext): string | undefined {
+  return exec.agent?.session.header.cwd
 }
 
 // ─── shared schema fragments ─────────────────────────────
@@ -186,7 +192,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
           lines.push('(Global memory already fully read)')
         }
         if (wsResult && !wsEmpty) {
-          const wsName = service.getWorkspaceFolderName(cwd)
+          const wsName = cwd ? service.getWorkspaceFolderName(cwd) : null
           lines.push(wsName ? `--- Workspace memory (${wsName}) ---` : '--- Workspace memory ---')
           appendSection(lines, wsResult, 'Workspace')
         } else if (wsSkipped && !globalEmpty) {
@@ -223,7 +229,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
           const base = globalPc ?? wsPc
           return base ? { ...base, prompt: napLines.join('\n\n') } : undefined
         })(),
-        workspace: wsResult ? { cwd, totalMemories: wsResult.totalMemories } : undefined,
+        workspace: wsResult && cwd ? { cwd, totalMemories: wsResult.totalMemories } : undefined,
       }
     },
   })
@@ -309,11 +315,15 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
 
       let wsResult: RecallResult | null = null
       let workspaceNotInitialized = false
-      const wsMgr = await service.getWorkspace(cwd, false)
-      if (wsMgr) {
-        wsResult = await wsMgr.recall(args.regex)
-      } else {
-        workspaceNotInitialized = true
+      // No cwd -> no workspace context: only global memory is searched (the
+      // hint is only shown when a workspace is expected but not initialized).
+      if (cwd) {
+        const wsMgr = await service.getWorkspace(cwd, false)
+        if (wsMgr) {
+          wsResult = await wsMgr.recall(args.regex)
+        } else {
+          workspaceNotInitialized = true
+        }
       }
 
       const appendSection = (lines: string[], result: RecallResult, label: string, name?: string | null): void => {
@@ -331,7 +341,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
         appendSection(lines, globalResult, 'Global')
       }
       if (wsResult && wsResult.totalHits > 0) {
-        appendSection(lines, wsResult, 'Workspace', service.getWorkspaceFolderName(cwd))
+        appendSection(lines, wsResult, 'Workspace', cwd ? service.getWorkspaceFolderName(cwd) : null)
       }
       if (lines.length === 0) {
         lines.push('No match.')
@@ -543,7 +553,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Changes only affect output formatting; nothing needs to be recomputed.',
     parameters: {
       wakeLines: { type: 'integer', description: 'Line budget for wake output. Larger = more detail.' },
-      entryChars: { type: 'integer', description: 'Max bytes per memory. Default 280, upper limit 1000 (fixed-width record constraint, including record header overhead).' },
+      entryChars: { type: 'integer', description: 'Max bytes per memory. Default 280, upper limit 1000 (shared config boundary kept for tool parity).' },
       partChars: { type: 'integer', description: 'Max characters per output part.' },
       partLines: { type: 'integer', description: 'Max lines per output part.' },
     },

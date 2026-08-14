@@ -1,7 +1,9 @@
 /**
- * GrayCode - Memory 记录格式工具
+ * GrayCode - Memory 旧格式（LOG/TREE 固定宽度记录）编解码工具
  *
  * LOG/TREE 固定宽度记录的编码、解析与容量校验工具。
+ * 新运行时不再写旧格式：本模块仅由 MemoryLogStore 的旧格式只读导入使用
+ * （parse/records/OLD_LOG_REC/ISO_DATE_RE），以及测试与配置边界常量。
  * 从 MemoryManager.ts 抽离（纯重构，行为不变）。
  */
 

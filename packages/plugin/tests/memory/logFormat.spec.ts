@@ -1,5 +1,9 @@
 /**
- * logFormat 编解码 round-trip + 撕裂记录 + 320→1024 LOG 迁移测试
+ * logFormat 旧格式编解码 round-trip + 撕裂记录 + 旧 LOG.txt 只读导入测试
+ *
+ * 新运行时不再写 LOG.txt/TREE 固定宽度格式：本文件验证解析器本身
+ * （pad/parse/records 供导入使用）以及「旧 320B LOG 经 MemoryManager 打开后
+ * 只读导入到新 JSONL 格式」的行为（LOG.txt 保持原样，records.jsonl 生成）。
  * （改自 gray-code-plugin backend/__tests__/memory/logMigration.test.ts）
  */
 import * as os from 'os'
@@ -44,7 +48,7 @@ describe('logFormat pad/parse/records', () => {
   })
 })
 
-describe('MemoryManager LOG 旧格式（320B/条）→ 新格式（1024B/条）迁移', () => {
+describe('旧 LOG.txt（320B/条）只读导入到新 JSONL 格式', () => {
   /** 构造一条旧格式记录（320B：「#id date text」+ 空格填充 + 换行） */
   function oldRecord(id: number, date: string, text: string): Buffer {
     const rec = Buffer.alloc(OLD_LOG_REC)
@@ -63,66 +67,72 @@ describe('MemoryManager LOG 旧格式（320B/条）→ 新格式（1024B/条）�
     return dir
   }
 
-  function readNewFormat(dir: string): Array<{ id: number; date: string; text: string }> {
-    const buf = fs.readFileSync(path.join(dir, 'LOG.txt'))
+  /** 读取新格式 records.jsonl 的条目（{id, date, text} 视图） */
+  function readJsonl(dir: string): Array<{ id: number; date: string; text: string }> {
+    const content = fs.readFileSync(path.join(dir, 'records.jsonl'), 'utf-8')
     const out: Array<{ id: number; date: string; text: string }> = []
-    for (let i = 0; i + LOG_REC <= buf.length; i += LOG_REC) {
-      const str = buf.subarray(i, i + LOG_REC).toString('utf-8').trimEnd()
-      if (!str) continue
-      const m = str.match(/^#(\d+) (\S+) (.+)$/)
-      if (m) out.push({ id: parseInt(m[1]!, 10), date: m[2]!, text: m[3]! })
+    for (const line of content.split('\n')) {
+      if (!line.trim()) continue
+      const obj = JSON.parse(line)
+      out.push({ id: obj.id, date: obj.date, text: obj.text })
     }
     return out
   }
 
-  test('旧格式文件：打开后数据无损（含多字节文本），文件被重写为新格式', async () => {
+  test('旧格式文件：打开后数据无损（含多字节文本），LOG.txt 保持原样（只读导入）', async () => {
     const texts = ['alpha', 'x'.repeat(270), '记忆-β']
     const dir = makeOldLog(texts)
+    const before = fs.readFileSync(path.join(dir, 'LOG.txt'))
     try {
       const mm = new MemoryManager(dir)
       await mm.init()
-      const entries = await mm.listEntries() // 读取触发迁移
+      const entries = await mm.listEntries() // 读取触发导入
       expect(entries.map(e => e.text)).toEqual(texts)
       expect(entries.map(e => e.id)).toEqual([0, 1, 2])
       expect(entries.every(e => e.date === '2024-01-01')).toBe(true)
 
-      const buf = fs.readFileSync(path.join(dir, 'LOG.txt'))
-      expect(buf.length % LOG_REC).toBe(0)
-      expect(buf.length % OLD_LOG_REC).not.toBe(0)
-      expect(readNewFormat(dir).map(e => e.text)).toEqual(texts)
+      // LOG.txt 只读：字节级不变，不重写为 1024 宽度
+      expect(fs.readFileSync(path.join(dir, 'LOG.txt')).equals(before)).toBe(true)
+
+      // 新格式落盘：records.jsonl 内容与旧记录一致，且带 legacyId 溯源
+      const jsonl = readJsonl(dir)
+      expect(jsonl.map(e => e.text)).toEqual(texts)
+      expect(jsonl.map(e => e.id)).toEqual([0, 1, 2])
+      const raw = fs.readFileSync(path.join(dir, 'records.jsonl'), 'utf-8')
+      const first = JSON.parse(raw.split('\n')[0]!)
+      expect(first.legacyId).toBe(0)
+      expect(first.source).toBe('legacy-import')
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('旧格式 + 撕裂尾巴：完整记录无损迁移，撕裂尾巴被丢弃', async () => {
+  test('旧格式 + 撕裂尾巴：完整记录无损导入，撕裂尾巴被丢弃', async () => {
     const dir = makeOldLog(['a', 'b'], Buffer.from('partial-garbage-tail'))
     try {
       const mm = new MemoryManager(dir)
       await mm.init()
       expect((await mm.listEntries()).map(e => e.text)).toEqual(['a', 'b'])
-      const buf = fs.readFileSync(path.join(dir, 'LOG.txt'))
-      expect(buf.length % LOG_REC).toBe(0)
-      expect(readNewFormat(dir).map(e => e.text)).toEqual(['a', 'b'])
+      expect(readJsonl(dir).map(e => e.text)).toEqual(['a', 'b'])
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('歧义尺寸（5120 = 16×320 = 5×1024）：内容判别，旧格式正确迁移', async () => {
+  test('歧义尺寸（5120 = 16×320 = 5×1024）：内容判别，按旧格式正确导入', async () => {
     const texts = Array.from({ length: 16 }, (_, i) => `memory-${i}`)
     const dir = makeOldLog(texts)
     try {
       const mm = new MemoryManager(dir)
       await mm.init()
       expect((await mm.listEntries()).map(e => e.text)).toEqual(texts)
-      expect(fs.statSync(path.join(dir, 'LOG.txt')).size).toBe(16 * LOG_REC)
+      expect(readJsonl(dir)).toHaveLength(16)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('320 对齐但内容非旧格式（垃圾）：不迁移、不抛错（fail-open）', async () => {
+  test('320 对齐但内容非旧格式（垃圾）：不导入、不抛错（fail-open），LOG.txt 不动', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-migrate-'))
     try {
       const garbage = Buffer.alloc(320, 0x58) // 'X' × 320
@@ -136,17 +146,18 @@ describe('MemoryManager LOG 旧格式（320B/条）→ 新格式（1024B/条）�
     }
   })
 
-  test('迁移后可正常追加/编辑/删除', async () => {
+  test('导入后可正常追加/编辑/删除（新格式读写路径）', async () => {
     const dir = makeOldLog(['a', 'b', 'c'])
     try {
       const mm = new MemoryManager(dir)
       await mm.init()
-      await mm.listEntries() // 迁移
+      await mm.listEntries() // 导入
       expect((await mm.note('d')).id).toBe(3)
       await mm.updateEntry(0, 'A')
       expect((await mm.listEntries()).map(e => e.text)).toEqual(['A', 'b', 'c', 'd'])
       await mm.deleteEntry(1)
       expect((await mm.listEntries()).map(e => e.text)).toEqual(['A', 'c', 'd'])
+      expect((await mm.listEntries()).map(e => e.id)).toEqual([0, 1, 2])
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

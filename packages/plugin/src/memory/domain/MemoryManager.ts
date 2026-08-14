@@ -2,12 +2,13 @@
  * GrayCode - MemoryManager
  *
  * OptMem 风格永久记忆系统的核心引擎。
- * 负责 LOG（追加式日志）和 TREE（二叉树摘要缓存）的读写编排、
+ * 负责记录（追加式 JSONL 日志）和摘要（二叉树摘要缓存）的读写编排、
  * cover 算法、压缩管理等。
  *
- * 底层文件读写（LOG/TREE 记录、旧格式迁移、删除/截断）已抽离到 MemoryLogStore，
- * 记录格式工具抽离到 logFormat，cover 算法抽离到 cover，config 文件读写抽离到 configFile。
- * 本类保持原有对外 API 完全不变。
+ * 底层文件读写（records.jsonl / summaries.jsonl、旧 LOG.txt/TREE 只读导入、
+ * 删除/截断）已抽离到 MemoryLogStore，记录格式工具抽离到 logFormat（旧格式
+ * 解析）与 memoryFormat（新格式 schema），cover 算法抽离到 cover，
+ * config 文件读写抽离到 configFile。本类保持原有对外 API 完全不变。
  */
 
 import * as fs from 'fs/promises';
@@ -65,8 +66,9 @@ export class MemoryManager {
 
     // ─── 底层读写委托（方法体已抽离到 MemoryLogStore） ──────────────
 
-    private async ensureLogMigrated(): Promise<void> {
-        await this.store.ensureLogMigrated();
+    /** 确保存储就绪（新格式存在或旧格式已只读导入；等价旧 ensureLogMigrated） */
+    private async ensureReady(): Promise<void> {
+        await this.store.ensureReady();
     }
 
     private async logLen(): Promise<number> {
@@ -202,7 +204,7 @@ export class MemoryManager {
      * @param T 快照时的记忆总数（不传则用当前总数）
      */
     async wake(part?: number, T?: number): Promise<WakeResult> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         const now = await this.logLen();
         const snapshotT = T ?? now;
         if (snapshotT > now) {
@@ -334,7 +336,7 @@ export class MemoryManager {
         }
 
         const today = new Date().toISOString().slice(0, 10);
-        // 整条固定宽度记录容量校验（含头部开销）在 logAppend 锁内按真实 id 执行
+        // 长度校验在 note 入口按 entryChars 执行（新格式 JSONL 无固定宽度容量限制）
         const id = await this.logAppend([{ date: today, text: trimmed }]);
 
         const nap = await this.nextNap(id + 1);
@@ -345,7 +347,7 @@ export class MemoryManager {
      * recall: 正则搜索全部记忆。
      */
     async recall(regex: string): Promise<RecallResult> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         // ReDoS 防护：长度上限 + 危险模式检测 + 构造异常捕获（共享 regexGuard）
         const guarded = validateRegexPattern(regex, 'i');
         if (!guarded.ok) {
@@ -394,7 +396,7 @@ export class MemoryManager {
      * @param summary 压缩后的摘要文本
      */
     async compress(blockId?: string, summary?: string): Promise<CompressResult> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         const T = await this.logLen();
         let said = false;
 
@@ -430,18 +432,13 @@ export class MemoryManager {
                 const trimmed = (summary || '').trim();
                 if (!trimmed) die('Empty summary.');
                 if (trimmed.includes('\n') || trimmed.includes('\r')) {
-                    // 树摘要写入固定宽度记录，含换行会破坏「一行摘要」不变量；
-                    // 与 note/updateEntry 对记忆文本的校验口径一致。
+                    // 摘要含换行会破坏「一行摘要」不变量；与 note/updateEntry 对记忆文本的校验口径一致。
                     die('A summary is one line.');
                 }
                 const byteLen = Buffer.byteLength(trimmed, 'utf-8');
-                // 修改原因：树摘要写入 treePut 用 TREE_REC=288 的固定宽度记录，pad() 只容纳
-                //           TREE_REC-1=287 字节；entryChars 上限按 LOG 记录宽度（约 1000）校验，
-                //           配置调高后 288+ 字节的摘要能通过 entryChars 校验，却在 treePut 的
-                //           pad() 处抛晦涩的 "Too long"（拒绝而非损坏，但体验差）。
-                // 修改方式：compress 的摘要预算按树记录宽度钳制为 min(entryChars, TREE_REC-1)，
-                //           校验失败的错误信息与真实落盘容量一致，且与 napPrompt 提示同口径。
-                // 修改目的：配置调高后 compress 不再因记录宽度限制报错。
+                // 摘要预算钳制为 min(entryChars, TREE_REC-1)：TREE_REC-1=287 是旧固定宽度树记录
+                // 的容量上限，新格式 summaries.jsonl 无此限制，但保留该钳制以维持工具语义不变
+                //（napPrompt 提示语与 compress 校验使用同一预算，模型不会生成必然被拒的超长摘要）。
                 const summaryLimit = Math.min(this.config.entryChars, TREE_REC - 1);
                 if (byteLen > summaryLimit) {
                     die(`Too long: ${byteLen} bytes, limit ${summaryLimit}.`);
@@ -468,7 +465,7 @@ export class MemoryManager {
      * zoom: 展开树节点查看两半。
      */
     async zoom(blockId: string): Promise<ZoomResult> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         const [lo, hi] = this.parseBlockId(blockId);
         const T = await this.logLen();
         if (lo >= T) {
@@ -534,14 +531,13 @@ export class MemoryManager {
     /**
      * listEntries: 返回所有原始记忆条目。
      *
-     * 流式逐块扫描 LOG（logScan 每块最多 LOG_REC * 4096 字节），
-     * 不再一次性分配 T * LOG_REC 字节的 Buffer 全量读入——记忆量大时
-     * （如 100 万条 ≈ 1GB）会显著抬高峰值内存。
+     * 新格式存储把 records.jsonl 全量缓存在内存（mtime+size 一致性校验），
+     * logScan 在锁内取快照后逐条 yield，不再做逐块文件 IO。
      *
      * @param limit 可选：最多返回的条目数（不传则返回全部）
      */
     async listEntries(limit?: number): Promise<LogEntry[]> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         const entries: LogEntry[] = [];
         for await (const e of this.logScan()) {
             entries.push(e);
@@ -552,13 +548,13 @@ export class MemoryManager {
 
     /** 当前原始记忆总数（O(1)，仅一次 stat；供设置页列表分页/截断展示） */
     async totalEntries(): Promise<number> {
-        await this.ensureLogMigrated();
+        await this.ensureReady();
         return this.logLen();
     }
 
     /**
-     * updateEntry: 原地覆写单条原始记忆的文本。
-     * 新文本必须不超过固定宽度（LOG_REC - 1 字节，即 1023 字节）。
+     * updateEntry: 原地覆写单条原始记忆的文本（保留 id/日期，更新版本与时间戳）。
+     * 新文本不得超过 entryChars（默认 280，上限 1000）。
      */
     async updateEntry(id: number, text: string): Promise<void> {
         await this.store.updateEntry(id, text);
@@ -604,7 +600,7 @@ export class MemoryManager {
 
     async updateConfig(updates: Partial<MemoryConfig>): Promise<MemoryConfig> {
         // 逐项校验：非法值直接抛错（与模块内 die() 的错误风格一致，工具层会转成失败结果），
-        // 避免 entryChars 被设为 >1000 后所有 note/compress 都在 pad() 抛 Too long。
+        // 避免 entryChars 被设为 >1000 后所有 note/compress 在长度校验处抛晦涩错误。
         const validated: Partial<MemoryConfig> = {};
         for (const [key, min, max] of MEMORY_CONFIG_BOUNDS) {
             const value = updates[key];
@@ -614,8 +610,11 @@ export class MemoryManager {
             }
             validated[key] = value;
         }
-        this.config = { ...this.config, ...validated };
-        await this.writeConfig(this.config);
+        // BUG-08: 先写盘成功再提交内存——写盘失败（磁盘满/权限/rename 重试耗尽）时
+        // 抛错且内存保持旧值，避免「工具报失败但进程内配置已生效」的内存/磁盘分叉。
+        const next: MemoryConfig = { ...this.config, ...validated };
+        await this.writeConfig(next);
+        this.config = next;
         // B-2: 返回拷贝，调用方修改返回对象不能绕过校验污染内部 config
         return { ...this.config };
     }

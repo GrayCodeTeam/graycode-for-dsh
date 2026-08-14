@@ -1,9 +1,19 @@
 /**
- * GrayCode - Memory LOG/TREE 底层存储
+ * GrayCode - Memory 新格式底层存储
  *
- * 负责 LOG（追加式日志）与 TREE（二叉树摘要缓存）的读写、旧格式迁移、
- * 槽位位图缓存，以及删除/截断等文件级操作。所有操作由内部 AsyncLock 串行化。
- * 从 MemoryManager.ts 抽离（纯重构，行为不变）。
+ * 新运行时写入格式（JSONL，schema 见 memoryFormat.ts / docs/memory-format.md）：
+ * - records.jsonl    追加式条目日志（一行一条 StoredRecord；损坏行以 null 占位
+ *                    保留位置，logLen 口径与旧固定宽度物理计数一致）；
+ * - summaries.jsonl  二叉树摘要（一行一条 StoredSummary，键 "lo:hi"）；
+ * - meta.json        schema 版本 + 旧格式导入标记。
+ *
+ * 旧 LOG.txt（320/1024B 固定宽度）与 TREE/（288B 摘要槽位）只在首次打开时
+ * 只读导入（importLegacyLocked，复用 logFormat.ts 的解析器），导入后新运行时
+ * 不再写旧格式；旧文件保留不动（可人工恢复/审计）。records.jsonl 一旦存在
+ * （哪怕为空）即视为已就绪，不会重复导入。
+ *
+ * 所有读写由内部 AsyncLock 串行化；记录/摘要带 mtime+size 一致性缓存，
+ * 同一目录被多个实例（测试/未来多进程）访问时也能看到彼此的写入。
  */
 
 import * as fs from 'fs/promises';
@@ -14,26 +24,35 @@ import {
 } from './types.ts';
 import { AsyncLock } from './AsyncLock.ts';
 import {
-    assertRecordFits, die, ISO_DATE_RE, OLD_LOG_REC, pad, parse, records,
+    die, ISO_DATE_RE, OLD_LOG_REC, parse, records,
 } from './logFormat.ts';
+import { renameConfigOverwrite } from './configFile.ts';
+import {
+    MEMORY_FORMAT_VERSION,
+    type LegacyImportInfo,
+    type MemoryMeta,
+    type StoredRecord,
+    type StoredSummary,
+    buildMetaContent,
+    decodeRecordLine,
+    decodeSummaryLine,
+    encodeRecordLine,
+    encodeSummaryLine,
+    summaryKey,
+} from './memoryFormat.ts';
+
+/** 从任意异常中提取 errno code（无则 undefined） */
+function errnoCode(e: unknown): string | undefined {
+    if (e && typeof e === 'object' && 'code' in e) {
+        const code = (e as { code?: unknown }).code;
+        if (typeof code === 'string') return code;
+    }
+    return undefined;
+}
 
 export class MemoryLogStore {
     private dir: string;
     private lock = new AsyncLock();
-    /**
-     * 当前 LOG 记录宽度：新格式 1024（默认）；迁移失败且文件为旧格式（320 对齐非 1024 对齐）
-     * 时降级为 320——按 1024 解析旧记录会产生空结果/混拼乱码（见 repairLog）。
-     */
-    private logRecMode: number = LOG_REC;
-
-    /**
-     * TREE 槽位占用位图缓存（size -> { mtimeMs, fileSize, slots }）：
-     * pending/pendingCount 逐槽 open/read 判断空槽在记忆量大时是 O(T) 次文件句柄循环，
-     * 缓存整文件位图后一次 stat 命中即可复用；slots[k] = true 表示槽位 k 有非空记录。
-     * 写路径（treePut/treeDrop/deleteRange/deleteEntries/truncateLog）在锁内主动失效，
-     * 读路径以 mtime+size 一致性兜底并发窗口，双保险避免陈旧位图。
-     */
-    private treeSlotCache = new Map<number, { mtimeMs: number; fileSize: number; slots: boolean[] }>();
 
     /**
      * 配置访问器：updateEntry 需要 entryChars 做写入前校验。
@@ -41,302 +60,499 @@ export class MemoryLogStore {
      */
     private getConfig: () => MemoryConfig;
 
+    /**
+     * records.jsonl 缓存（{ mtimeMs, fileSize, records }）：
+     * 写路径在锁内更新数组（copy-on-write，快照安全），读路径以 mtime+size
+     * 一致性兜底并发窗口（多实例共享目录时可见彼此写入）。
+     * records[k] === null 表示该位置是损坏/空行占位。
+     */
+    private recordsCache: { mtimeMs: number; fileSize: number; records: Array<StoredRecord | null> } | null = null;
+
+    /**
+     * summaries.jsonl 缓存（{ mtimeMs, fileSize, map }），键 "lo:hi"。
+     * 树是缓存：文件缺失/损坏只导致 pending 重建，不阻断读写。
+     */
+    private summariesCache: { mtimeMs: number; fileSize: number; map: Map<string, StoredSummary> } | null = null;
+
+    /** meta.json 版本已校验过（每实例一次；导入路径自行置位） */
+    private metaChecked = false;
+
     constructor(dir: string, getConfig: () => MemoryConfig) {
         this.dir = dir;
         this.getConfig = getConfig;
     }
 
-    /** 初始化存储目录结构（创建 TREE 目录与空 LOG.txt） */
+    /** 初始化存储目录结构（新格式只需目录；records.jsonl 在首次访问时创建/导入） */
     async initStorage(): Promise<void> {
-        await fs.mkdir(path.join(this.dir, 'TREE'), { recursive: true });
-        const logPath = this.logPath();
-        try {
-            await fs.access(logPath);
-        } catch {
-            await fs.writeFile(logPath, '');
-        }
+        await fs.mkdir(this.dir, { recursive: true });
     }
 
     // ─── 路径工具 ──────────────────────────────
 
-    private logPath(): string {
+    private recordsPath(): string {
+        return path.join(this.dir, 'records.jsonl');
+    }
+
+    private summariesPath(): string {
+        return path.join(this.dir, 'summaries.jsonl');
+    }
+
+    private metaPath(): string {
+        return path.join(this.dir, 'meta.json');
+    }
+
+    private legacyLogPath(): string {
         return path.join(this.dir, 'LOG.txt');
     }
 
-    private treePath(size: number): string {
-        return path.join(this.dir, 'TREE', String(size));
+    private legacyTreeDir(): string {
+        return path.join(this.dir, 'TREE');
     }
 
-    // ─── 底层读写 ──────────────────────────────
-
-    /** 修复部分写入的尾部记录（crash recovery，用于 TREE 文件） */
-    private async repair(filePath: string, rec: number): Promise<void> {
-        try {
-            const stat = await fs.stat(filePath);
-            if (stat.size % rec !== 0) {
-                const handle = await fs.open(filePath, 'r+');
-                try {
-                    await handle.truncate(stat.size - (stat.size % rec));
-                } finally {
-                    await handle.close();
-                }
-            }
-        } catch {
-            // 文件不存在，忽略
-        }
-    }
+    // ─── 就绪与旧格式导入 ─────────────────────────
 
     /**
-     * 修复 LOG 文件（所有 LOG 访问的统一前置入口，必须在锁内调用）：
-     * 1. 旧格式（320B/条）无损迁移到新格式（LOG_REC=1024B/条）；
-     * 2. 撕裂的尾部半条记录按新宽度截断（与 repair() 语义一致）。
-     *
-     * 格式判定（按文件大小）：
-     * - size % LOG_REC === 0 且非 320 对齐 → 新格式，无需处理；
-     * - 其余（旧格式 320 对齐 / 撕裂尾巴 / 同时 320·1024 对齐的歧义尺寸）→ 先尝试严格迁移：
-     *   tryMigrateLog 要求「全部完整 320 切片均为合法记录（id 连续、日期 ISO）」才执行重写，
-     *   天然区分旧格式与新格式——新格式文件的第二个 320 切片必然落在第一条 1024 记录内部，
-     *   解析失败，因此歧义尺寸（lcm=5120 的倍数）无需额外判别；
-     * - 迁移未执行时保持现状（fail-open）：对齐文件不动（可能是损坏的旧/新格式，避免截断丢数据），
-     *   非对齐文件按 LOG_REC 截断撕裂尾（与旧 repair 行为一致）。
+     * 确保存储就绪（所有公开读写的统一前置入口，内部加锁）：
+     * 新格式（records.jsonl）存在则校验 meta 版本后返回；否则执行旧格式只读导入
+     * （或建空新格式）。等价于旧实现的 ensureLogMigrated，语义从「宽度迁移」
+     * 变为「新格式就绪 + 旧格式一次性导入」。
      */
-    private async repairLog(): Promise<void> {
-        const logPath = this.logPath();
-        let size: number;
-        try {
-            size = (await fs.stat(logPath)).size;
-        } catch (e: any) {
-            if (e?.code !== 'ENOENT') throw e;
-            this.logRecMode = LOG_REC; // 文件不存在，忽略（与 repair 同口径）
-            return;
-        }
-        if (size === 0) {
-            this.logRecMode = LOG_REC;
-            return;
-        }
-
-        // 纯新格式（1024 对齐且非 320 对齐）：无需处理
-        if (size % LOG_REC === 0 && size % OLD_LOG_REC !== 0) {
-            this.logRecMode = LOG_REC;
-            return;
-        }
-
-        // 其余：先尝试严格迁移（旧格式 / 旧格式+撕裂尾 / 歧义尺寸中的旧格式）
-        if (await this.tryMigrateLog()) {
-            this.logRecMode = LOG_REC;
-            return;
-        }
-
-        // 迁移未执行：保持现状（fail-open，不丢数据）
-        if (size % LOG_REC === 0 || size % OLD_LOG_REC === 0) {
-            // 对齐文件不动。旧格式（320 对齐非 1024 对齐）→ 读/写降级为 320 宽度：
-            // 迁移失败说明含损坏记录，按 1024 解析会产生空结果/混拼乱码，
-            // 降级后损坏记录被跳过、合法记录仍可读。
-            this.logRecMode = size % LOG_REC === 0 ? LOG_REC : OLD_LOG_REC;
-            return;
-        }
-
-        // 非对齐（撕裂尾）：必须先判定格式倾向再截断——迁移失败场景下若文件是旧格式
-        // （320 对齐的主体 + 撕裂尾），按 1024 截断会直接删掉旧格式字节（M1）。
-        // probe 前两条 320 记录判定；probe 无法判定（<640B 小文件）时取截断损失更小的宽度。
-        const handle = await fs.open(logPath, 'r');
-        let legacyLike: boolean;
-        try {
-            const legacy = await this.probeLegacyFormat(handle, size);
-            legacyLike = legacy !== null ? legacy : size % OLD_LOG_REC <= size % LOG_REC;
-        } finally {
-            await handle.close();
-        }
-        if (legacyLike) {
-            await this.truncateLogTail(logPath, size, OLD_LOG_REC);
-            this.logRecMode = OLD_LOG_REC;
-            return;
-        }
-        await this.truncateLogTail(logPath, size, LOG_REC);
-        this.logRecMode = LOG_REC;
-    }
-
-    /**
-     * 快速判别文件是否为旧格式（320B/条）：前两条 320 记录必须都是合法记录（id 0/1、ISO 日期）。
-     *
-     * 返回 true = 旧格式嫌疑；false = 确非旧格式（probe 读够且前两条不合法）；
-     * null = 文件过小（< 640B，仅一条）无法 probe。
-     * 复用于迁移判定（tryMigrateLog）与迁移失败后的截断宽度/降级判定（repairLog）。
-     */
-    private async probeLegacyFormat(
-        handle: import('fs').promises.FileHandle,
-        fileSize: number
-    ): Promise<boolean | null> {
-        if (fileSize < OLD_LOG_REC * 2) return null;
-        const probe = Buffer.alloc(OLD_LOG_REC * 2);
-        const { bytesRead: probeRead } = await handle.read(probe, 0, probe.length, 0);
-        if (probeRead < OLD_LOG_REC * 2) return null;
-        const p0 = probe.subarray(0, OLD_LOG_REC).toString('utf-8').trimEnd();
-        const p1 = probe.subarray(OLD_LOG_REC, OLD_LOG_REC * 2).toString('utf-8').trimEnd();
-        const e0 = p0 ? parse(p0) : null;
-        const e1 = p1 ? parse(p1) : null;
-        if (!e0 || e0.id !== 0 || !ISO_DATE_RE.test(e0.date) ||
-            !e1 || e1.id !== 1 || !ISO_DATE_RE.test(e1.date)) {
-            return false; // 非旧格式
-        }
-        return true;
-    }
-
-    /**
-     * 把 LOG 从旧格式（OLD_LOG_REC=320B/条）无损迁移到新格式（LOG_REC=1024B/条）：
-     * 按 320 逐条解析（复用 parse()），重新 pad 成 1024 写入 tmp，rename 原子替换。
-     *
-     * 判定/幂等：只有「全部完整 320 切片均为合法记录（id 连续、日期 ISO）」的文件才会被
-     * 迁移——新格式或损坏文件任一切片不合法即中止，原文件不动（fail-open，不丢数据）；
-     * 迁移成功后文件为 1024 对齐，后续调用直接返回 false。
-     * 撕裂尾巴：只迁移完整切片，尾部半条记录被丢弃（与 repair 截断语义一致）。
-     * 崩溃安全：写 LOG.txt.tmp 后 rename 原子替换；任何失败/中止都清理 tmp。
-     * 必须在锁内调用（写路径经 repairLog，读路径经 ensureLogMigrated）。
-     */
-    private async tryMigrateLog(): Promise<boolean> {
-        const logPath = this.logPath();
-        const tmpPath = `${logPath}.tmp`;
-        let migrated = false;
-        try {
-            const handle = await fs.open(logPath, 'r');
-            let valid = false;
-            try {
-                const stat = await handle.stat();
-                if (stat.size >= OLD_LOG_REC) {
-                    // 快速判别：前两条 320 记录必须都合法（id 0/1、ISO 日期），否则不是旧格式
-                    // ——新格式/损坏文件的第二个 320 切片必然落在第一条 1024 记录内部，解析失败。
-                    // 避免大文件每次访问都全量扫描（歧义尺寸下 1024 对齐的新文件也会走到这里）。
-                    // probe 返回 null（<640B 单条记录小文件）时不拦截，交给全量校验判定。
-                    const legacy = await this.probeLegacyFormat(handle, stat.size);
-                    if (legacy === false) return false; // 非旧格式
-                }
-                    const outHandle = await fs.open(tmpPath, 'w');
-                    try {
-                        valid = true;
-                        let outCount = 0;
-                        const CHUNK = 4096; // 每次最多处理的旧记录条数（≈1.3MB）
-                        for (let base = 0; base < stat.size; base += CHUNK * OLD_LOG_REC) {
-                            const bytes = Math.min(CHUNK * OLD_LOG_REC, stat.size - base);
-                            const buf = Buffer.alloc(bytes);
-                            const { bytesRead } = await handle.read(buf, 0, bytes, base);
-                            const effective = Math.floor(bytesRead / OLD_LOG_REC);
-                            const kept: Buffer[] = [];
-                            for (let i = 0; i < effective; i++) {
-                                const idx = base / OLD_LOG_REC + i; // 旧格式 id 连续，切片序号即期望 id
-                                const slice = buf.subarray(i * OLD_LOG_REC, (i + 1) * OLD_LOG_REC);
-                                const str = slice.toString('utf-8').trimEnd();
-                                const entry = str ? parse(str) : null;
-                                // 严格校验：任一完整切片不是合法记录（空/损坏/id 不连续/日期非 ISO）
-                                // 即中止迁移——防止把新格式或损坏文件误判为旧格式而重写损坏。
-                                if (!entry || entry.id !== idx || !ISO_DATE_RE.test(entry.date)) {
-                                    valid = false;
-                                    break;
-                                }
-                                kept.push(pad(`#${outCount} ${entry.date} ${entry.text}`, LOG_REC));
-                                outCount++;
-                            }
-                            if (!valid) break;
-                            if (kept.length > 0) await outHandle.write(Buffer.concat(kept));
-                        }
-                    } finally {
-                        await outHandle.close();
-                    }
-            } finally {
-                await handle.close();
-            }
-            if (valid) {
-                // 读写句柄都已关闭后再 rename（Windows 下目标被占用会 EPERM，与 deleteRange 同理）
-                await fs.rename(tmpPath, logPath);
-                migrated = true;
-            } else {
-                await fs.unlink(tmpPath).catch(() => { /* 无残留则忽略 */ });
-            }
-        } catch (e: any) {
-            // fail-open：迁移失败不影响正常读写——原文件不动，仅告警（残留 tmp 由下次尝试清理）
-            try { await fs.unlink(tmpPath); } catch { /* 忽略 */ }
-            console.warn(`[MemoryManager] LOG migration skipped (${e?.message ?? e}); the file is kept as-is.`);
-        }
-        return migrated;
-    }
-
-    /** 截断撕裂的尾部半条记录（与 repair(filePath, rec) 的截断语义一致，宽度为 rec） */
-    private async truncateLogTail(logPath: string, size: number, rec: number = LOG_REC): Promise<void> {
-        const handle = await fs.open(logPath, 'r+');
-        try {
-            await handle.truncate(size - (size % rec));
-        } finally {
-            await handle.close();
-        }
-    }
-
-    /**
-     * 确保 LOG 已迁移到新格式（读取路径的最早入口）。
-     * 只允许在未持锁的调用链中调用（wake/recall/compress/zoom/listEntries/totalEntries 等
-     * 公开读取入口）；持锁路径（写操作）直接调用 repairLog——本方法内部会取锁，不可重入。
-     */
-    async ensureLogMigrated(): Promise<void> {
+    async ensureReady(): Promise<void> {
         const release = await this.lock.acquire();
         try {
-            await this.repairLog();
+            await this.ensureReadyLocked();
         } finally {
             release();
         }
     }
 
-    /** 获取记录数量 */
-    private async count(filePath: string, rec: number): Promise<number> {
+    /** 锁内版本（写路径在锁内直接调用） */
+    private async ensureReadyLocked(): Promise<void> {
+        if (await this.newFormatPresent()) {
+            await this.checkMetaLocked();
+            return;
+        }
+        await this.importLegacyLocked();
+    }
+
+    /** records.jsonl 是否存在（存在即视为已就绪，无论是否为空） */
+    private async newFormatPresent(): Promise<boolean> {
         try {
-            const stat = await fs.stat(filePath);
-            return Math.floor(stat.size / rec);
-        } catch (e: any) {
-            // 只有「文件不存在」视为空；其余 IO 错误应上抛而不是静默当作 0 条，
-            // 否则 wake 会在文件实际不可读时谎报「没有记忆」。
-            if (e?.code !== 'ENOENT') throw e;
-            return 0;
+            await fs.access(this.recordsPath());
+            return true;
+        } catch (e: unknown) {
+            if (errnoCode(e) === 'ENOENT') return false;
+            throw e;
         }
     }
 
-    async logLen(): Promise<number> {
-        return this.count(this.logPath(), this.logRecMode);
+    /**
+     * 校验 meta.json 版本（每实例一次，宽容策略）：
+     * - 缺失/损坏：告警后继续（meta 仅作记录，不阻断读写）；
+     * - formatVersion 过新：拒绝（数据由更新版本运行时写入，可能不兼容）。
+     */
+    private async checkMetaLocked(): Promise<void> {
+        if (this.metaChecked) return;
+        this.metaChecked = true;
+        let content: string;
+        try {
+            content = await fs.readFile(this.metaPath(), 'utf-8');
+        } catch (e: unknown) {
+            if (errnoCode(e) === 'ENOENT') return;
+            throw e;
+        }
+        let raw: unknown;
+        try {
+            raw = JSON.parse(content);
+        } catch {
+            console.warn('[MemoryManager] meta.json is corrupted; ignoring it.');
+            return;
+        }
+        if (raw !== null && typeof raw === 'object') {
+            const formatVersion = (raw as Record<string, unknown>).formatVersion;
+            if (typeof formatVersion === 'number' && formatVersion > MEMORY_FORMAT_VERSION) {
+                die(`memory meta: formatVersion ${formatVersion} is newer than supported ` +
+                    `${MEMORY_FORMAT_VERSION}; upgrade the plugin.`);
+            }
+        }
     }
 
-    /** 追加日志记录，返回起始 ID */
-    async logAppend(items: Array<{ date: string; text: string }>): Promise<number> {
+    /**
+     * 旧格式只读导入（一次性，锁内调用）：
+     * 1. LOG.txt：探测记录宽度（前两条 320B 切片 id 0/1 + ISO 日期 → 320，否则
+     *    1024；<640B 单条小文件按切片 0 判定），用 records() 只解析完整记录
+     *    （损坏行/撕裂尾跳过，与旧解析器同口径）；损坏切片以 null 占位保留位置
+     *    （logLen 与旧物理计数一致），合法条目重编号写入并记录 legacyId；
+     * 2. TREE/：每个 2 幂 size 文件按 TREE_REC 槽位解析；空槽/损坏槽跳过（隔离），
+     *    槽位文本兼容两种形态（纯摘要文本 / "#id date text"）；
+     * 3. 提交：records.jsonl → summaries.jsonl → meta.json（每文件 tmp+rename
+     *    原子替换）；LOG.txt/TREE 保持只读，永不改写或删除。
+     *
+     * 幂等：提交前复查 records.jsonl（另一实例可能已完成导入）→ 放弃本次；
+     * 崩溃安全：先提交 records 再提交 summaries——中途崩溃最多丢失摘要（可重建
+     * 缓存），records 已提交则下次直接使用，不会重复导入。
+     */
+    private async importLegacyLocked(): Promise<void> {
+        const imported: Array<StoredRecord | null> = [];
+        let logInfo: { rec: number; imported: number; skipped: number } | null = null;
+        let legacySeen = false;
+
+        const logPath = this.legacyLogPath();
+        try {
+            const stat = await fs.stat(logPath);
+            legacySeen = true;
+            if (stat.size > 0) {
+                const rec = await this.probeLegacyRec(logPath, stat.size);
+                const buf = await fs.readFile(logPath);
+                const parsed = records(buf, rec);
+                const totalSlices = Math.floor(buf.length / rec);
+                // 位置保留：合法记录按 id 归位，损坏/空切片 → null 占位。
+                // id 与位置不一致的异常记录（人工编辑破坏连续性）不导入（占位跳过）。
+                let parsedIdx = 0;
+                for (let i = 0; i < totalSlices; i++) {
+                    const entry = parsed[parsedIdx];
+                    if (entry && entry.id === i) {
+                        imported.push(this.toImportedRecord(imported.length, entry));
+                        parsedIdx++;
+                    } else {
+                        imported.push(null);
+                    }
+                }
+                logInfo = {
+                    rec,
+                    imported: imported.filter(r => r !== null).length,
+                    skipped: totalSlices - imported.filter(r => r !== null).length,
+                };
+            }
+        } catch (e: unknown) {
+            if (errnoCode(e) !== 'ENOENT') throw e;
+        }
+
+        const treeSummaries: StoredSummary[] = [];
+        let treeInfo: { imported: number; skipped: number; files: string[] } = {
+            imported: 0,
+            skipped: 0,
+            files: [],
+        };
+        try {
+            const names = await fs.readdir(this.legacyTreeDir());
+            legacySeen = true;
+            for (const name of names) {
+                if (!/^\d+$/.test(name)) continue;
+                const size = parseInt(name, 10);
+                if (size < 1 || (size & (size - 1)) !== 0) continue; // 只认 2 的幂
+                try {
+                    const buf = await fs.readFile(path.join(this.legacyTreeDir(), name));
+                    const slots = Math.floor(buf.length / TREE_REC);
+                    for (let k = 0; k < slots; k++) {
+                        const str = buf.subarray(k * TREE_REC, (k + 1) * TREE_REC).toString('utf-8').trimEnd();
+                        if (!str) {
+                            treeInfo.skipped++; // 空槽（treeDrop 清空/从未压缩）
+                            continue;
+                        }
+                        const entry = parse(str);
+                        let text: string;
+                        let date: string | undefined;
+                        if (entry && ISO_DATE_RE.test(entry.date)) {
+                            text = entry.text;
+                            date = entry.date;
+                        } else {
+                            text = str;
+                            date = undefined;
+                        }
+                        treeSummaries.push({ lo: k * size, hi: (k + 1) * size, date, text, source: 'legacy-import' });
+                        treeInfo.imported++;
+                    }
+                    if (slots > 0) treeInfo.files.push(name);
+                } catch (e: unknown) {
+                    // 单个树文件损坏：隔离跳过，不中断其余文件
+                    console.warn(`[MemoryManager] TREE/${name} import skipped ` +
+                        `(${e instanceof Error ? e.message : String(e)})`);
+                    treeInfo.skipped++;
+                }
+            }
+        } catch (e: unknown) {
+            if (errnoCode(e) !== 'ENOENT') throw e;
+        }
+
+        // 提交前复查：另一实例可能已完成导入（记录文件已出现）→ 放弃本次
+        if (await this.newFormatPresent()) return;
+
+        await this.writeFileAtomic(
+            this.recordsPath(),
+            imported.map(r => (r ? encodeRecordLine(r) : '\n')).join(''),
+        );
+        await this.writeFileAtomic(
+            this.summariesPath(),
+            treeSummaries.map(encodeSummaryLine).join(''),
+        );
+        const importedFromLegacy: LegacyImportInfo | null = legacySeen ? {
+            at: new Date().toISOString(),
+            logRec: logInfo?.rec ?? 0,
+            logImported: logInfo?.imported ?? 0,
+            logSkipped: logInfo?.skipped ?? 0,
+            treeImported: treeInfo.imported,
+            treeSkipped: treeInfo.skipped,
+            files: treeInfo.files,
+        } : null;
+        const meta: MemoryMeta = {
+            formatVersion: MEMORY_FORMAT_VERSION,
+            importedFromLegacy,
+        };
+        await this.writeFileAtomic(this.metaPath(), buildMetaContent(meta));
+
+        // 缓存失效：下次加载按新文件重建；meta 已由本次写入校验
+        this.recordsCache = null;
+        this.summariesCache = null;
+        this.metaChecked = true;
+    }
+
+    /** 导入用：把旧格式条目转为新格式记录（重编号 + legacyId 溯源 + 审计来源） */
+    private toImportedRecord(id: number, entry: LogEntry): StoredRecord {
+        const now = new Date().toISOString();
+        return {
+            id,
+            date: entry.date,
+            text: entry.text,
+            createdAt: now,
+            updatedAt: now,
+            version: 1,
+            source: 'legacy-import',
+            tags: [],
+            legacyId: entry.id,
+        };
+    }
+
+    /**
+     * 探测旧 LOG 记录宽度（与旧 probeLegacyFormat 同口径，用于导入判别）：
+     * - 前两条 320B 切片均为合法记录（id 0/1 + ISO 日期）→ 320（旧格式）；
+     * - <640B 单条小文件：整文件按 320 解析一次，切片 0 合法（id 0 + ISO）→ 320；
+     * - 其余 → 1024（records() 逐条解析，损坏行跳过）。
+     */
+    private async probeLegacyRec(logPath: string, fileSize: number): Promise<number> {
+        const probeLen = Math.min(OLD_LOG_REC * 2, fileSize);
+        const probe = Buffer.alloc(probeLen);
+        const handle = await fs.open(logPath, 'r');
+        try {
+            const { bytesRead } = await handle.read(probe, 0, probeLen, 0);
+            const got = probe.subarray(0, bytesRead);
+            if (fileSize >= OLD_LOG_REC * 2 && got.length >= OLD_LOG_REC * 2) {
+                const e0 = parse(got.subarray(0, OLD_LOG_REC).toString('utf-8').trimEnd());
+                const e1 = parse(got.subarray(OLD_LOG_REC, OLD_LOG_REC * 2).toString('utf-8').trimEnd());
+                if (e0 && e0.id === 0 && ISO_DATE_RE.test(e0.date) &&
+                    e1 && e1.id === 1 && ISO_DATE_RE.test(e1.date)) {
+                    return OLD_LOG_REC;
+                }
+                return LOG_REC;
+            }
+            // 单条小文件（<640B 不可能是 1024 记录）：按 320 整文件解析一次判定
+            if (fileSize > 0 && fileSize < OLD_LOG_REC * 2) {
+                const e0 = parse(got.toString('utf-8').trimEnd());
+                if (e0 && e0.id === 0 && ISO_DATE_RE.test(e0.date)) return OLD_LOG_REC;
+            }
+            return LOG_REC;
+        } finally {
+            await handle.close();
+        }
+    }
+
+    // ─── 原子写 ──────────────────────────────
+
+    /**
+     * 原子写：先写同目录临时文件再 rename 替换（Windows 上 rename 覆盖已存在
+     * 目标可能 EPERM/EEXIST，复用 configFile 的退避重试）。失败清理 tmp 并上抛。
+     */
+    private async writeFileAtomic(targetPath: string, content: string): Promise<void> {
+        const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        try {
+            await fs.writeFile(tmpPath, content, 'utf-8');
+            await renameConfigOverwrite(tmpPath, targetPath);
+        } catch (e: unknown) {
+            try {
+                await fs.unlink(tmpPath);
+            } catch {
+                // 清理失败忽略
+            }
+            throw e;
+        }
+    }
+
+    // ─── 底层读取（缓存加载） ──────────────────────
+
+    /**
+     * 加载 records.jsonl（锁内调用）：mtime+size 与缓存一致则复用；否则整文件
+     * 解析——逐行 JSON，损坏/空行以 null 占位保留位置；撕裂尾部（无换行结尾）
+     * 忽略并在本方法内截断修复（与旧 repairLog 同口径）。
+     */
+    private async loadRecordsLocked(): Promise<void> {
+        const p = this.recordsPath();
+        let stat: import('fs').Stats;
+        try {
+            stat = await fs.stat(p);
+        } catch (e: unknown) {
+            if (errnoCode(e) !== 'ENOENT') throw e;
+            this.recordsCache = { mtimeMs: 0, fileSize: 0, records: [] };
+            return;
+        }
+        const cached = this.recordsCache;
+        if (cached && cached.mtimeMs === stat.mtimeMs && cached.fileSize === stat.size) return;
+
+        const buf = await fs.readFile(p);
+        const recordsArr: Array<StoredRecord | null> = [];
+        let start = 0;
+        let validBytes = 0;
+        while (start < buf.length) {
+            const nl = buf.indexOf(0x0a, start);
+            if (nl < 0) break; // 撕裂尾部半行：忽略，下方截断修复
+            validBytes = nl + 1;
+            const line = buf.subarray(start, nl).toString('utf-8');
+            recordsArr.push(line.trim() === '' ? null : decodeRecordLine(line));
+            start = nl + 1;
+        }
+        let fileSize = stat.size;
+        if (validBytes < buf.length) {
+            const handle = await fs.open(p, 'r+');
+            try {
+                await handle.truncate(validBytes);
+            } finally {
+                await handle.close();
+            }
+            fileSize = validBytes;
+        }
+        this.recordsCache = { mtimeMs: stat.mtimeMs, fileSize, records: recordsArr };
+    }
+
+    /**
+     * 加载 summaries.jsonl（锁内调用）：mtime+size 一致则复用；否则逐行解析，
+     * 损坏行跳过（树是缓存，缺失只触发重建）。文件不存在视为空摘要。
+     */
+    private async loadSummariesLocked(): Promise<void> {
+        const p = this.summariesPath();
+        let stat: import('fs').Stats;
+        try {
+            stat = await fs.stat(p);
+        } catch (e: unknown) {
+            if (errnoCode(e) !== 'ENOENT') throw e;
+            this.summariesCache = { mtimeMs: 0, fileSize: 0, map: new Map() };
+            return;
+        }
+        const cached = this.summariesCache;
+        if (cached && cached.mtimeMs === stat.mtimeMs && cached.fileSize === stat.size) return;
+
+        const map = new Map<string, StoredSummary>();
+        try {
+            const buf = await fs.readFile(p);
+            let start = 0;
+            while (start < buf.length) {
+                const nl = buf.indexOf(0x0a, start);
+                if (nl < 0) break;
+                const line = buf.subarray(start, nl).toString('utf-8');
+                if (line.trim() !== '') {
+                    const s = decodeSummaryLine(line);
+                    if (s) map.set(summaryKey(s.lo, s.hi), s);
+                }
+                start = nl + 1;
+            }
+        } catch (e: unknown) {
+            // stat 后文件被删/不可读：按空摘要处理（缓存缺失可重建）
+            if (errnoCode(e) !== 'ENOENT') throw e;
+        }
+        this.summariesCache = { mtimeMs: stat.mtimeMs, fileSize: stat.size, map };
+    }
+
+    /** 全量重写 records.jsonl（锁内调用；tmp+rename 原子提交；null 占位写空行） */
+    private async rewriteRecordsLocked(recordsArr: Array<StoredRecord | null>): Promise<void> {
+        const lines = recordsArr.map(r => (r ? encodeRecordLine(r) : '\n')).join('');
+        await this.writeFileAtomic(this.recordsPath(), lines);
+    }
+
+    /** 全量重写 summaries.jsonl（锁内调用；按 lo 升序保证输出确定） */
+    private async rewriteSummariesLocked(): Promise<void> {
+        const lines = [...this.summariesCache!.map.values()]
+            .sort((a, b) => a.lo - b.lo || a.hi - b.hi)
+            .map(encodeSummaryLine)
+            .join('');
+        await this.writeFileAtomic(this.summariesPath(), lines);
+    }
+
+    /**
+     * 删除/截断后清理树摘要（锁内调用）：
+     * - 尾部删除（区间到达日志末尾 / truncate）：保留 hi <= newT 的块——对齐块
+     *   hi <= newT ⟺ 完全位于保留区，与旧实现 keep = floor(newT / size) 一致；
+     * - 中间删除：全部清空（重编号使所有块失效）。
+     */
+    private async clearSummariesLocked(newT: number, keepPrefix: boolean): Promise<void> {
+        await this.loadSummariesLocked();
+        const map = this.summariesCache!.map;
+        const kept = new Map<string, StoredSummary>();
+        if (keepPrefix) {
+            for (const [key, s] of map) {
+                if (s.hi <= newT) kept.set(key, s);
+            }
+        }
+        if (kept.size === map.size) return;
+        this.summariesCache = { ...this.summariesCache!, map: kept };
+        await this.rewriteSummariesLocked();
+    }
+
+    // ─── 底层读写（公开 API） ─────────────────────
+
+    /** 获取记录数量（含损坏占位，与旧物理计数口径一致；O(1)，仅 stat + 缓存） */
+    async logLen(): Promise<number> {
         const release = await this.lock.acquire();
         try {
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            const rec = this.logRecMode;
-            const base = await this.logLen();
-            const chunks: Buffer[] = [];
-            for (let k = 0; k < items.length; k++) {
-                const { date, text } = items[k]!;
-                // 锁内用真实分配的 id 精确校验整条记录容量（含 "#<id> <date> " 头部开销）：
-                // id 由本方法在锁内分配，此处校验与实际写入完全一致，不存在估算竞态
-                // （锁外按 logLen 估算可能低估 id 位数，并发追加时仍会在 pad() 抛晦涩 Too long）。
-                assertRecordFits(base + k, date, text, rec);
-                chunks.push(pad(`#${base + k} ${date} ${text}`, rec));
-            }
-            await fs.appendFile(this.logPath(), Buffer.concat(chunks));
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            return this.recordsCache!.records.length;
+        } finally {
+            release();
+        }
+    }
+
+    /** 追加日志记录，返回起始 ID（追加式：一行一条，崩溃最多撕裂尾部半行） */
+    async logAppend(items: Array<{ date: string; text: string; source?: string; tags?: string[]; legacyId?: number }>): Promise<number> {
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const base = this.recordsCache!.records.length;
+            const now = new Date().toISOString();
+            const added: StoredRecord[] = items.map((item, k) => ({
+                id: base + k,
+                date: item.date,
+                text: item.text,
+                createdAt: now,
+                updatedAt: now,
+                version: 1,
+                source: item.source ?? 'note',
+                tags: item.tags ?? [],
+                legacyId: item.legacyId,
+            }));
+            await fs.appendFile(this.recordsPath(), added.map(encodeRecordLine).join(''), 'utf-8');
+            const prev = this.recordsCache!;
+            // copy-on-write：快照（logScan）持有旧数组引用不受影响
+            this.recordsCache = { ...prev, records: [...prev.records, ...added] };
             return base;
         } finally {
             release();
         }
     }
 
-    /** 读取指定范围的日志记录 */
+    /** 读取 [lo, hi) 范围内的日志记录（跳过损坏占位） */
     async logSlice(lo: number, hi: number): Promise<LogEntry[]> {
-        const rec = this.logRecMode;
-        const handle = await fs.open(this.logPath(), 'r');
+        const release = await this.lock.acquire();
         try {
-            const buf = Buffer.alloc((hi - lo) * rec);
-            const { bytesRead } = await handle.read(buf, 0, buf.length, lo * rec);
-            if (bytesRead < buf.length) {
-                // 记录不足，截取实际读取的部分
-                return records(buf.subarray(0, bytesRead), rec);
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            const out: LogEntry[] = [];
+            for (let i = lo; i < hi && i < arr.length; i++) {
+                const rec = arr[i];
+                if (rec) out.push({ id: rec.id, date: rec.date, text: rec.text });
             }
-            return records(buf, rec);
+            return out;
         } finally {
-            await handle.close();
+            release();
         }
     }
 
@@ -348,218 +564,116 @@ export class MemoryLogStore {
     }
 
     /**
-     * 读取位置 i 的原始固定宽度记录并返回其 id；记录缺失（日志被截断）或无法解析
-     * （损坏行）返回 null。仅用于 wake 末条「缺失 vs 损坏」的错误路径判别，
-     * 不参与正常读取（正常读取走 records() 跳过损坏行）。
+     * 读取位置 i 的记录 id；位置缺失（日志被截断）或损坏（占位 null）返回 null。
+     * 仅用于 wake 末条「缺失 vs 损坏」的错误路径判别，不参与正常读取。
      */
     async rawEntryIdAt(i: number): Promise<number | null> {
-        const rec = this.logRecMode;
-        let handle: import('fs').promises.FileHandle;
-        try {
-            handle = await fs.open(this.logPath(), 'r');
-        } catch (e: any) {
-            if (e?.code === 'ENOENT') return null;
-            throw e;
-        }
-        try {
-            const buf = Buffer.alloc(rec);
-            const { bytesRead } = await handle.read(buf, 0, rec, i * rec);
-            if (bytesRead < rec) return null; // 记录缺失（日志被截断）
-            const entry = parse(buf.toString('utf-8').trimEnd());
-            return entry ? entry.id : null;
-        } finally {
-            await handle.close();
-        }
-    }
-
-    /** 流式扫描全部日志 */
-    async *logScan(): AsyncGenerator<LogEntry> {
-        const rec = this.logRecMode;
-        let handle: import('fs').promises.FileHandle | null = null;
-        try {
-            handle = await fs.open(this.logPath(), 'r');
-            let offset = 0;
-            while (true) {
-                const buf = Buffer.alloc(rec * 4096);
-                const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
-                if (bytesRead === 0) break;
-                const entries = records(buf.subarray(0, bytesRead), rec);
-                for (const e of entries) yield e;
-                offset += bytesRead;
-            }
-        } catch (e: any) {
-            // 日志不存在视为空扫描；其余 IO 错误上抛（与 count 同口径）
-            if (e?.code !== 'ENOENT') throw e;
-        } finally {
-            if (handle) await handle.close();
-        }
-    }
-
-    /** 读取树摘要 */
-    async treeGet(lo: number, hi: number): Promise<string | null> {
-        const size = hi - lo;
-        try {
-            const handle = await fs.open(this.treePath(size), 'r');
-            try {
-                const buf = Buffer.alloc(TREE_REC);
-                const { bytesRead } = await handle.read(buf, 0, TREE_REC, (lo / size) * TREE_REC);
-                if (bytesRead < TREE_REC) return null;
-                const str = buf.toString('utf-8').trimEnd();
-                return str || null;
-            } finally {
-                await handle.close();
-            }
-        } catch {
-            return null;
-        }
-    }
-
-    /** 写入树摘要 */
-    async treePut(lo: number, hi: number, text: string): Promise<boolean> {
-        const size = hi - lo;
         const release = await this.lock.acquire();
         try {
-            const p = this.treePath(size);
-            await this.repair(p, TREE_REC);
-            const n = await this.count(p, TREE_REC);
-            const targetIndex = lo / size;
-            if (n < targetIndex) {
-                // 缺槽原因：目标槽之前的块缺失（树被并发截断/越序压缩）。
-                // 不能静默 return false——compress() 会误报「已被其他会话压缩」；
-                // 给出可操作提示：按序执行 memory_compress 重建缺失块。
-                die(`Cannot write #${lo}-${hi - 1}: ${n} of ${targetIndex} tree blocks present, ` +
-                    `earlier blocks are missing. Run memory_compress to build pending blocks in order.`);
-            }
-            if (n === targetIndex) {
-                await fs.appendFile(p, pad(text, TREE_REC));
-                this.treeCacheInvalidate(size);
-                return true;
-            }
-
-            // treeDrop 会把中间槽位清空以保留后续块；允许重新压缩时复用该空槽。
-            const handle = await fs.open(p, 'r+');
-            try {
-                const buffer = Buffer.alloc(TREE_REC);
-                await handle.read(buffer, 0, TREE_REC, targetIndex * TREE_REC);
-                if (buffer.toString('utf8').replace(/\0+$/g, '').trim()) return false;
-                const record = pad(text, TREE_REC);
-                await handle.write(record, 0, record.length, targetIndex * TREE_REC);
-                this.treeCacheInvalidate(size);
-                return true;
-            } finally {
-                await handle.close();
-            }
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            if (i < 0 || i >= arr.length) return null;
+            return arr[i]?.id ?? null;
         } finally {
             release();
         }
     }
 
-    /** 使某 size 树文件的槽位位图缓存失效（树写路径在锁内调用） */
-    private treeCacheInvalidate(size: number): void {
-        this.treeSlotCache.delete(size);
+    /** 流式扫描全部日志（锁内加载快照后释放，逐条 yield） */
+    async *logScan(): AsyncGenerator<LogEntry> {
+        const release = await this.lock.acquire();
+        let arr: Array<StoredRecord | null>;
+        try {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            arr = this.recordsCache!.records;
+        } finally {
+            release();
+        }
+        for (const rec of arr) {
+            if (rec) yield { id: rec.id, date: rec.date, text: rec.text };
+        }
+    }
+
+    /** 读取树摘要；缺失返回 null */
+    async treeGet(lo: number, hi: number): Promise<string | null> {
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadSummariesLocked();
+            return this.summariesCache!.map.get(summaryKey(lo, hi))?.text ?? null;
+        } finally {
+            release();
+        }
     }
 
     /**
-     * 读取树文件槽位占用位图（pending/pendingCount 共享）：
-     * mtime+size 与缓存一致时直接复用，否则整文件一次读入构建位图并缓存——
-     * 替代逐槽 open/read/close（记忆量大时 O(T) 次文件句柄循环）。
-     * 文件不存在视为 0 槽；写路径已主动失效（treeCacheInvalidate），读路径以
-     * mtime+size 一致性 + cache.set 前二次 stat 双重兜底并发窗口。
+     * 写入树摘要。
+     * - 块已存在（含并行会话已压缩）→ 返回 false，不覆盖；
+     * - 目标槽之前的同 size 块缺失（越序压缩/树被并发截断）→ 报可操作错误；
+     * - 成功 → 写入并返回 true。
      */
-    private async treeSlotBitmap(size: number): Promise<{ have: number; slots: boolean[] }> {
-        const p = this.treePath(size);
-        let stat: import('fs').Stats;
-        try {
-            stat = await fs.stat(p);
-        } catch {
-            return { have: 0, slots: [] };
-        }
-        const cached = this.treeSlotCache.get(size);
-        if (cached && cached.mtimeMs === stat.mtimeMs && cached.fileSize === stat.size) {
-            return { have: Math.floor(stat.size / TREE_REC), slots: cached.slots };
-        }
-        const have = Math.floor(stat.size / TREE_REC);
-        const slots: boolean[] = [];
-        let cacheable = true;
-        if (have > 0) {
-            let buf: Buffer;
-            try {
-                buf = await fs.readFile(p);
-            } catch {
-                // 文件在 stat 后被删除/不可读：按无槽处理（与 stat 失败同款防御），
-                // 不缓存——下次调用按新 stat 重新构建。
-                return { have: 0, slots: [] };
-            }
-            // 二次 stat 校验：stat→readFile 窗口内写路径可能已改写文件并失效缓存，
-            // 若仍按写前 stat 值回填，会在失效后把陈旧位图写回缓存（陈旧位图窗口——
-            // 粗粒度 mtime 下后续读会长期命中错误位图）。读取期间文件变化 →
-            // 本次结果不缓存，下次调用按新 stat 重新构建。
-            try {
-                const stat2 = await fs.stat(p);
-                cacheable = stat2.mtimeMs === stat.mtimeMs && stat2.size === stat.size;
-            } catch {
-                cacheable = false; // 文件被删除/重命名：不缓存
-            }
-            for (let k = 0; k < have; k++) {
-                const slice = buf.subarray(k * TREE_REC, (k + 1) * TREE_REC);
-                slots.push(slice.toString('utf-8').trimEnd().length > 0);
-            }
-        }
-        if (cacheable) {
-            this.treeSlotCache.set(size, { mtimeMs: stat.mtimeMs, fileSize: stat.size, slots });
-        }
-        return { have, slots };
-    }
-
-    /** 丢弃树摘要及其上层 */
-    async treeDrop(lo: number, hi: number): Promise<Array<[number, number]>> {
-        const gone: Array<[number, number]> = [];
-        let size = hi - lo;
+    async treePut(lo: number, hi: number, text: string, source = 'compress'): Promise<boolean> {
+        const size = hi - lo;
         const release = await this.lock.acquire();
         try {
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            const T = await this.logLen();
+            await this.ensureReadyLocked();
+            await this.loadSummariesLocked();
+            const map = this.summariesCache!.map;
+            const key = summaryKey(lo, hi);
+            if (map.has(key)) return false;
+
+            // 缺槽原因：目标槽之前的块缺失（树被并发截断/越序压缩）。
+            // 不能静默 return false——compress() 会误报「已被其他会话压缩」；
+            // 给出可操作提示：按序执行 memory_compress 重建缺失块。
+            const targetIndex = lo / size;
+            let n = 0;
+            while (n < targetIndex && map.has(summaryKey(n * size, (n + 1) * size))) n++;
+            if (n < targetIndex) {
+                die(`Cannot write #${lo}-${hi - 1}: ${n} of ${targetIndex} tree blocks present, ` +
+                    `earlier blocks are missing. Run memory_compress to build pending blocks in order.`);
+            }
+
+            const now = new Date().toISOString();
+            const next = new Map(map);
+            next.set(key, { lo, hi, date: now.slice(0, 10), text, source });
+            this.summariesCache = { ...this.summariesCache!, map: next };
+            await this.rewriteSummariesLocked();
+            return true;
+        } finally {
+            release();
+        }
+    }
+
+    /** 丢弃树摘要及其上层；返回实际被丢弃的块列表（[lo, hi) 形式） */
+    async treeDrop(lo: number, hi: number): Promise<Array<[number, number]>> {
+        const gone: Array<[number, number]> = [];
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const T = this.recordsCache!.records.length;
+            await this.loadSummariesLocked();
+            const next = new Map(this.summariesCache!.map);
+            let size = hi - lo;
             while (size <= T) {
-                const p = this.treePath(size);
                 // 只删除覆盖被删区间 [lo, hi) 的块（索引 kStart..kEnd），
-                // 不再连带删除 kStart 之后的所有块：此前 truncate(k*TREE_REC)
-                // 会误删不含被删记忆的后缀块，forget 的 gone/firstId 与实际失效范围
-                // 不符，且这些块被清空后 pending 会反复要求重新压缩。
+                // 不连带删除其后块（与旧实现一致：树是缓存，缺失只触发重建）。
                 const kStart = Math.floor(lo / size);
                 const kEnd = Math.floor((hi - 1) / size);
-                const n = await this.count(p, TREE_REC);
-                const clearEnd = Math.min(n, kEnd + 1);
-                if (clearEnd > kStart) {
-                    const handle = await fs.open(p, 'r+');
-                    try {
-                        const emptyRecord = pad('', TREE_REC);
-                        for (let i = kStart; i < clearEnd; i++) {
-                            const buffer = Buffer.alloc(TREE_REC);
-                            await handle.read(buffer, 0, TREE_REC, i * TREE_REC);
-                            if (buffer.toString('utf8').replace(/\0+$/g, '').trim()) {
-                                gone.push([i * size, (i + 1) * size]);
-                                await handle.write(emptyRecord, 0, emptyRecord.length, i * TREE_REC);
-                            }
-                        }
-
-                        // 尾部空槽可安全截断；中间空槽必须保留索引，供后续 treePut 复用。
-                        let trailingCount = n;
-                        const buffer = Buffer.alloc(TREE_REC);
-                        while (trailingCount > 0) {
-                            buffer.fill(0);
-                            await handle.read(buffer, 0, TREE_REC, (trailingCount - 1) * TREE_REC);
-                            if (buffer.toString('utf8').replace(/\0+$/g, '').trim()) break;
-                            trailingCount--;
-                        }
-                        if (trailingCount < n) {
-                            await handle.truncate(trailingCount * TREE_REC);
-                        }
-                    } finally {
-                        await handle.close();
+                for (let k = kStart; k <= kEnd; k++) {
+                    const key = summaryKey(k * size, (k + 1) * size);
+                    if (next.has(key)) {
+                        gone.push([k * size, (k + 1) * size]);
+                        next.delete(key);
                     }
                 }
-                this.treeCacheInvalidate(size);
                 size *= 2;
+            }
+            if (gone.length > 0) {
+                this.summariesCache = { ...this.summariesCache!, map: next };
+                await this.rewriteSummariesLocked();
             }
             return gone;
         } finally {
@@ -569,51 +683,51 @@ export class MemoryLogStore {
 
     /** 列出所有待构建的块（最小优先） */
     async pending(T: number, limit?: number): Promise<Array<[number, number]>> {
-        const todo: Array<[number, number]> = [];
-        let size = 2;
-        while (size <= T) {
-            // 整文件槽位位图一次读取 + 缓存复用（treeSlotBitmap），
-            // 替代逐槽 treeGet 的 O(T) 次 open/read/close 文件句柄循环
-            const { have, slots } = await this.treeSlotBitmap(size);
-            const maxK = Math.floor(T / size);
-            // count 只反映「文件里有多少个槽位」，不能反映「哪些槽位有内容」：
-            // treeDrop 会把中间槽位写成空记录（保留索引供 treePut 复用），
-            // 空槽从未被压缩，必须重新进入待压缩队列。
-            // k >= have 的槽位从未写入，直接视为待压缩（保持原有 count 语义）；
-            // k < have 的槽位逐槽判空，空槽同样视为待压缩。
-            for (let k = 0; k < maxK; k++) {
-                if (k < have && slots[k]) continue; // 已有摘要
-                todo.push([k * size, (k + 1) * size]);
-                if (limit && todo.length >= limit) return todo;
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadSummariesLocked();
+            const map = this.summariesCache!.map;
+            const todo: Array<[number, number]> = [];
+            for (let size = 2; size <= T; size *= 2) {
+                const maxK = Math.floor(T / size);
+                for (let k = 0; k < maxK; k++) {
+                    if (map.has(summaryKey(k * size, (k + 1) * size))) continue;
+                    todo.push([k * size, (k + 1) * size]);
+                    if (limit && todo.length >= limit) return todo;
+                }
             }
-            size *= 2;
+            return todo;
+        } finally {
+            release();
         }
-        return todo;
     }
 
     /** 待构建块的数量 */
     async pendingCount(T: number): Promise<number> {
-        let n = 0, size = 2;
-        while (size <= T) {
-            const { have, slots } = await this.treeSlotBitmap(size);
-            const maxK = Math.floor(T / size);
-            // 与 pending() 同口径：[have, maxK) 从未写入全部待压缩；
-            // [0, have) 内 treeDrop 留下的空记录也算待压缩
-            let pendingBlocks = Math.max(0, maxK - have);
-            for (let k = 0; k < have && k < maxK; k++) {
-                if (!slots[k]) pendingBlocks++;
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadSummariesLocked();
+            const map = this.summariesCache!.map;
+            let n = 0;
+            for (let size = 2; size <= T; size *= 2) {
+                const maxK = Math.floor(T / size);
+                for (let k = 0; k < maxK; k++) {
+                    if (!map.has(summaryKey(k * size, (k + 1) * size))) n++;
+                }
             }
-            n += pendingBlocks;
-            size *= 2;
+            return n;
+        } finally {
+            release();
         }
-        return n;
     }
 
     /**
-     * updateEntry: 原地覆写单条原始记忆的文本。
-     * 新文本必须不超过固定宽度（LOG_REC - 1 字节，即 1023 字节）。
+     * updateEntry: 原地覆写单条原始记忆的文本（保留 id/date/createdAt/legacyId，
+     * 更新 version/updatedAt 并记录审计来源）。
      */
-    async updateEntry(id: number, text: string): Promise<void> {
+    async updateEntry(id: number, text: string, source = 'update'): Promise<void> {
         const entryChars = this.getConfig().entryChars;
         const trimmed = text.trim();
         if (!trimmed) die('Empty. A memory is one line of text.');
@@ -626,68 +740,59 @@ export class MemoryLogStore {
         }
 
         // 校验与读取必须放在锁内：并发 truncateLog/logAppend 改变日志长度后，
-        // 基于过期 id 的写入会越过 EOF，产生零填充垃圾记录。
+        // 基于过期 id 的写入会越界（与旧实现同口径）。
         const release = await this.lock.acquire();
         try {
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            const rec = this.logRecMode;
-            const T = await this.logLen();
-            if (id < 0 || id >= T) {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            if (id < 0 || id >= arr.length) {
                 die(`No memory at index ${id}.`);
             }
-
-            // 读取原条目以保留 ID 和日期
-            const entry = await this.logGet(id);
-            // 整条记录容量校验（头部 + 文本），避免 pad() 处晦涩的 Too long
-            assertRecordFits(entry.id, entry.date, trimmed, rec);
-            const newLine = `#${entry.id} ${entry.date} ${trimmed}`;
-
-            const buf = pad(newLine, rec);
-            const logPath = this.logPath();
-            const handle = await fs.open(logPath, 'r+');
-            try {
-                await handle.write(buf, 0, buf.length, id * rec);
-            } finally {
-                await handle.close();
+            const rec = arr[id];
+            if (!rec) {
+                // 损坏占位不可编辑（与旧实现 logGet 对损坏行的口径一致）
+                die(`No memory at index ${id}.`);
             }
+            const now = new Date().toISOString();
+            const updated: StoredRecord = {
+                ...rec,
+                text: trimmed,
+                updatedAt: now,
+                version: (rec.version ?? 1) + 1,
+                source,
+            };
+            const next = arr.slice();
+            next[id] = updated;
+            await this.rewriteRecordsLocked(next);
+            this.recordsCache = { ...this.recordsCache!, records: next };
         } finally {
             release();
         }
 
         // 编辑后所有覆盖该 ID 的树摘要失效，丢弃之。
-        // 必须在锁外执行：dropSummariesCovering → treeDrop 内部会再次 acquire 锁，
-        // 而 AsyncLock 不可重入，持锁调用会形成闭环等待死锁（treeDrop 等待的 release
-        // 只有 updateEntry 的 finally 才执行）。treeDrop 自身会重新加锁，锁外调用同样安全。
+        // 必须在锁外执行：dropSummariesCovering 内部会再次 acquire 锁，
+        // 而 AsyncLock 不可重入，持锁调用会形成闭环等待死锁。
         await this.dropSummariesCovering(id);
     }
 
     /**
-     * deleteRange: 删除闭区间 [lo, hi] 内的所有原始记忆（真·单条/批量删除，不连坐 truncateLog）。
-     *
-     * LOG 记录 id = 物理序号（内嵌于记录头 "#id date text"），删除中间某条后其后的
-     * 记录 id 整体前移一格，所有树摘要（按 [lo,hi) 块寻址）随之失效，一并清空
-     * （下次 recall/compress 按需重建，与 updateEntry/truncateLog 的摘要清理语义一致）。
-     * 采用「读全量 → 过滤 → 重编号 → tmp+rename 原子写回」，崩溃安全；
-     * 与 truncateLog 的物理截断不同，本方法不会误删目标之后的记忆。
-     * 仅删除尾部的区间时后续 id 不变，但覆盖被删记录的尾部树摘要（如 size=2 的
-     * [T-2,T) 块、size=4 的 [0,4) 块）仍引用已删内容：若不清除，T 回升后
-     * wake/zoom 会重现已删除的记忆且 pending() 认为该块已压缩而永不重建。
+     * deleteRange: 删除闭区间 [lo, hi] 内的所有原始记忆（真·单条/批量删除，
+     * 不连坐 truncateLog）。删除后其余记录重编号，相关树摘要清空
+     * （下次 recall/compress 按需重建）。「读全量 → 过滤 → 重编号 → tmp+rename
+     * 原子写回」，崩溃安全。
      */
     async deleteRange(lo: number, hi: number): Promise<{ removed: number }> {
+        // 输入校验：非整数/NaN 不得进入，避免 NaN 比较恒 false 导致静默全量重写
+        if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
+            die(`Invalid delete range: lo=${lo}, hi=${hi}.`);
+        }
         const release = await this.lock.acquire();
-        let T = 0;
-        // 声明在 try 外：return 位于 try/finally 块之后，块内 const 会脱离作用域；
-        // 默认值取请求区间长度，实际值在扫描结束后按跳过记录数修正
-        let actualRemoved = hi - lo + 1;
         try {
-            // 输入校验：非整数/NaN 不得进入，避免 NaN 比较恒 false 导致静默全量重写；
-            // 负数属于“越界”，交给下方 lo < 0 检查抛 “No memory at index”，语义更准确
-            if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
-                die(`Invalid delete range: lo=${lo}, hi=${hi}.`);
-            }
-            const logPath = this.logPath();
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            T = await this.logLen();
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            const T = arr.length;
             if (lo < 0 || lo >= T) {
                 die(`No memory at index ${lo}.`);
             }
@@ -695,95 +800,38 @@ export class MemoryLogStore {
                 die(`No memory at index ${hi}.`);
             }
 
-            const tmpPath = `${logPath}.tmp`;
-            const handle = await fs.open(logPath, 'r');
-            const outHandle = await fs.open(tmpPath, 'w');
-            let outCount = 0;
-            // 区间内实际被跳过的空/损坏记录数：这些记录本就不存在/不可读，删除条数
-            // 与 newT 推演必须扣除它们，否则会与实际写回 tmp 的条数分叉（见下方）
+            // 区间内空/损坏占位不计入删除数（与旧实现同口径）：
+            // 删除条数与 newT 推演必须扣除它们，保证与写回条数一致
             let skippedInRange = 0;
-            try {
-                // B-6: 分块读取（每次至多 CHUNK 条），避免百万条记忆时逐条 1KB read 的百万次系统调用。
-                // 物理索引对齐与空/损坏记录跳过语义与旧实现一致。
-                // 流式写 tmp：不再全量累积 rebuilt 数组，峰值内存从 O(T·LOG_REC) 降为 O(CHUNK·LOG_REC)。
-                const CHUNK = 4096;
-                const rec = this.logRecMode;
-                for (let base = 0; base < T; base += CHUNK) {
-                    const count = Math.min(CHUNK, T - base);
-                    const buf = Buffer.alloc(count * rec);
-                    const { bytesRead } = await handle.read(buf, 0, buf.length, base * rec);
-                    const effective = Math.floor(bytesRead / rec);
-                    const kept: Buffer[] = [];
-                    for (let i = 0; i < effective; i++) {
-                        const idx = base + i;
-                        const slice = buf.subarray(i * rec, (i + 1) * rec);
-                        const str = slice.toString('utf-8').trimEnd();
-                        const inRange = idx >= lo && idx <= hi;
-                        // 遇空记录（损坏文件中的空洞）跳过而不是 break：保留其后仍有效的记录
-                        if (!str) {
-                            if (inRange) skippedInRange++;
-                            continue;
-                        }
-                        const parsed = parse(str);
-                        if (!parsed) {
-                            // B-9: 损坏行跳过（不重建），与 records() 解析口径一致；
-                            // 区间内的损坏行计入「跳过」：实际删除数按真实可删记录统计
-                            if (inRange) skippedInRange++;
-                            continue;
-                        }
-                        if (inRange) continue;
-                        kept.push(pad(`#${outCount} ${parsed.date} ${parsed.text}`, rec));
-                        outCount++;
-                    }
-                    if (kept.length > 0) {
-                        await outHandle.write(Buffer.concat(kept));
-                    }
+            const kept: Array<StoredRecord | null> = [];
+            for (let i = 0; i < T; i++) {
+                const rec = arr[i];
+                const inRange = i >= lo && i <= hi;
+                if (!rec) {
+                    if (inRange) skippedInRange++;
+                    kept.push(null);
+                    continue;
                 }
-            } finally {
-                await outHandle.close();
-                await handle.close();
+                if (inRange) continue;
+                kept.push({ ...rec, id: kept.length });
             }
-
-            // 先清树摘要、后原子换 LOG：树是缓存，缺失只触发重建（安全）；
-            // 陈旧摘要会被 wake/zoom 当作权威数据展示（危险）。若先 rename LOG 再截断树，
-            // 崩溃窗口内新 LOG + 旧摘要共存，已删记忆会在 wake 中“复活”且 pending() 认为
-            // 已压缩永不重建。顺序反之后，崩溃窗口最多是“摘要缺失”，自愈安全。
-            // 实际删除数 = 请求区间 - 区间内空/损坏记录：按真实条数推演 newT 与返回值，
-            // 保证与写回 tmp 的条数（= 后续 logLen()）一致，树摘要保留边界不错位
-            actualRemoved = (hi - lo + 1) - skippedInRange;
+            const actualRemoved = (hi - lo + 1) - skippedInRange;
             const newT = T - actualRemoved;
-            for (let size = 2; size <= T; size *= 2) {
-                const p = this.treePath(size);
-                const keep = hi < T - 1 ? 0 : Math.floor(newT / size);
-                const n = await this.count(p, TREE_REC);
-                if (n > keep) {
-                    await this.repair(p, TREE_REC);
-                    const th = await fs.open(p, 'r+');
-                    try {
-                        await th.truncate(keep * TREE_REC);
-                    } finally {
-                        await th.close();
-                    }
-                    this.treeCacheInvalidate(size);
-                }
-            }
 
-            // 读/写句柄已关闭后再 rename：Windows 下目标文件被占用时 rename 会 EPERM。
-            // tmp+rename 原子替换，崩溃不损坏线上文件。
-            await fs.rename(tmpPath, logPath);
+            // 先清树摘要、后原子换记录：树是缓存，缺失只触发重建（安全）；
+            // 陈旧摘要会被 wake/zoom 当作权威数据展示（危险）。
+            await this.clearSummariesLocked(newT, hi === T - 1);
+            await this.rewriteRecordsLocked(kept);
+            this.recordsCache = { ...this.recordsCache!, records: kept };
+            return { removed: actualRemoved };
         } finally {
             release();
         }
-
-        return { removed: actualRemoved };
     }
 
     /**
-     * deleteEntries: 批量删除多条原始记忆。
-     *
-     * 接收非负整数 id 数组（可乱序、可重复），内部排序去重后单次流式扫描 LOG：
-     * 按原始索引跳过目标 id、重编号写 tmp 后原子换回（等价于“从大到小逐个删除”，
-     * 但只扫描一次 LOG），返回实际删除条数。删除后相关树摘要一并清空。
+     * deleteEntries: 批量删除多条原始记忆（可乱序、可重复），内部排序去重后
+     * 单次扫描重编号写回，返回实际删除条数。删除后相关树摘要清空。
      */
     async deleteEntries(ids: number[]): Promise<{ removed: number }> {
         if (!Array.isArray(ids)) {
@@ -793,16 +841,17 @@ export class MemoryLogStore {
         if (sorted.length === 0) {
             return { removed: 0 };
         }
-        // 防御：非负整数校验（调用方已校验，这里是 API 层兜底，防止 NaN/负数/浮点进入删除逻辑）
+        // 防御：非负整数校验（调用方已校验，这里是 API 层兜底）
         if (sorted.some(id => !Number.isInteger(id) || id < 0)) {
             die('deleteEntries: ids must be non-negative integers.');
         }
 
         const release = await this.lock.acquire();
         try {
-            const logPath = this.logPath();
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            const T = await this.logLen();
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            const T = arr.length;
             const maxId = sorted[sorted.length - 1]!;
             if (maxId >= T) {
                 die(`No memory at index ${maxId}.`);
@@ -820,157 +869,87 @@ export class MemoryLogStore {
             }
             const toDelete = new Set(sorted);
 
-            // 单次流式扫描 LOG：跳过分组内的 id、重编号后写 tmp，
-            // 替代原先对每个区间重复全量扫描（多个区间 = 多次 O(T) 扫描）。
-            const tmpPath = `${logPath}.tmp`;
-            const handle = await fs.open(logPath, 'r');
-            const outHandle = await fs.open(tmpPath, 'w');
-            let outCount = 0;
-            // 目标 id 集合内实际被跳过的空/损坏记录数（与 deleteRange 同口径）：
-            // 删除条数与 newT 推演必须扣除它们，保证与写回 tmp 的条数一致
             let skippedInRange = 0;
-            try {
-                const CHUNK = 4096;
-                // 对齐必须按当前记录宽度（旧格式降级 320B/条）进行：按 LOG_REC=1024 对齐
-                // 会读错偏移，重编号后 tmp 近乎全空，rename 会用空文件覆盖 LOG.txt → 全量记忆丢失
-                const rec = this.logRecMode;
-                for (let base = 0; base < T; base += CHUNK) {
-                    const count = Math.min(CHUNK, T - base);
-                    const buf = Buffer.alloc(count * rec);
-                    const { bytesRead } = await handle.read(buf, 0, buf.length, base * rec);
-                    const effective = Math.floor(bytesRead / rec);
-                    const kept: Buffer[] = [];
-                    for (let i = 0; i < effective; i++) {
-                        const idx = base + i;
-                        const slice = buf.subarray(i * rec, (i + 1) * rec);
-                        const str = slice.toString('utf-8').trimEnd();
-                        const inTarget = toDelete.has(idx);
-                        // 空/损坏记录跳过语义与 deleteRange 一致；目标 id 内的空/损坏记录
-                        // 计入「跳过」，实际删除数按真实可删记录统计
-                        if (!str) {
-                            if (inTarget) skippedInRange++;
-                            continue;
-                        }
-                        const parsed = parse(str);
-                        if (!parsed) {
-                            if (inTarget) skippedInRange++;
-                            continue;
-                        }
-                        if (inTarget) continue;
-                        kept.push(pad(`#${outCount} ${parsed.date} ${parsed.text}`, rec));
-                        outCount++;
-                    }
-                    if (kept.length > 0) {
-                        await outHandle.write(Buffer.concat(kept));
-                    }
+            const kept: Array<StoredRecord | null> = [];
+            for (let i = 0; i < T; i++) {
+                const rec = arr[i];
+                const inTarget = toDelete.has(i);
+                if (!rec) {
+                    if (inTarget) skippedInRange++;
+                    kept.push(null);
+                    continue;
                 }
-            } finally {
-                await outHandle.close();
-                await handle.close();
+                if (inTarget) continue;
+                kept.push({ ...rec, id: kept.length });
             }
-
-            // 树摘要清理（与 deleteRange 多区间聚合后的最终语义一致）：
-            // 仅当删除恰好构成一个覆盖日志尾部的单区间时保留其前缀块，
-            // 否则全部清空——多区间/非尾部删除时任何块都可能因重编号而失效。
-            // 实际删除数扣除目标 id 内的空/损坏记录（同 deleteRange 口径）
             const actualRemoved = sorted.length - skippedInRange;
             const newT = T - actualRemoved;
             const tailSingleRange = ranges.length === 1 && ranges[0]![1] === T - 1;
-            for (let size = 2; size <= T; size *= 2) {
-                const p = this.treePath(size);
-                const keep = tailSingleRange ? Math.floor(newT / size) : 0;
-                const n = await this.count(p, TREE_REC);
-                if (n > keep) {
-                    await this.repair(p, TREE_REC);
-                    const th = await fs.open(p, 'r+');
-                    try {
-                        await th.truncate(keep * TREE_REC);
-                    } finally {
-                        await th.close();
-                    }
-                    this.treeCacheInvalidate(size);
-                }
-            }
 
-            // 树清理完成后原子换 LOG（顺序与 deleteRange 一致：先清树、后换 LOG）
-            await fs.rename(tmpPath, logPath);
+            // 树摘要清理（与 deleteRange 多区间聚合后的最终语义一致）：
+            // 仅当删除恰好构成一个覆盖日志尾部的单区间时保留其前缀块，否则全清。
+            await this.clearSummariesLocked(newT, tailSingleRange);
+            await this.rewriteRecordsLocked(kept);
+            this.recordsCache = { ...this.recordsCache!, records: kept };
             return { removed: actualRemoved };
         } finally {
             release();
         }
     }
 
-    /** 丢弃所有覆盖给定 ID 的树摘要（编辑记忆后调用） */
+    /** 丢弃所有覆盖给定 ID 的树摘要（编辑记忆后调用；锁外使用，内部重新加锁） */
     async dropSummariesCovering(id: number): Promise<void> {
-        const T = await this.logLen();
-        let size = 2;
-        while (size <= T) {
-            const lo = Math.floor(id / size) * size;
-            const hi = lo + size;
-            // 用 treeDrop 丢弃该块及上层
-            try {
-                await this.treeDrop(lo, hi);
-            } catch (err) {
-                // B-3: 丢弃失败至少告警，不再静默吞掉（树是缓存，缺失可重建，但需可观测）
-                console.warn(`[MemoryManager] Failed to drop summaries covering #${lo}-${hi - 1}:`, err);
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const T = this.recordsCache!.records.length;
+            await this.loadSummariesLocked();
+            const next = new Map(this.summariesCache!.map);
+            let changed = false;
+            // 覆盖 id 的所有对齐块 = 逐层包含 id 的块（含全部祖先）
+            for (let size = 2; size <= T; size *= 2) {
+                const lo = Math.floor(id / size) * size;
+                if (next.delete(summaryKey(lo, lo + size))) changed = true;
             }
-            size *= 2;
+            if (changed) {
+                this.summariesCache = { ...this.summariesCache!, map: next };
+                await this.rewriteSummariesLocked();
+            }
+        } catch (err) {
+            // B-3: 丢弃失败至少告警，不再静默吞掉（树是缓存，缺失可重建，但需可观测）
+            console.warn(`[MemoryManager] Failed to drop summaries covering #${id}:`, err);
+        } finally {
+            release();
         }
     }
 
     /**
      * truncateLog: 截断原始 LOG，删除 ID >= keepId 的所有记忆及其相关树摘要。
-     * keepId=0 表示清空全部记忆。
+     * keepId=0 表示清空全部记忆。物理截断语义：保留前 keepId 个位置（含占位），
+     * 不重编号。
      */
     async truncateLog(keepId: number): Promise<{ removed: number }> {
-        // B-4: Number.isInteger 校验——NaN 绕过 keepId<0 检查后 fs.truncate(NaN) 会抛晦涩错误
+        // Number.isInteger 校验——NaN 绕过 keepId<0 检查后会产生晦涩行为
         if (!Number.isInteger(keepId) || keepId < 0) {
             die(`Invalid keepId: ${keepId}.`);
         }
 
         // T 必须在锁内读取并与截断原子化：若在锁外读取 logLen，期间并发 note
         // 追加的新记录会在 truncate 时被一并截断，removed 数也不准确。
-        // logLen 不获取锁（仅 fs.stat），锁内调用不会死锁。
         const release = await this.lock.acquire();
         try {
-            // 必须先 repairLog 再 logLen：旧格式（OLD_LOG_REC=320B/条）文件在迁移前
-            // logLen 按当前 logRecMode（默认 LOG_REC=1024）计数会低估 T——keepId >= T
-            // 提前 return、removed 数值错误、树清理循环截不断旧摘要导致记忆「复活」。
-            // 其余写路径（logAppend/updateEntry/deleteRange/deleteEntries）均为
-            // repairLog 在前、logLen 在后，此处与之一致。
-            const logPath = this.logPath();
-            await this.repairLog(); // 打开前修复：旧格式迁移 + 撕裂尾截断
-            const T = await this.logLen();
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const arr = this.recordsCache!.records;
+            const T = arr.length;
             if (keepId >= T) {
                 return { removed: 0 };
             }
-            // 1. 截断 LOG 文件
-            const logHandle = await fs.open(logPath, 'r+');
-            try {
-                await logHandle.truncate(keepId * this.logRecMode);
-            } finally {
-                await logHandle.close();
-            }
-
-            // 2. 清理所有树摘要：每个 size 截断到 floor(keepId/size) 条
-            let size = 2;
-            while (size <= T) {
-                const p = this.treePath(size);
-                const keep = Math.floor(keepId / size);
-                const n = await this.count(p, TREE_REC);
-                if (n > keep) {
-                    await this.repair(p, TREE_REC);
-                    const th = await fs.open(p, 'r+');
-                    try {
-                        await th.truncate(keep * TREE_REC);
-                    } finally {
-                        await th.close();
-                    }
-                    this.treeCacheInvalidate(size);
-                }
-                size *= 2;
-            }
-
+            const kept = arr.slice(0, keepId);
+            await this.clearSummariesLocked(keepId, true);
+            await this.rewriteRecordsLocked(kept);
+            this.recordsCache = { ...this.recordsCache!, records: kept };
             return { removed: T - keepId };
         } finally {
             release();
