@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "checkpointId": "cp_1700000000000_elaaaa",
+  "workspaceRoots": [
+    {
+      "id": "ws_1a9de97bfcd33ead",
+      "name": "my-project",
+      "uri": "file:///c%3A/Users/demo/my-project"
+    }
+  ],
+  "filesRevision": "el000000-0000-4000-8000-000000000001",
+  "emptyDirs": [],
+  "changes": [],
+  "excluded": [],
+  "ignoreSnapshot": {
+    "version": 1,
+    "forcedRulesVersion": 1,
+    "defaultProfileVersion": 1,
+    "enabledProfiles": {
+      "logs": true
+    },
+    "profilePatterns": {},
+    "maxFileSizeBytes": 52428800,
+    "customPatterns": []
+  },
+  "partial": false
+}

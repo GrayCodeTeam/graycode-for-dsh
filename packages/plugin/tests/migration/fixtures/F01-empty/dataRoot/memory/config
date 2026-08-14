@@ -1,0 +1,7 @@
+# OptMem sizes for this memory.
+# Edit with memory_config NAME=VALUE.
+
+WAKE_LINES   = 96    # how many lines wake prints
+ENTRY_CHARS  = 280   # max bytes per memory
+PART_CHARS   = 20000 # max chars per output part
+PART_LINES   = 500   # max lines per output part

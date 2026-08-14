@@ -1,0 +1,14 @@
+{
+  "kind": "fixture-index",
+  "id": "F07",
+  "name": "F07-checkpoint-v2",
+  "title": "checkpoint v2（manifest.json + files.json + filesRevision）",
+  "dataRoot": "dataRoot",
+  "purpose": "新 manifest、filesRevision 配对：v2 读取与 ATOMIC-PAIR 配对校验通过路径。",
+  "construction": "cp_1700000000000_bb2222/：manifest.json 2 空格缩进（version:2 + filesRevision），files.json 紧凑无缩进；两文件 filesRevision 为同一固定 UUID；条目含 hash/size/mtimeMs/mtimeNs；备份文件 ws_<id>/src/demo.txt 与 ws_<id>/src/util.txt。",
+  "expectedBehavior": "正常导入：v2 读取、配对校验通过。",
+  "specSections": [
+    "legacy-format.md §2.2"
+  ],
+  "synthetic": true
+}

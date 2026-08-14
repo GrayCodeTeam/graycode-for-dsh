@@ -1,0 +1,1 @@
+[{"id":"msg_main_0001","timestamp":1700000000000,"modelVersion":"gemini-2.5-flash","prompt":{"tokens":120,"characters":640},"candidates":[{"tokens":80,"characters":420}]},{"id":"msg_main_0002","timestamp":1700000001000,"modelVersion":"gemini-2.5-flash","prompt":{"tokens":90,"characters":500},"candidates":[{"tokens":60,"characters":300}]}]

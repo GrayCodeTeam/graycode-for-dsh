@@ -1,0 +1,103 @@
+{
+  "kind": "fixture-index",
+  "id": "F14",
+  "name": "F14-corrupt",
+  "title": "损坏样本集",
+  "dataRoot": "dataRoot",
+  "purpose": "验证单文件损坏不影响整体迁移：隔离损坏项而非全库失败（每个子项均含健康控制样本）。",
+  "construction": "12 个子目录（见 subCases）：每个只损坏目标字段，其余结构保持合法；除损坏文件外均附健康控制样本（会话/存档/工作区）。",
+  "expectedBehavior": "按 subCases 表隔离：跳过/告警/拒绝，控制样本照常导入。",
+  "specSections": [
+    "legacy-format.md §1.3",
+    "§1.4",
+    "§2.5",
+    "§3.6"
+  ],
+  "synthetic": true,
+  "subCases": [
+    {
+      "id": "F14a",
+      "dir": "F14a-meta-corrupt",
+      "target": "conv_1700000000000_e1aaaa.meta.json",
+      "damage": "非法 JSON `{broken`",
+      "expected": "跳过该会话并告警（或按旧版语义改名 .corrupt-* 备份）；控制会话照常导入"
+    },
+    {
+      "id": "F14b",
+      "dir": "F14b-history-not-array",
+      "target": "conv_1700000000000_e2aaaa.json",
+      "damage": "合法 JSON 但非数组（{\"a\":1}）",
+      "expected": "拒绝读取（parse_error，asHistoryReadResult），不崩溃；控制会话照常导入"
+    },
+    {
+      "id": "F14c",
+      "dir": "F14c-segment-missing",
+      "target": "history/000001.ndjson 缺失",
+      "damage": "删除 000001.ndjson（索引自身一致）",
+      "expected": "该会话报 segment_missing，其余会话照常迁移"
+    },
+    {
+      "id": "F14d",
+      "dir": "F14d-index-inconsistent",
+      "target": "history.index.json",
+      "damage": "totalMessages=8 但 Σcount=5",
+      "expected": "一致性校验失败 → 会话级降级/告警"
+    },
+    {
+      "id": "F14e",
+      "dir": "F14e-manifest-corrupt",
+      "target": "cp_..._e5aaaa/manifest.json",
+      "damage": "非法 JSON `{broken`",
+      "expected": "该存档跳过；记录仍在列表（缺 manifest 时按记录回填 best-effort）；健康存档照常导入"
+    },
+    {
+      "id": "F14f",
+      "dir": "F14f-files-mismatch",
+      "target": "cp_..._e6aaaa/files.json",
+      "damage": "filesRevision 与 manifest 不一致",
+      "expected": "完整数据读取拒绝（ATOMIC-PAIR），轻量元数据仍可用"
+    },
+    {
+      "id": "F14g",
+      "dir": "F14g-backupdir-traversal",
+      "target": "meta.json custom.checkpoints[0].backupDir",
+      "damage": "backupDir=\"../evil\"",
+      "expected": "安全校验拒绝（isSafeCheckpointDirName），不产生盘外操作"
+    },
+    {
+      "id": "F14h",
+      "dir": "F14h-log-torn-tail",
+      "target": "memory/LOG.txt",
+      "damage": "1024×3 完整 + 500B 残尾",
+      "expected": "只解析完整记录；可选截断修复或保留原样"
+    },
+    {
+      "id": "F14i",
+      "dir": "F14i-log-bad-line",
+      "target": "memory/LOG.txt 第 2 条",
+      "damage": "非数字 id（#abc ...）",
+      "expected": "记录级跳过，其余记录照常导入"
+    },
+    {
+      "id": "F14j",
+      "dir": "F14j-tree-torn-tail",
+      "target": "memory/TREE/2",
+      "damage": "288B 完整槽位 + 100B 尾",
+      "expected": "摘要按完整槽位解析，尾部忽略"
+    },
+    {
+      "id": "F14k",
+      "dir": "F14k-scope-corrupt",
+      "target": "memory-workspaces/<hash>/scope.json",
+      "damage": "非法 JSON `{broken`",
+      "expected": "该工作区目录跳过（不视为 scope）；健康工作区照常导入"
+    },
+    {
+      "id": "F14l",
+      "dir": "F14l-empty-files-array",
+      "target": "cp_..._elaaaa/files.json",
+      "damage": "\"files\":[] 数组形状",
+      "expected": "拒绝（防误删语义，isFilesMapping）"
+    }
+  ]
+}

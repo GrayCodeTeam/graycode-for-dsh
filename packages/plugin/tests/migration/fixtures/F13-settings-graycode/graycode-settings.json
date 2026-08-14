@@ -1,0 +1,97 @@
+{
+  "version": "1.0",
+  "exportedAt": 1700086400000,
+  "graycodeVersion": "1.5.4",
+  "vscodeSettings": {
+    "graycode.toolsConfig": {
+      "read_file": {
+        "maxReadLines": 2000
+      },
+      "write_file": {},
+      "list_files": {
+        "maxDepth": 10
+      },
+      "apply_diff": {
+        "preview": true
+      }
+    },
+    "graycode.ui": {
+      "theme": "dark",
+      "fontSize": 13
+    },
+    "graycode.skills": {
+      "enabled": true
+    },
+    "graycode.subagents": {
+      "maxConcurrent": 2
+    },
+    "graycode.toolsEnabled": true,
+    "graycode.toolAutoExec": false,
+    "graycode.maxToolIterations": 30,
+    "graycode.defaultToolMode": "auto",
+    "graycode.activeChannelId": "channel_demo_gemini",
+    "graycode.lastReadAnnouncementVersion": 5,
+    "graycode.checkForUpdates": true,
+    "graycode.updateChannel": "stable"
+  },
+  "channelConfigs": [
+    {
+      "id": "channel_demo_gemini",
+      "type": "gemini",
+      "name": "Demo Gemini",
+      "apiKey": "sk-test-demo-gemini-0001",
+      "url": "https://example.invalid/v1",
+      "model": "gemini-2.5-flash",
+      "models": [
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "description": "demo model"
+        }
+      ],
+      "timeout": 120000,
+      "enabled": true,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000,
+      "toolMode": "function_call",
+      "options": {
+        "stream": true,
+        "temperature": 0.7
+      },
+      "optionsEnabled": {
+        "temperature": true
+      }
+    }
+  ],
+  "mcpServers": [
+    {
+      "id": "mcp_demo_search",
+      "name": "Demo Search",
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": [
+          "./mcp/demo/search.js"
+        ],
+        "env": {
+          "DEMO_SEARCH_API_KEY": "sk-test-demo-search-0003"
+        }
+      },
+      "enabled": true,
+      "autoConnect": true,
+      "timeout": 30000,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000
+    }
+  ],
+  "skills": [
+    {
+      "id": "demo-skill-review",
+      "name": "demo-skill-review",
+      "description": "演示技能：代码审查（脱敏占位）",
+      "content": "# demo-skill-review\n\n脱敏占位技能内容。\n",
+      "source": "user-graycode",
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F01",
+  "name": "F01-empty",
+  "title": "空库：空目录结构",
+  "dataRoot": "dataRoot",
+  "purpose": "模拟 ensureDirectories 产物：各存储子目录存在但为空，验证迁移器空跑初始化。",
+  "construction": "dataRoot/ 下仅创建 conversations/ snapshots/ checkpoints/ memory/ memory-workspaces/ 空目录；memory/LOG.txt 为 0 字节，memory/config 为默认 OptMem 配置。注意：空目录在 git 提交时需 .gitkeep 等占位保留。",
+  "expectedBehavior": "正常：迁移器空跑成功、0 条记录、不报错。",
+  "specSections": [
+    "legacy-format.md §0.2",
+    "§3.1"
+  ],
+  "synthetic": true
+}

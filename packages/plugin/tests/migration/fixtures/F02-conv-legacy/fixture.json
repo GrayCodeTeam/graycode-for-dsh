@@ -1,0 +1,16 @@
+{
+  "kind": "fixture-index",
+  "id": "F02",
+  "name": "F02-conv-legacy",
+  "title": "单会话 legacy 单文件历史",
+  "dataRoot": "dataRoot",
+  "purpose": "最简迁移路径：legacy 单文件历史 + 元数据完整导入，消息字段逐项可核对。",
+  "construction": "conv_1700000000000_aaaaaa.json 为 Content[] 数组（紧凑 JSON），6 条消息：user/model 交替，含 functionCall+functionResponse 一对、1 条带 usageMetadata 的 model 消息（含 thinkingDuration）、1 条 isSummary 消息（含 summaryTokenStats）；meta.json 含 id/title/createdAt/updatedAt/workspaceUri/custom（2 空格缩进）。",
+  "expectedBehavior": "正常导入：历史与元数据完整迁移，消息字段可逐项断言。",
+  "specSections": [
+    "legacy-format.md §1.1",
+    "§1.2",
+    "§1.3"
+  ],
+  "synthetic": true
+}

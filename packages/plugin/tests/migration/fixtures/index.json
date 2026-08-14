@@ -1,0 +1,290 @@
+{
+  "kind": "fixtures-root-index",
+  "title": "Phase 5 迁移器脱敏测试 fixture 索引",
+  "conventions": {
+    "syntheticOnly": true,
+    "desensitization": "全部内容为合成占位数据：会话/记忆文本为 demo 占位，apiKey 一律 sk-test-*，URL 一律 https://example.invalid/，路径一律 demo 假名；严禁复制真实 limcode-settings.json 的任何值（其含真实密钥）。",
+    "timeBase": 1700000000000,
+    "deterministic": true,
+    "sizeBudgetKB": 200,
+    "fixtureIndexFile": "每类目下 fixture.json（kind: fixture-index）说明用途/构造/预期行为；F14 的 fixture.json 内含 subCases 明细。"
+  },
+  "fixtures": [
+    {
+      "id": "F01",
+      "name": "F01-empty",
+      "title": "空库：空目录结构",
+      "path": "F01-empty",
+      "dataRoot": "dataRoot",
+      "purpose": "模拟 ensureDirectories 产物：各存储子目录存在但为空，验证迁移器空跑初始化。",
+      "expectedBehavior": "正常：迁移器空跑成功、0 条记录、不报错。",
+      "specSections": [
+        "legacy-format.md §0.2",
+        "§3.1"
+      ]
+    },
+    {
+      "id": "F02",
+      "name": "F02-conv-legacy",
+      "title": "单会话 legacy 单文件历史",
+      "path": "F02-conv-legacy",
+      "dataRoot": "dataRoot",
+      "purpose": "最简迁移路径：legacy 单文件历史 + 元数据完整导入，消息字段逐项可核对。",
+      "expectedBehavior": "正常导入：历史与元数据完整迁移，消息字段可逐项断言。",
+      "specSections": [
+        "legacy-format.md §1.1",
+        "§1.2",
+        "§1.3"
+      ]
+    },
+    {
+      "id": "F03",
+      "name": "F03-conv-segmented",
+      "title": "多页 segmented 会话",
+      "path": "F03-conv-segmented",
+      "dataRoot": "dataRoot",
+      "purpose": "分段索引、跨段分页：421 条消息（200+200+21），覆盖满段与尾段。",
+      "expectedBehavior": "正常导入：索引一致性校验通过（Σcount===totalMessages）、跨段读取正确。",
+      "specSections": [
+        "legacy-format.md §1.1",
+        "§1.4"
+      ]
+    },
+    {
+      "id": "F04",
+      "name": "F04-conv-branch",
+      "title": "分支/子代理会话",
+      "path": "F04-conv-branch",
+      "dataRoot": "dataRoot",
+      "purpose": "branches.json、subagents/、usage.json 随会话迁移。",
+      "expectedBehavior": "正常导入：子代理 transcript 与分支图随会话迁移；usage.json 为可重建数据，可选迁移。",
+      "specSections": [
+        "legacy-format.md §1.1",
+        "§1.5",
+        "§1.7",
+        "§1.8"
+      ]
+    },
+    {
+      "id": "F05",
+      "name": "F05-snapshots",
+      "title": "快照库",
+      "path": "F05-snapshots",
+      "dataRoot": "dataRoot",
+      "purpose": "快照 ID 解析（含下划线）与 snapshotBelongsToConversation 归属校验。",
+      "expectedBehavior": "正常导入归属校验通过的快照；孤儿快照跳过（不匹配既有会话）。",
+      "specSections": [
+        "legacy-format.md §1.6"
+      ]
+    },
+    {
+      "id": "F06",
+      "name": "F06-checkpoint-v1",
+      "title": "checkpoint v1（files 内联 manifest）",
+      "path": "F06-checkpoint-v1",
+      "dataRoot": "dataRoot",
+      "purpose": "旧 manifest 读取：version:1，files 内联，无 files.json/filesRevision。",
+      "expectedBehavior": "正常导入：v1 读取 + 懒加载回填 + best-effort 拆分迁移（如实现）。",
+      "specSections": [
+        "legacy-format.md §2.1",
+        "§2.2"
+      ]
+    },
+    {
+      "id": "F07",
+      "name": "F07-checkpoint-v2",
+      "title": "checkpoint v2（manifest.json + files.json + filesRevision）",
+      "path": "F07-checkpoint-v2",
+      "dataRoot": "dataRoot",
+      "purpose": "新 manifest、filesRevision 配对：v2 读取与 ATOMIC-PAIR 配对校验通过路径。",
+      "expectedBehavior": "正常导入：v2 读取、配对校验通过。",
+      "specSections": [
+        "legacy-format.md §2.2"
+      ]
+    },
+    {
+      "id": "F08",
+      "name": "F08-checkpoint-incremental",
+      "title": "checkpoint 增量链",
+      "path": "F08-checkpoint-incremental",
+      "dataRoot": "dataRoot",
+      "purpose": "baseCheckpointId、backupSourceCheckpointId、删除语义与链回溯。",
+      "expectedBehavior": "正常导入：链回溯、缺失文件回退前置节点、删除语义、contentHash 可校验。",
+      "specSections": [
+        "legacy-format.md §2.2",
+        "§2.3"
+      ]
+    },
+    {
+      "id": "F09",
+      "name": "F09-memory-new",
+      "title": "memory 新格式（LOG_REC=1024）",
+      "path": "F09-memory-new",
+      "dataRoot": "dataRoot",
+      "purpose": "固定宽度解析、UTF-8 多字节边界、TREE 槽位定位。",
+      "expectedBehavior": "正常导入：按 1024 宽度解析全部记录；TREE 按 288 槽位读取。",
+      "specSections": [
+        "legacy-format.md §3.1",
+        "§3.2",
+        "§3.3",
+        "§3.5"
+      ]
+    },
+    {
+      "id": "F10",
+      "name": "F10-memory-old",
+      "title": "memory 旧格式（OLD_LOG_REC=320）",
+      "path": "F10-memory-old",
+      "dataRoot": "dataRoot",
+      "purpose": "320 格式探测与 320→1024 无损迁移。",
+      "expectedBehavior": "正常导入：格式探测（前两条 320 切片 id=0/1 + ISO 日期）→ 320→1024 无损迁移，迁移后 id 保持连续。",
+      "specSections": [
+        "legacy-format.md §3.2"
+      ]
+    },
+    {
+      "id": "F11",
+      "name": "F11-memory-workspace",
+      "title": "memory 工作区作用域",
+      "path": "F11-memory-workspace",
+      "dataRoot": "dataRoot",
+      "purpose": "hash 目录名映射、scope.json 读取、hasData 判定。",
+      "expectedBehavior": "正常导入：按 hash 目录映射 scope，读取 scope.json，hasData 判定正确。",
+      "specSections": [
+        "legacy-format.md §3.1",
+        "§3.4"
+      ]
+    },
+    {
+      "id": "F12",
+      "name": "F12-settings-limcode",
+      "title": "设置导出（旧 LimCode 格式）",
+      "path": "F12-settings-limcode",
+      "dataRoot": "dataRoot",
+      "purpose": "limcodeVersion 迁移路径：无前缀键、machine 键、source 映射。",
+      "expectedBehavior": "正常导入：识别 limcodeVersion 并映射键/source 后导入（无前缀键原样消费）。",
+      "specSections": [
+        "legacy-format.md §4.1",
+        "§4.2",
+        "§4.3",
+        "§4.4",
+        "§4.5",
+        "§4.6"
+      ]
+    },
+    {
+      "id": "F13",
+      "name": "F13-settings-graycode",
+      "title": "设置导出（新 GrayCode 格式）",
+      "path": "F13-settings-graycode",
+      "dataRoot": "dataRoot",
+      "purpose": "新格式直接导入、machine 键过滤、version 校验失败分支。",
+      "expectedBehavior": "正常导入新格式；F13b 变体被拒绝（version 校验失败），不影响其他导入。",
+      "specSections": [
+        "legacy-format.md §4.2",
+        "§4.3"
+      ]
+    },
+    {
+      "id": "F14",
+      "name": "F14-corrupt",
+      "title": "损坏样本集",
+      "path": "F14-corrupt",
+      "dataRoot": "dataRoot",
+      "purpose": "验证单文件损坏不影响整体迁移：隔离损坏项而非全库失败（每个子项均含健康控制样本）。",
+      "expectedBehavior": "按 subCases 表隔离：跳过/告警/拒绝，控制样本照常导入。",
+      "specSections": [
+        "legacy-format.md §1.3",
+        "§1.4",
+        "§2.5",
+        "§3.6"
+      ],
+      "subCases": [
+        {
+          "id": "F14a",
+          "dir": "F14a-meta-corrupt",
+          "target": "conv_1700000000000_e1aaaa.meta.json",
+          "damage": "非法 JSON `{broken`",
+          "expected": "跳过该会话并告警（或按旧版语义改名 .corrupt-* 备份）；控制会话照常导入"
+        },
+        {
+          "id": "F14b",
+          "dir": "F14b-history-not-array",
+          "target": "conv_1700000000000_e2aaaa.json",
+          "damage": "合法 JSON 但非数组（{\"a\":1}）",
+          "expected": "拒绝读取（parse_error，asHistoryReadResult），不崩溃；控制会话照常导入"
+        },
+        {
+          "id": "F14c",
+          "dir": "F14c-segment-missing",
+          "target": "history/000001.ndjson 缺失",
+          "damage": "删除 000001.ndjson（索引自身一致）",
+          "expected": "该会话报 segment_missing，其余会话照常迁移"
+        },
+        {
+          "id": "F14d",
+          "dir": "F14d-index-inconsistent",
+          "target": "history.index.json",
+          "damage": "totalMessages=8 但 Σcount=5",
+          "expected": "一致性校验失败 → 会话级降级/告警"
+        },
+        {
+          "id": "F14e",
+          "dir": "F14e-manifest-corrupt",
+          "target": "cp_..._e5aaaa/manifest.json",
+          "damage": "非法 JSON `{broken`",
+          "expected": "该存档跳过；记录仍在列表（缺 manifest 时按记录回填 best-effort）；健康存档照常导入"
+        },
+        {
+          "id": "F14f",
+          "dir": "F14f-files-mismatch",
+          "target": "cp_..._e6aaaa/files.json",
+          "damage": "filesRevision 与 manifest 不一致",
+          "expected": "完整数据读取拒绝（ATOMIC-PAIR），轻量元数据仍可用"
+        },
+        {
+          "id": "F14g",
+          "dir": "F14g-backupdir-traversal",
+          "target": "meta.json custom.checkpoints[0].backupDir",
+          "damage": "backupDir=\"../evil\"",
+          "expected": "安全校验拒绝（isSafeCheckpointDirName），不产生盘外操作"
+        },
+        {
+          "id": "F14h",
+          "dir": "F14h-log-torn-tail",
+          "target": "memory/LOG.txt",
+          "damage": "1024×3 完整 + 500B 残尾",
+          "expected": "只解析完整记录；可选截断修复或保留原样"
+        },
+        {
+          "id": "F14i",
+          "dir": "F14i-log-bad-line",
+          "target": "memory/LOG.txt 第 2 条",
+          "damage": "非数字 id（#abc ...）",
+          "expected": "记录级跳过，其余记录照常导入"
+        },
+        {
+          "id": "F14j",
+          "dir": "F14j-tree-torn-tail",
+          "target": "memory/TREE/2",
+          "damage": "288B 完整槽位 + 100B 尾",
+          "expected": "摘要按完整槽位解析，尾部忽略"
+        },
+        {
+          "id": "F14k",
+          "dir": "F14k-scope-corrupt",
+          "target": "memory-workspaces/<hash>/scope.json",
+          "damage": "非法 JSON `{broken`",
+          "expected": "该工作区目录跳过（不视为 scope）；健康工作区照常导入"
+        },
+        {
+          "id": "F14l",
+          "dir": "F14l-empty-files-array",
+          "target": "cp_..._elaaaa/files.json",
+          "damage": "\"files\":[] 数组形状",
+          "expected": "拒绝（防误删语义，isFilesMapping）"
+        }
+      ]
+    }
+  ]
+}

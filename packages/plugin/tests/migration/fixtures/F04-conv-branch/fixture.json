@@ -1,0 +1,17 @@
+{
+  "kind": "fixture-index",
+  "id": "F04",
+  "name": "F04-conv-branch",
+  "title": "分支/子代理会话",
+  "dataRoot": "dataRoot",
+  "purpose": "branches.json、subagents/、usage.json 随会话迁移。",
+  "construction": "segmented 主历史（5 条）+ branches.json（version:1，rootNodeId/activeTailNodeId/activeChildId/nodes/candidateSummaries；含 reroll 双候选节点、1 个 kind:exported 节点带 exportedFrom、1 个 deleted:true 节点）+ subagents/run_abc123.json（contents + lastSentHistoryProjection version:1，entries 含 contentIndex 索引与内嵌 content）+ {id}.usage.json（UsageIndexMessage[]，含 id/timestamp/modelVersion/prompt/candidates）。",
+  "expectedBehavior": "正常导入：子代理 transcript 与分支图随会话迁移；usage.json 为可重建数据，可选迁移。",
+  "specSections": [
+    "legacy-format.md §1.1",
+    "§1.5",
+    "§1.7",
+    "§1.8"
+  ],
+  "synthetic": true
+}

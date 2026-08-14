@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F08",
+  "name": "F08-checkpoint-incremental",
+  "title": "checkpoint 增量链",
+  "dataRoot": "dataRoot",
+  "purpose": "baseCheckpointId、backupSourceCheckpointId、删除语义与链回溯。",
+  "construction": "3 个存档：aa full（a/b/c.txt）→ bb incremental（base=aa，b.txt modified + d.txt added；files.json 中 b.txt 带 backupSourceCheckpointId:aa，备份目录仅含 b/d.txt）→ cc incremental（base=bb，仅 1 条 c.txt deleted，备份目录无文件，files.json files 为空对象）；会话 meta.json custom.checkpoints 3 条 CheckpointRecord 按时间顺序（toolName 覆盖 user_message/model_message/tool_batch，contentHash 按规范公式计算）。",
+  "expectedBehavior": "正常导入：链回溯、缺失文件回退前置节点、删除语义、contentHash 可校验。",
+  "specSections": [
+    "legacy-format.md §2.2",
+    "§2.3"
+  ],
+  "synthetic": true
+}

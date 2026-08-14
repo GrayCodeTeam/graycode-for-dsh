@@ -1,0 +1,76 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "子代理 demo：请分析变更。"
+        }
+      ],
+      "index": 0,
+      "id": "msg_sub_0001",
+      "parentId": null,
+      "timestamp": 1700000000000,
+      "isUserInput": true
+    },
+    {
+      "role": "model",
+      "parts": [
+        {
+          "type": "text",
+          "text": "子代理 demo：分析完成。"
+        }
+      ],
+      "index": 1,
+      "id": "msg_sub_0002",
+      "parentId": "msg_sub_0001",
+      "timestamp": 1700000001000,
+      "modelVersion": "gemini-2.5-flash"
+    },
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "functionResponse",
+          "id": "fc_sub_0001",
+          "name": "search_in_files",
+          "response": {
+            "content": "demo: 2 matches"
+          }
+        }
+      ],
+      "index": 2,
+      "id": "msg_sub_0003",
+      "parentId": "msg_sub_0002",
+      "timestamp": 1700000002000,
+      "isFunctionResponse": true
+    }
+  ],
+  "lastSentHistoryProjection": {
+    "version": 1,
+    "entries": [
+      {
+        "contentIndex": 0
+      },
+      {
+        "contentIndex": 1
+      },
+      {
+        "content": {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "子代理 demo：无法按索引匹配的投影消息"
+            }
+          ],
+          "index": 3,
+          "id": "msg_sub_0004",
+          "parentId": "msg_sub_0003",
+          "timestamp": 1700000003000
+        }
+      }
+    ]
+  }
+}

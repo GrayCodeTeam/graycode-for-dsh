@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "checkpointId": "cp_1700000000000_e6aaaa",
+  "workspaceRoots": [
+    {
+      "id": "ws_1a9de97bfcd33ead",
+      "name": "my-project",
+      "uri": "file:///c%3A/Users/demo/my-project"
+    }
+  ],
+  "filesRevision": "e6aaaaaa-0000-4000-8000-000000000001",
+  "emptyDirs": [],
+  "changes": [
+    {
+      "path": "ws_1a9de97bfcd33ead/demo.txt",
+      "type": "added",
+      "hash": "fd91f5d284bad95663a889b740934f08eea1a24ab3171d9a25875d42ac647817"
+    }
+  ],
+  "excluded": [],
+  "ignoreSnapshot": {
+    "version": 1,
+    "forcedRulesVersion": 1,
+    "defaultProfileVersion": 1,
+    "enabledProfiles": {
+      "logs": true
+    },
+    "profilePatterns": {},
+    "maxFileSizeBytes": 52428800,
+    "customPatterns": []
+  },
+  "partial": false
+}

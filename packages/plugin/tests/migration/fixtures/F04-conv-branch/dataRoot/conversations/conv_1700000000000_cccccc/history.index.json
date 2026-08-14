@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "segmentSize": 200,
+  "totalMessages": 5,
+  "segments": [
+    {
+      "file": "000000.ndjson",
+      "startIndex": 0,
+      "endIndex": 4,
+      "count": 5
+    }
+  ]
+}

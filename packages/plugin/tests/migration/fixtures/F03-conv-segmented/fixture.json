@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F03",
+  "name": "F03-conv-segmented",
+  "title": "多页 segmented 会话",
+  "dataRoot": "dataRoot",
+  "purpose": "分段索引、跨段分页：421 条消息（200+200+21），覆盖满段与尾段。",
+  "construction": "history/000000.ndjson(200 行)+000001.ndjson(200 行)+000002.ndjson(21 行)，每行一条 Content（无缩进 JSON）；history.index.json 2 空格缩进（version:1/segmentSize:200/totalMessages:421/segments 区间连续）；额外保留 legacy 单文件 {id}.json（前 3 条，迁移中间态，验证 segmented 优先、legacy 兜底）。",
+  "expectedBehavior": "正常导入：索引一致性校验通过（Σcount===totalMessages）、跨段读取正确。",
+  "specSections": [
+    "legacy-format.md §1.1",
+    "§1.4"
+  ],
+  "synthetic": true
+}

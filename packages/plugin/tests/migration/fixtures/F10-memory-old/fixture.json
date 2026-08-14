@@ -1,0 +1,14 @@
+{
+  "kind": "fixture-index",
+  "id": "F10",
+  "name": "F10-memory-old",
+  "title": "memory 旧格式（OLD_LOG_REC=320）",
+  "dataRoot": "dataRoot",
+  "purpose": "320 格式探测与 320→1024 无损迁移。",
+  "construction": "LOG.txt 3 条 × 320B（#0/#1/#2 id 连续、ISO 日期）；TREE/2 一条 288B 摘要；config 默认配置。",
+  "expectedBehavior": "正常导入：格式探测（前两条 320 切片 id=0/1 + ISO 日期）→ 320→1024 无损迁移，迁移后 id 保持连续。",
+  "specSections": [
+    "legacy-format.md §3.2"
+  ],
+  "synthetic": true
+}

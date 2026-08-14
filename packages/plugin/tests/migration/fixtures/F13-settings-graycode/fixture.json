@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F13",
+  "name": "F13-settings-graycode",
+  "title": "设置导出（新 GrayCode 格式）",
+  "dataRoot": "dataRoot",
+  "purpose": "新格式直接导入、machine 键过滤、version 校验失败分支。",
+  "construction": "graycode-settings.json：version 1.0 + graycodeVersion 1.5.4；vscodeSettings 键带 graycode. 前缀，不含 proxy/storagePath machine 键；channelConfigs/mcpServers/skills 各 1 条（skills source:user-graycode）。变体 graycode-settings-v2-rejected.json：version 2.0，预期解析时版本不匹配被拒绝。",
+  "expectedBehavior": "正常导入新格式；F13b 变体被拒绝（version 校验失败），不影响其他导入。",
+  "specSections": [
+    "legacy-format.md §4.2",
+    "§4.3"
+  ],
+  "synthetic": true
+}

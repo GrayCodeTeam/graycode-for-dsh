@@ -1,0 +1,5 @@
+{"role":"user","parts":[{"type":"text","text":"demo：主历史第一条"}],"index":0,"id":"msg_main_0001","parentId":null,"timestamp":1700000000000,"isUserInput":true}
+{"role":"model","parts":[{"type":"text","text":"demo：主历史回复"}],"index":1,"id":"msg_main_0002","parentId":"msg_main_0001","timestamp":1700000001000,"modelVersion":"gemini-2.5-flash"}
+{"role":"user","parts":[{"type":"text","text":"demo：主历史第三条"}],"index":2,"id":"msg_main_0003","parentId":"msg_main_0002","timestamp":1700000002000,"isUserInput":true}
+{"role":"model","parts":[{"type":"text","text":"demo：主历史第四条"}],"index":3,"id":"msg_main_0004","parentId":"msg_main_0003","timestamp":1700000003000,"modelVersion":"gemini-2.5-flash"}
+{"role":"user","parts":[{"type":"text","text":"demo：主历史第五条"}],"index":4,"id":"msg_main_0005","parentId":"msg_main_0004","timestamp":1700000004000,"isUserInput":true}
