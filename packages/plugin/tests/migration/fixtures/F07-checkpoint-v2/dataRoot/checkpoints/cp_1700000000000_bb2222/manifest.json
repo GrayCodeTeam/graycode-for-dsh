@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "checkpointId": "cp_1700000000000_bb2222",
+  "workspaceRoots": [
+    {
+      "id": "ws_1a9de97bfcd33ead",
+      "name": "my-project",
+      "uri": "file:///c%3A/Users/demo/my-project"
+    }
+  ],
+  "filesRevision": "11111111-2222-4333-8444-555555555555",
+  "emptyDirs": [],
+  "changes": [
+    {
+      "path": "ws_1a9de97bfcd33ead/src/demo.txt",
+      "type": "added",
+      "hash": "c3a3f0971f0fea862d6c3d65b6d3866ff845b33cacd7aca8ee4de0a2ead542cd"
+    },
+    {
+      "path": "ws_1a9de97bfcd33ead/src/util.txt",
+      "type": "added",
+      "hash": "4646cf473f3275aac4025f4649d681caa4945ffd062e96c82adf683665e943c2"
+    }
+  ],
+  "excluded": [],
+  "ignoreSnapshot": {
+    "version": 1,
+    "forcedRulesVersion": 1,
+    "defaultProfileVersion": 1,
+    "enabledProfiles": {
+      "logs": true
+    },
+    "profilePatterns": {},
+    "maxFileSizeBytes": 52428800,
+    "customPatterns": []
+  },
+  "partial": false
+}

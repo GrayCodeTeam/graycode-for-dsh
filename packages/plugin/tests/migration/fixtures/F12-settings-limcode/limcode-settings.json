@@ -1,0 +1,204 @@
+{
+  "version": "1.0",
+  "exportedAt": 1700086400000,
+  "limcodeVersion": "1.2.6",
+  "vscodeSettings": {
+    "toolsConfig": {
+      "read_file": {
+        "maxReadLines": 2000
+      },
+      "write_file": {},
+      "list_files": {
+        "maxDepth": 10
+      },
+      "find_files": {
+        "maxResults": 500
+      },
+      "search_in_files": {
+        "maxResults": 100
+      },
+      "apply_diff": {
+        "preview": true
+      },
+      "delete_file": {},
+      "execute_command": {
+        "timeoutMs": 60000
+      }
+    },
+    "ui": {
+      "theme": "dark",
+      "fontSize": 13,
+      "showTokenCount": true
+    },
+    "skills": {
+      "enabled": true
+    },
+    "subagents": {
+      "maxConcurrent": 2
+    },
+    "toolsEnabled": true,
+    "toolAutoExec": true,
+    "maxToolIterations": 30,
+    "defaultToolMode": "plan",
+    "activeChannelId": "channel_demo_gemini",
+    "lastReadAnnouncementVersion": 3,
+    "proxy": {
+      "enabled": false,
+      "url": ""
+    },
+    "storagePath": {
+      "customDataPath": "",
+      "migrationStatus": "completed"
+    }
+  },
+  "channelConfigs": [
+    {
+      "id": "channel_demo_gemini",
+      "type": "gemini",
+      "name": "Demo Gemini",
+      "apiKey": "demo-key-gemini-0001",
+      "url": "https://example.invalid/v1",
+      "model": "gemini-2.5-flash",
+      "models": [
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "description": "demo model",
+          "contextWindow": 1048576,
+          "maxOutputTokens": 8192
+        }
+      ],
+      "timeout": 120000,
+      "enabled": true,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000,
+      "toolMode": "function_call",
+      "retryEnabled": true,
+      "retryCount": 3,
+      "retryInterval": 2000,
+      "contextThresholdEnabled": true,
+      "contextThreshold": "80%",
+      "autoSummarizeEnabled": true,
+      "multimodalToolsEnabled": false,
+      "options": {
+        "stream": true,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "optionsEnabled": {
+        "temperature": true,
+        "top_p": false,
+        "max_tokens": true
+      },
+      "maxContextTokens": 1048576,
+      "tokenCountMethod": "countTokens",
+      "useAuthorizationHeader": false
+    },
+    {
+      "id": "channel_demo_openai",
+      "type": "openai",
+      "name": "Demo OpenAI",
+      "apiKey": "demo-key-openai-0002",
+      "url": "https://example.invalid/v1",
+      "model": "gpt-4.1-mini",
+      "models": [
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 mini",
+          "description": "demo model",
+          "contextWindow": 1048576,
+          "maxOutputTokens": 32768
+        }
+      ],
+      "timeout": 120000,
+      "enabled": true,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000,
+      "toolMode": "json",
+      "retryEnabled": true,
+      "retryCount": 3,
+      "retryInterval": 2000,
+      "contextThresholdEnabled": false,
+      "autoSummarizeEnabled": false,
+      "multimodalToolsEnabled": false,
+      "options": {
+        "stream": true,
+        "temperature": 0.7,
+        "reasoning": {
+          "effort": "medium",
+          "summaryEnabled": true,
+          "summary": "demo"
+        }
+      },
+      "optionsEnabled": {
+        "temperature": true,
+        "reasoning": true
+      },
+      "maxContextTokens": 1048576,
+      "tokenCountMethod": "countTokens",
+      "useAuthorizationHeader": true
+    }
+  ],
+  "mcpServers": [
+    {
+      "id": "mcp_demo_search",
+      "name": "Demo Search",
+      "transport": {
+        "type": "stdio",
+        "command": "node",
+        "args": [
+          "./mcp/demo/search.js"
+        ],
+        "env": {
+          "DEMO_SEARCH_API_KEY": "demo-key-search-0003"
+        }
+      },
+      "enabled": true,
+      "autoConnect": true,
+      "timeout": 30000,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000
+    },
+    {
+      "id": "mcp_demo_fs",
+      "name": "Demo File Server",
+      "transport": {
+        "type": "stdio",
+        "command": "python",
+        "args": [
+          "./mcp/demo/server.py"
+        ],
+        "env": {
+          "DEMO_FS_TOKEN": "demo-key-0004"
+        }
+      },
+      "enabled": false,
+      "autoConnect": false,
+      "timeout": 15000,
+      "createdAt": 1700000000000,
+      "updatedAt": 1700000000000
+    }
+  ],
+  "skills": [
+    {
+      "id": "demo-skill-review",
+      "name": "demo-skill-review",
+      "description": "演示技能：代码审查（脱敏占位）",
+      "content": "# demo-skill-review\n\n脱敏占位技能内容。\n\n1. 读取变更文件\n2. 输出审查意见\n",
+      "source": "user-limcode",
+      "enabled": true
+    },
+    {
+      "id": "demo-skill-commit",
+      "name": "demo-skill-commit",
+      "description": "演示技能：提交信息（脱敏占位）",
+      "content": "# demo-skill-commit\n\n脱敏占位技能内容。\n",
+      "source": "user-limcode",
+      "enabled": true
+    }
+  ]
+}

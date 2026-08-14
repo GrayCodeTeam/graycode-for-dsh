@@ -1,0 +1,1 @@
+[{"role":"user","parts":[{"type":"text","text":"demo：分段历史第一条消息"}],"index":0,"id":"msg_demo_0101","parentId":null,"timestamp":1700000000000,"isUserInput":true},{"role":"model","parts":[{"type":"text","text":"demo 1"}]},{"role":"user","parts":[{"type":"text","text":"demo 2"}]}]

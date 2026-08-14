@@ -1,0 +1,79 @@
+{
+  "id": "conv_1700000000000_dddddd",
+  "title": "demo：checkpoint 增量链会话",
+  "createdAt": 1700000000000,
+  "updatedAt": 1700000002000,
+  "workspaceUri": "file:///c%3A/Users/demo/my-project",
+  "custom": {
+    "checkpoints": [
+      {
+        "id": "cp_1700000000000_aa3333",
+        "conversationId": "conv_1700000000000_dddddd",
+        "messageIndex": 1,
+        "messageNodeId": "msg_demo_0002",
+        "toolName": "user_message",
+        "phase": "before",
+        "timestamp": 1700000000000,
+        "backupDir": "cp_1700000000000_aa3333",
+        "fileCount": 3,
+        "contentHash": "e419236075d0d291",
+        "description": "Before: user_message",
+        "type": "full",
+        "manifestVersion": 2,
+        "partial": false
+      },
+      {
+        "id": "cp_1700000000000_bb4444",
+        "conversationId": "conv_1700000000000_dddddd",
+        "messageIndex": 2,
+        "messageNodeId": "msg_demo_0003",
+        "toolName": "model_message",
+        "phase": "after",
+        "timestamp": 1700000001000,
+        "backupDir": "cp_1700000000000_bb4444",
+        "fileCount": 2,
+        "contentHash": "dde78ba21b83a29e",
+        "description": "After: model_message",
+        "type": "incremental",
+        "baseCheckpointId": "cp_1700000000000_aa3333",
+        "manifestVersion": 2,
+        "partial": false,
+        "changes": [
+          {
+            "path": "ws_1a9de97bfcd33ead/b.txt",
+            "type": "modified",
+            "hash": "ae9ed26911efb38a6b789ffe6f77521b1229b285c66dbb43126f77e54ddc820f"
+          },
+          {
+            "path": "ws_1a9de97bfcd33ead/d.txt",
+            "type": "added",
+            "hash": "f2dd81ae88229d2b2b5bed88860fe92b4d2bce25ab07901753ec81e1677f2424"
+          }
+        ]
+      },
+      {
+        "id": "cp_1700000000000_cc5555",
+        "conversationId": "conv_1700000000000_dddddd",
+        "messageIndex": 3,
+        "messageNodeId": "msg_demo_0004",
+        "toolName": "tool_batch",
+        "phase": "after",
+        "timestamp": 1700000002000,
+        "backupDir": "cp_1700000000000_cc5555",
+        "fileCount": 0,
+        "contentHash": "e3b0c44298fc1c14",
+        "description": "After: tool_batch",
+        "type": "incremental",
+        "baseCheckpointId": "cp_1700000000000_bb4444",
+        "manifestVersion": 2,
+        "partial": false,
+        "changes": [
+          {
+            "path": "ws_1a9de97bfcd33ead/c.txt",
+            "type": "deleted"
+          }
+        ]
+      }
+    ]
+  }
+}

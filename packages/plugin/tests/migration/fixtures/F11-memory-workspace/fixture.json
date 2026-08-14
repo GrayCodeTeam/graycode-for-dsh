@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F11",
+  "name": "F11-memory-workspace",
+  "title": "memory 工作区作用域",
+  "dataRoot": "dataRoot",
+  "purpose": "hash 目录名映射、scope.json 读取、hasData 判定。",
+  "construction": "memory-workspaces/<hash16>/（hash16=sha256(scopeKey) 前 16 hex）：my-project（LOG 1 条 1024B + TREE/2 一条 288B + scope.json）、other-project（仅 LOG，验证 hasData 仅 LOG 判定）；scope.json 含 fsPath/name/uri（uri 为 file:///c%3A/... 编码形态）。",
+  "expectedBehavior": "正常导入：按 hash 目录映射 scope，读取 scope.json，hasData 判定正确。",
+  "specSections": [
+    "legacy-format.md §3.1",
+    "§3.4"
+  ],
+  "synthetic": true
+}

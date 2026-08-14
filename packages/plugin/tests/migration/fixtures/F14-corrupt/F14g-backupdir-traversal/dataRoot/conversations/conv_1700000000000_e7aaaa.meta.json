@@ -1,0 +1,25 @@
+{
+  "id": "conv_1700000000000_e7aaaa",
+  "title": "demo：越界 backupDir",
+  "createdAt": 1700000000000,
+  "updatedAt": 1700000000000,
+  "workspaceUri": "file:///c%3A/Users/demo/my-project",
+  "custom": {
+    "checkpoints": [
+      {
+        "id": "cp_evil_0001",
+        "conversationId": "conv_1700000000000_e7aaaa",
+        "messageIndex": 0,
+        "toolName": "user_message",
+        "phase": "before",
+        "timestamp": 1700000000000,
+        "backupDir": "../evil",
+        "fileCount": 0,
+        "contentHash": "0000000000000000",
+        "description": "Before: user_message",
+        "type": "full",
+        "manifestVersion": 1
+      }
+    ]
+  }
+}

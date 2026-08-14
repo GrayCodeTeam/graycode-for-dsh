@@ -1,0 +1,208 @@
+# CI for the GrayCode × DeepSeek Harness monorepo
+#
+# Design (see docs/CI.md for the full rationale):
+#   - `full`   : ubuntu-latest — every gate: typecheck, full unit suite, build,
+#                pack, tarball content check, clean-profile install smoke (dsh CLI).
+#   - `smoke`  : windows-latest + macos-latest — typecheck, a core test subset,
+#                build, pack and the same tarball content check (packaging is
+#                platform-sensitive: path separators, LICENSE inclusion, tar).
+#
+# Toolchain pinning: Node 22.x (resolves to the latest 22, satisfying the
+# ^22.19 || >=24 requirement of docs/ADR-0001) and pnpm 11.7.0
+# (root packageManager field).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22.x'
+  PNPM_VERSION: '11.7.0'
+
+jobs:
+  full:
+    name: Full (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Caches the pnpm content-addressable store, keyed on the lockfile.
+          cache: pnpm
+
+      - name: Cache node_modules
+        # pnpm resolves the full graph from the store; node_modules caching saves
+        # the linking step. Keyed on the lockfile hash as required. Note: on
+        # Windows, pnpm node_modules contains junctions — if cache restore ever
+        # proves flaky there, drop this step on windows-latest (store cache
+        # alone still makes installs fast) rather than deleting the lockfile.
+        uses: actions/cache@v6
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (tsc --noEmit)
+        run: pnpm typecheck
+
+      - name: Unit tests (full suite)
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack
+        # NOTE: must be `pnpm run pack` (the npm script), not bare `pnpm pack`
+        # (the pnpm builtin), which at the workspace root packs the PRIVATE root
+        # package - the whole repo - into graycode-dsh-<version>.tgz.
+        run: pnpm run pack
+
+      - name: Verify tarball contents
+        # Reuses the local verification script; CI already built and packed, so
+        # only the inspection part runs. pwsh is preinstalled on all runners.
+        shell: pwsh
+        run: ./scripts/verify-pack.ps1 -SkipBuild -SkipPack
+
+      - name: Clean-profile plugin install smoke (blocking)
+        # The plugin artifact is self-contained apart from published rc.6 DSH
+        # dependencies. Installation and a subsequent profile config load are
+        # release gates: any non-zero command must fail the job. The plugin is
+        # intentionally a plain dependency; only the bundle adds loader rows.
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+        run: |
+          set -euo pipefail
+          echo "::group::dsh clean-profile plugin smoke"
+          npm install --global @deepseek-ai/dsh@0.1.0-rc.6 >/dev/null 2>&1
+          dsh --version
+          rm -rf "$DSH_HOME"
+          mkdir -p "$DSH_HOME"
+
+          PLUGIN_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-plugin-*.tgz' -print -quit)
+          test -n "$PLUGIN_TGZ"
+          echo "plugin tarball: $PLUGIN_TGZ"
+
+          dsh plugin --profile graycode add "$PLUGIN_TGZ" >dsh-smoke-plugin.log 2>&1
+          tail -n 20 dsh-smoke-plugin.log
+          dsh --profile graycode --dump-config >dsh-smoke-dump-config.log 2>&1
+          test -s dsh-smoke-dump-config.log
+          echo "GRAY_PLUGIN_INSTALL=ok"
+          echo "::endgroup::"
+
+      - name: Clean-profile bundle install probe (non-blocking until publish)
+        # The bundle resolves @graycode/dsh-plugin and @graycode/dsh-client from
+        # npm. Those packages are not published yet, so a registry 404 is an
+        # expected external-state failure. Unlike the blocking plugin smoke,
+        # this probe is isolated and may not hide any preceding failure. Remove
+        # continue-on-error immediately after the first npm publication.
+        continue-on-error: true
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+        run: |
+          set -euo pipefail
+          echo "::group::dsh clean-profile bundle probe"
+          rm -rf "$DSH_HOME"
+          mkdir -p "$DSH_HOME"
+
+          BUNDLE_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-*.tgz' ! -name 'graycode-dsh-plugin-*.tgz' -print -quit)
+          test -n "$BUNDLE_TGZ"
+          echo "bundle tarball: $BUNDLE_TGZ"
+          dsh plugin --profile graycode add "$BUNDLE_TGZ" >dsh-smoke-bundle.log 2>&1
+          tail -n 20 dsh-smoke-bundle.log
+
+          dsh --profile graycode --dump-config >dsh-smoke-bundle-dump-config.log 2>&1
+          grep -q "id: graycode" dsh-smoke-bundle-dump-config.log
+          grep -q "@graycode/dsh-plugin" dsh-smoke-bundle-dump-config.log
+          echo "GRAY_LAYER=present"
+          echo "::endgroup::"
+
+      - name: Upload dsh smoke diagnostics
+        # Collect logs even when either smoke step failed (or was skipped), so the
+        # 404/publish-gate condition stays visible in the run's artifacts.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-smoke-${{ runner.os }}-${{ github.run_id }}
+          path: dsh-smoke-*.log
+          if-no-files-found: ignore
+
+  smoke:
+    name: Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Cache node_modules
+        if: runner.os != 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (tsc --noEmit)
+        run: pnpm typecheck
+
+      - name: Unit tests (core subset)
+        # Windows/macOS run the smoke subset; Linux runs the full suite.
+        run: pnpm test:smoke
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack
+        # NOTE: must be `pnpm run pack` (the npm script), not bare `pnpm pack`
+        # (the pnpm builtin), which at the workspace root packs the PRIVATE root
+        # package - the whole repo - into graycode-dsh-<version>.tgz.
+        run: pnpm run pack
+
+      - name: Verify tarball contents
+        shell: pwsh
+        run: ./scripts/verify-pack.ps1 -SkipBuild -SkipPack

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "segmentSize": 200,
+  "totalMessages": 8,
+  "segments": [
+    {
+      "file": "000000.ndjson",
+      "startIndex": 0,
+      "endIndex": 2,
+      "count": 3
+    },
+    {
+      "file": "000001.ndjson",
+      "startIndex": 3,
+      "endIndex": 4,
+      "count": 2
+    }
+  ]
+}

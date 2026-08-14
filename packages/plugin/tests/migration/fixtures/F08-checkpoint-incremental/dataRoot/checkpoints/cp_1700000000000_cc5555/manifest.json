@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "checkpointId": "cp_1700000000000_cc5555",
+  "workspaceRoots": [
+    {
+      "id": "ws_1a9de97bfcd33ead",
+      "name": "my-project",
+      "uri": "file:///c%3A/Users/demo/my-project"
+    }
+  ],
+  "filesRevision": "cccccccc-1111-4222-8333-444444444444",
+  "emptyDirs": [],
+  "changes": [
+    {
+      "path": "ws_1a9de97bfcd33ead/c.txt",
+      "type": "deleted"
+    }
+  ],
+  "excluded": [],
+  "ignoreSnapshot": {
+    "version": 1,
+    "forcedRulesVersion": 1,
+    "defaultProfileVersion": 1,
+    "enabledProfiles": {
+      "logs": true
+    },
+    "profilePatterns": {},
+    "maxFileSizeBytes": 52428800,
+    "customPatterns": []
+  },
+  "partial": false
+}

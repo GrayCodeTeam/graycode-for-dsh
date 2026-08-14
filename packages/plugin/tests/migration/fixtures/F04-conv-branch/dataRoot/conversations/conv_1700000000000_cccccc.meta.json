@@ -1,0 +1,10 @@
+{
+  "id": "conv_1700000000000_cccccc",
+  "title": "demo：分支与子代理会话",
+  "createdAt": 1700000000000,
+  "updatedAt": 1700000005000,
+  "workspaceUri": "file:///c%3A/Users/demo/my-project",
+  "custom": {
+    "checkpoints": []
+  }
+}

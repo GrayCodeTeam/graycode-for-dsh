@@ -1,0 +1,819 @@
+/**
+ * BranchCoordinatorService 集成测试：真实临时 dataRoot（sidecar 原子写盘）+ 内存假适配器。
+ *
+ * 假适配器只实现 BranchSessionAdapter 端口（eventsOf/cwdOf/agentPresetOf/forkChild/
+ * sendUserMessage），记录 fork 调用参数与重发的用户消息；不触碰真实 dsh 适配器。
+ */
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { BranchCoordinatorService } from '../../src/branches/service.ts'
+import type { BranchSessionAdapter } from '../../src/branches/service.ts'
+import { BranchError, BranchErrorCode } from '../../src/branches/domain/types.ts'
+import type { GrayBranchGroup } from '../../src/branches/domain/types.ts'
+import type { BranchEventView } from '../../src/branches/domain/turnLocator.ts'
+
+// BUG-09 竞态用例需要可控的慢 readFile：默认委托真实实现，测试内用
+// mockImplementationOnce 让单次读取挂起/延迟。
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+    rename: vi.fn(actual.rename),
+  }
+})
+
+const ROOT_SESSION = 'root-session'
+const WS = 'ws-test'
+
+/** 构造最小事件视图；data 允许携带 content 等额外负载（领域层只读前三个字段） */
+function ev(type: string, seq: number, data: Record<string, unknown> = {}): BranchEventView {
+  return { type, seq, data } as unknown as BranchEventView
+}
+
+/** 两个完整轮次：turn1 (seq0-2)，turn2 (seq3-5，直接用户消息内容 hello) */
+function twoClosedTurns(): BranchEventView[] {
+  return [
+    ev('turn/start', 0, { turn: 1 }),
+    ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] }),
+    ev('turn/end', 2, { turn: 1 }),
+    ev('turn/start', 3, { turn: 2 }),
+    ev('user/message', 4, { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }),
+    ev('turn/end', 5, { turn: 2 }),
+  ]
+}
+
+/** 假适配器：内存会话 + fork/send 调用记录；可按需注入 fork/send 失败 */
+class FakeBranchSessionAdapter implements BranchSessionAdapter {
+  readonly sessions = new Map<string, { events: BranchEventView[]; cwd?: string; agentPreset?: string }>()
+  readonly forkCalls: Array<{
+    childSessionId: string
+    boundary: number | undefined
+    parentSessionId: string
+    cwd?: string
+    agentPreset?: string
+  }> = []
+  readonly sentMessages: Array<{ sessionId: string; content: readonly unknown[] }> = []
+  /** forkChild 对命中 parent 抛错的集合 */
+  readonly failForkParents = new Set<string>()
+  /** 置位后 forkChild 把子会话命名为 'fail-send'（sendUserMessage 对它抛错） */
+  failSendOnFork = false
+  /** 置 false 模拟无 live agent（agent factory 未装载）：sendUserMessage 返回 false 不投递 */
+  agentAvailable = true
+
+  addSession(sessionId: string, events: BranchEventView[], meta: { cwd?: string; agentPreset?: string } = {}): void {
+    this.sessions.set(sessionId, { events, ...meta })
+  }
+
+  eventsOf(sessionId: string): readonly BranchEventView[] {
+    return this.sessions.get(sessionId)?.events ?? []
+  }
+
+  cwdOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.cwd
+  }
+
+  agentPresetOf(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agentPreset
+  }
+
+  async forkChild(input: {
+    parent: { id: string; events: readonly BranchEventView[] }
+    boundary: number | undefined
+    childSessionId: string
+    cwd?: string
+    agentPreset?: string
+  }): Promise<{ sessionId: string; agentAttached: boolean }> {
+    this.forkCalls.push({
+      childSessionId: input.childSessionId,
+      boundary: input.boundary,
+      parentSessionId: input.parent.id,
+      cwd: input.cwd,
+      agentPreset: input.agentPreset,
+    })
+    if (this.failForkParents.has(input.parent.id)) {
+      throw new Error('fork rejected by fake host')
+    }
+    const sessionId = this.failSendOnFork ? 'fail-send' : input.childSessionId
+    // 与真实适配器同口径：seed 按 seq <= boundary 选取（事件流 seq 可能不连续）
+    const boundary = input.boundary
+    const seed =
+      boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
+    this.sessions.set(sessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
+    return { sessionId, agentAttached: false }
+  }
+
+  async sendUserMessage(input: { sessionId: string; content: readonly unknown[] }): Promise<boolean> {
+    if (!this.agentAvailable) return false
+    if (input.sessionId === 'fail-send') {
+      throw new Error('send rejected by fake host')
+    }
+    this.sentMessages.push(input)
+    return true
+  }
+}
+
+/** 取 promise 的拒绝值；未拒绝时测试失败 */
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected the promise to reject')
+}
+
+/** 捕获同步调用抛出的错误；未抛错时测试失败 */
+function thrownSync(fn: () => unknown): unknown {
+  try {
+    fn()
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected the function to throw')
+}
+
+/** 断言 promise 以指定 BranchError code 拒绝 */
+async function expectRejectCode(promise: Promise<unknown>, code: string): Promise<void> {
+  const error = await rejectionOf(promise)
+  expect(error).toBeInstanceOf(BranchError)
+  expect((error as BranchError).code).toBe(code)
+}
+
+interface Env {
+  dataRoot: string
+  adapter: FakeBranchSessionAdapter
+  service: BranchCoordinatorService
+}
+
+let env: Env
+
+beforeEach(async () => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branches-'))
+  const adapter = new FakeBranchSessionAdapter()
+  adapter.addSession(ROOT_SESSION, twoClosedTurns(), { cwd: '/workspace/root', agentPreset: 'coder' })
+  const service = new BranchCoordinatorService({ dataRoot }, adapter)
+  await service.initialize()
+  env = { dataRoot, adapter, service }
+})
+
+afterEach(async () => {
+  env.service.dispose()
+  await fs.rm(env.dataRoot, { recursive: true, force: true })
+})
+
+async function sidecarStore(dataRoot: string): Promise<{ version: number; groups: unknown[] }> {
+  return JSON.parse(await fs.readFile(path.join(dataRoot, 'branches', 'groups.json'), 'utf-8'))
+}
+
+describe('BranchCoordinatorService initialize', () => {
+  it('a missing sidecar file loads an empty store', async () => {
+    const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branches-empty-'))
+    try {
+      const service = new BranchCoordinatorService({ dataRoot }, new FakeBranchSessionAdapter())
+      await service.initialize()
+      expect(service.listGroups()).toEqual([])
+      service.dispose()
+    } finally {
+      await fs.rm(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('a corrupt sidecar file is contained: initialize resolves and operations fail with STORAGE_CORRUPT', async () => {
+    await fs.mkdir(path.join(env.dataRoot, 'branches'), { recursive: true })
+    await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), '{not json', 'utf-8')
+    const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    // 不再向调用方拒绝：index.ts 的 void initialize() 不会产生 unhandled rejection
+    await expect(service.initialize()).resolves.toBeUndefined()
+    // 错误状态响亮失败：读与写路径都返回稳定 STORAGE_CORRUPT
+    const readError = thrownSync(() => service.listGroups())
+    expect(readError).toBeInstanceOf(BranchError)
+    expect((readError as BranchError).code).toBe(BranchErrorCode.STORAGE_CORRUPT)
+    await expectRejectCode(
+      service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION }),
+      BranchErrorCode.STORAGE_CORRUPT,
+    )
+    service.dispose()
+  })
+
+  it('a concurrent ensureGroup before initialize finishes is not lost to the stale load (BUG-09)', async () => {
+    // 让本次 initialize 的 readFile 挂起（模拟慢盘），放行后以 ENOENT 返回（文件尚不存在）
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const readFileSpy = fs.readFile as unknown as Mock<() => Promise<string>>
+    readFileSpy.mockImplementationOnce(() =>
+      gate.then(() => {
+        const error = new Error('ENOENT: no such file or directory') as NodeJS.ErrnoException
+        error.code = 'ENOENT'
+        throw error
+      }),
+    )
+    const adapter = new FakeBranchSessionAdapter()
+    adapter.addSession(ROOT_SESSION, twoClosedTurns())
+    const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, adapter)
+    try {
+      let initResolved = false
+      const initPromise = service.initialize().then(() => {
+        initResolved = true
+      })
+      let groupResolved = false
+      const groupPromise = service
+        .ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+        .then(group => {
+          groupResolved = true
+          return group
+        })
+      // 门控自验证：readFile 确实被挂起（mock 拦截了 service 的 fs/promises 读取）
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(initResolved).toBe(false)
+      // 初始化未完成前 ensureGroup 不得完成：否则会先落盘、再被 initialize 的旧快照覆盖
+      expect(groupResolved).toBe(false)
+      release()
+      await initPromise
+      const group = await groupPromise
+      expect(group.rootSessionId).toBe(ROOT_SESSION)
+      // 分组既在内存也在 sidecar，未被 initialize 覆盖
+      expect(service.listGroups()).toHaveLength(1)
+      expect(service.listGroups()[0]!.id).toBe(group.id)
+      const store = await sidecarStore(env.dataRoot)
+      expect((store.groups as Array<{ id: string }>).some(g => g.id === group.id)).toBe(true)
+    } finally {
+      service.dispose()
+    }
+  })
+
+  it('dispose 与在途 initialize 竞态：完成后不回填已弃用实例（loaded 不置位、不落盘）', async () => {
+    // 预置含真实分组的 sidecar：dispose 后的在途读取能区分「回填 vs 跳过」
+    await fs.mkdir(path.join(env.dataRoot, 'branches'), { recursive: true })
+    const group: GrayBranchGroup = {
+      id: 'grp-dispose-race',
+      workspaceId: WS,
+      rootSessionId: ROOT_SESSION,
+      activeSessionId: ROOT_SESSION,
+      candidates: [{ sessionId: ROOT_SESSION, kind: 'root', createdAt: Date.now() }],
+      revision: 1,
+      createdAt: Date.now(),
+    }
+    const storeFile = path.join(env.dataRoot, 'branches', 'groups.json')
+    await fs.writeFile(storeFile, JSON.stringify({ version: 1, groups: [group] }), 'utf-8')
+
+    // 门控 readFile：initialize 未 await、dispose 先到（HMR 卸载竞态）
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const readFileSpy = fs.readFile as unknown as Mock<() => Promise<string>>
+    readFileSpy.mockImplementationOnce(() => gate.then(() => JSON.stringify({ version: 1, groups: [group] })))
+
+    const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    try {
+      const initPromise = service.initialize()
+      service.dispose() // 在途读取完成前弃用
+      release()
+      await initPromise
+      // 已弃用实例不回填：loaded 未置位（listGroups 报未初始化），磁盘 sidecar 未被改写
+      expect(() => service.listGroups()).toThrow(/not initialized/)
+      const store = await sidecarStore(env.dataRoot)
+      expect(store.groups).toHaveLength(1)
+    } finally {
+      service.dispose()
+    }
+  })
+})
+
+describe('BranchCoordinatorService ensureGroup', () => {
+  it('creates a group rooted at the session; a repeated call returns the same group', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    expect(group.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(group.workspaceId).toBe(WS)
+    expect(group.rootSessionId).toBe(ROOT_SESSION)
+    expect(group.activeSessionId).toBe(ROOT_SESSION)
+    expect(group.revision).toBe(1)
+    expect(group.candidates).toHaveLength(1)
+    expect(group.candidates[0]).toMatchObject({ sessionId: ROOT_SESSION, kind: 'root' })
+    expect(group.createdAt).toBeGreaterThan(0)
+
+    const again = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    expect(again.id).toBe(group.id)
+    expect(env.service.listGroups()).toHaveLength(1)
+  })
+})
+
+describe('BranchCoordinatorService createBranch', () => {
+  it('forks through an explicit boundary and records the manual candidate in the sidecar', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.createBranch({
+      groupId: group.id,
+      parentSessionId: ROOT_SESSION,
+      boundary: 2,
+      label: 'manual-1',
+    })
+
+    expect(result.orphan).toBe(false)
+    expect(result.agentAttached).toBe(false)
+    expect(result.kind).toBe('manual')
+    expect(result.parentSessionId).toBe(ROOT_SESSION)
+    expect(result.boundary).toBe(2)
+    expect(result.revision).toBe(2)
+    expect(result.sessionId).toMatch(/^branch-/)
+
+    // 假适配器收到带边界/父会话/cwd/agentPreset 的 fork 调用，seed 为 slice(0, boundary+1)
+    expect(env.adapter.forkCalls).toHaveLength(1)
+    expect(env.adapter.forkCalls[0]).toMatchObject({
+      boundary: 2,
+      parentSessionId: ROOT_SESSION,
+      cwd: '/workspace/root',
+      agentPreset: 'coder',
+    })
+    expect(env.adapter.eventsOf(result.sessionId)).toHaveLength(3)
+
+    // 组内新增 manual 候选 + revision 递增
+    const updated = env.service.getGroup(group.id)!
+    expect(updated.revision).toBe(2)
+    const candidate = updated.candidates.find(c => c.sessionId === result.sessionId)!
+    expect(candidate).toMatchObject({
+      kind: 'manual',
+      parentSessionId: ROOT_SESSION,
+      boundary: 2,
+      label: 'manual-1',
+    })
+
+    // sidecar 文件已原子写盘：version === 1 且候选在列
+    const store = await sidecarStore(env.dataRoot)
+    expect(store.version).toBe(1)
+    const persisted = store.groups[0] as { candidates: Array<{ sessionId: string; kind: string }> }
+    expect(persisted.candidates.some(c => c.sessionId === result.sessionId && c.kind === 'manual')).toBe(true)
+  })
+
+  it('defaults the boundary to the last complete turn end when a later turn is still open', async () => {
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'user' } }),
+      ev('turn/end', 2, { turn: 1 }),
+      ev('turn/start', 3, { turn: 2 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION })
+    expect(result.boundary).toBe(2)
+    expect(env.adapter.forkCalls[0]!.boundary).toBe(2)
+    expect(env.adapter.eventsOf(result.sessionId)).toHaveLength(3)
+  })
+
+  it('rejects when the parent has an open turn and no closed turn (NO_PREVIOUS_TURN)', async () => {
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'user' } }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION }),
+      BranchErrorCode.NO_PREVIOUS_TURN,
+    )
+  })
+
+  it('rejects an unknown group with GROUP_NOT_FOUND', async () => {
+    await expectRejectCode(
+      env.service.createBranch({ groupId: 'no-such-group', parentSessionId: ROOT_SESSION }),
+      BranchErrorCode.GROUP_NOT_FOUND,
+    )
+  })
+
+  it('rejects when the host fork fails with FORK_REJECTED', async () => {
+    env.adapter.failForkParents.add(ROOT_SESSION)
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION }),
+      BranchErrorCode.FORK_REJECTED,
+    )
+    // 失败后组未变化
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('createBranch (manual fork) does not auto-activate the new candidate (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
+    // 只追加候选，不切激活指针
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(2)
+  })
+})
+
+describe('BranchCoordinatorService reroll', () => {
+  it('forks before the target turn and replays its original user message', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.boundary).toBe(2) // turn/start(2) seq3 - 1
+    expect(result.targetTurn).toBe(2)
+    expect(result.messageSent).toBe(true)
+    expect(result.orphan).toBe(false)
+    expect(result.sessionId).toMatch(/^branch-/)
+
+    expect(env.adapter.sentMessages).toHaveLength(1)
+    expect(env.adapter.sentMessages[0]!.sessionId).toBe(result.sessionId)
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'hello' }])
+
+    const candidate = env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === result.sessionId)!
+    expect(candidate).toMatchObject({ kind: 'reroll', parentSessionId: ROOT_SESSION, boundary: 2 })
+  })
+
+  it('rejects a turn whose only user message is plugin-injected (NO_USER_MESSAGE)', async () => {
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'user' } }),
+      ev('turn/end', 2, { turn: 1 }),
+      ev('turn/start', 3, { turn: 2 }),
+      ev('user/message', 4, { source: { kind: 'plugin' } }),
+      ev('turn/end', 5, { turn: 2 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 }),
+      BranchErrorCode.NO_USER_MESSAGE,
+    )
+  })
+
+  it('rejects an unknown turn with TARGET_TURN_NOT_FOUND', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 99 }),
+      BranchErrorCode.TARGET_TURN_NOT_FOUND,
+    )
+  })
+
+  it('rejects the first turn with NO_PREVIOUS_TURN', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 1 }),
+      BranchErrorCode.NO_PREVIOUS_TURN,
+    )
+  })
+
+  it('reports messageSent false when sendUserMessage throws, but still records the candidate', async () => {
+    env.adapter.failSendOnFork = true
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.messageSent).toBe(false)
+    expect(result.orphan).toBe(false)
+    expect(result.sessionId).toBe('fail-send')
+    const candidate = env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === 'fail-send')!
+    expect(candidate.kind).toBe('reroll')
+    expect(env.adapter.sentMessages).toHaveLength(0)
+  })
+
+  it('reroll auto-activates the new candidate in memory and in the sidecar (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.activeSessionId).toBe(result.sessionId)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(result.sessionId)
+    // 激活与 sidecar 提交在同一原子写：落盘内容同样指向新候选
+    const store = await sidecarStore(env.dataRoot)
+    const persisted = store.groups[0] as { activeSessionId: string }
+    expect(persisted.activeSessionId).toBe(result.sessionId)
+    // 追加 + 激活共一次 revision 递增（1 → 2）
+    expect(result.revision).toBe(2)
+  })
+
+  it('replays the correct user message when event seqs are not contiguous (S-01)', async () => {
+    // seq 不连续（1/5 缺失）：若按数组下标取事件会取到 undefined 或错误事件
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 2, { source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] }),
+      ev('turn/end', 3, { turn: 1 }),
+      ev('turn/start', 4, { turn: 2 }),
+      ev('user/message', 6, { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }),
+      ev('turn/end', 7, { turn: 2 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.messageSent).toBe(true)
+    expect(result.boundary).toBe(3)
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'hello' }])
+  })
+
+  it('reports messageSent false when the host has no live agent (agent factory missing)', async () => {
+    env.adapter.agentAvailable = false
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.messageSent).toBe(false)
+    expect(result.orphan).toBe(false)
+    expect(env.adapter.sentMessages).toHaveLength(0)
+  })
+
+  it('forks through the correct events when seqs are not contiguous (boundary by seq, not index)', async () => {
+    // turn2 的 turn/start 在 seq5（seq1/4 缺失）：boundary 必须是真实事件 seq3（turn1 的 turn/end）；
+    // seed 按 seq <= boundary 选取，slice(0, boundary+1) 会把 seq5 也带进 seed（错位）
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 2, { source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] }),
+      ev('turn/end', 3, { turn: 1 }),
+      ev('turn/start', 5, { turn: 2 }),
+      ev('user/message', 6, { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }),
+      ev('turn/end', 7, { turn: 2 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.boundary).toBe(3)
+    expect(result.messageSent).toBe(true)
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'hello' }])
+    // seed 只含 seq <= 3 的事件（不包含 turn2 的 turn/start seq5）
+    expect(env.adapter.eventsOf(result.sessionId).map(e => e.seq)).toEqual([0, 2, 3])
+  })
+})
+
+describe('BranchCoordinatorService editRetry', () => {
+  it('forks before the target turn and sends the edited text', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2, text: 'edited hello' })
+
+    expect(result.boundary).toBe(2)
+    expect(result.targetTurn).toBe(2)
+    expect(result.messageSent).toBe(true)
+    expect(env.adapter.sentMessages).toHaveLength(1)
+    expect(env.adapter.sentMessages[0]!.sessionId).toBe(result.sessionId)
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'edited hello' }])
+  })
+
+  it('editRetry auto-activates the new candidate (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2, text: 'edited hello' })
+
+    expect(result.activeSessionId).toBe(result.sessionId)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(result.sessionId)
+    const store = await sidecarStore(env.dataRoot)
+    expect((store.groups[0] as { activeSessionId: string }).activeSessionId).toBe(result.sessionId)
+  })
+
+  it('reports messageSent false when the host has no live agent (agent factory missing)', async () => {
+    env.adapter.agentAvailable = false
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2, text: 'edited' })
+
+    expect(result.messageSent).toBe(false)
+    expect(env.adapter.sentMessages).toHaveLength(0)
+  })
+})
+
+describe('BranchCoordinatorService switchCandidate', () => {
+  it('moves the active pointer and bumps the revision', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    const switched = await env.service.switchCandidate({ groupId: group.id, sessionId: child.sessionId })
+    expect(switched.activeSessionId).toBe(child.sessionId)
+    expect(switched.revision).toBe(3)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(child.sessionId)
+  })
+
+  it('switching to a deleted candidate throws CANDIDATE_DELETED', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const childA = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    const childB = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    await env.service.deleteCandidate({ groupId: group.id, sessionId: childA.sessionId })
+    await env.service.switchCandidate({ groupId: group.id, sessionId: childB.sessionId })
+    await expectRejectCode(
+      env.service.switchCandidate({ groupId: group.id, sessionId: childA.sessionId }),
+      BranchErrorCode.CANDIDATE_DELETED,
+    )
+  })
+})
+
+describe('BranchCoordinatorService deleteCandidate / restoreCandidate', () => {
+  it('delete → restore round-trip clears the tombstone and bumps the revision', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    const deleted = await env.service.deleteCandidate({ groupId: group.id, sessionId: child.sessionId })
+    expect(deleted.revision).toBe(3)
+    expect(deleted.sessionId).toBe(child.sessionId)
+    expect(env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt).toBeGreaterThan(0)
+
+    const restored = await env.service.restoreCandidate({ groupId: group.id, sessionId: child.sessionId })
+    expect(restored.revision).toBe(4)
+    expect(env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt).toBeUndefined()
+  })
+
+  it('the root candidate and the active candidate cannot be deleted (INVALID_INPUT)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await expectRejectCode(
+      env.service.deleteCandidate({ groupId: group.id, sessionId: ROOT_SESSION }),
+      BranchErrorCode.INVALID_INPUT,
+    )
+
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    await env.service.switchCandidate({ groupId: group.id, sessionId: child.sessionId })
+    await expectRejectCode(
+      env.service.deleteCandidate({ groupId: group.id, sessionId: child.sessionId }),
+      BranchErrorCode.INVALID_INPUT,
+    )
+  })
+})
+
+describe('BranchCoordinatorService optimistic concurrency (CAS)', () => {
+  it('a stale expectedRevision fails with REVISION_CONFLICT carrying the authoritative group', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    // 第一次：expectedRevision 2（当前 revision）通过，revision 升到 3
+    const first = await env.service.switchCandidate({ groupId: group.id, sessionId: child.sessionId, expectedRevision: 2 })
+    expect(first.revision).toBe(3)
+
+    // 第二次：仍带旧 revision 2 → REVISION_CONFLICT，权威快照为 revision 3
+    const error = await rejectionOf(
+      env.service.switchCandidate({ groupId: group.id, sessionId: ROOT_SESSION, expectedRevision: 2 }),
+    )
+    expect(error).toBeInstanceOf(BranchError)
+    expect((error as BranchError).code).toBe(BranchErrorCode.REVISION_CONFLICT)
+    expect((error as BranchError).authoritativeGroup?.revision).toBe(3)
+    expect((error as BranchError).authoritativeGroup?.activeSessionId).toBe(child.sessionId)
+  })
+
+  it('a CAS conflict detected after the fork reports orphan:true with the forked sessionId', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    // 模拟另一进程在 fork 与 sidecar 提交之间提交了变更：forkChild 期间原地 bump revision
+    // （requireGroup 返回组对象引用，与 forkAndRecord 持有的 input.group 是同一对象）
+    const service = env.service
+    const originalFork = env.adapter.forkChild.bind(env.adapter)
+    env.adapter.forkChild = async input => {
+      const outcome = await originalFork(input)
+      const target = (service as unknown as { groups: GrayBranchGroup[] }).groups.find(g => g.id === group.id)
+      target!.revision += 1
+      return outcome
+    }
+
+    const result = await env.service.createBranch({
+      groupId: group.id,
+      parentSessionId: ROOT_SESSION,
+      boundary: 2,
+      expectedRevision: 1,
+    })
+    // fork 会话已创建但未入组：orphan 携带 sessionId 供调用方恢复
+    expect(result.orphan).toBe(true)
+    expect(result.sessionId).toMatch(/^branch-/)
+    // orphan 携带冲突后的权威 revision 与未变更的 activeSessionId
+    expect(result.revision).toBe(2)
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.candidates.some(c => c.sessionId === result.sessionId)).toBe(false)
+  })
+})
+
+describe('BranchCoordinatorService persistence', () => {
+  it('a fresh service on the same dataRoot reloads revision, activeSessionId and candidates', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2, label: 'persist-me' })
+    await env.service.switchCandidate({ groupId: group.id, sessionId: child.sessionId })
+    env.service.dispose()
+
+    const reloadedService = new BranchCoordinatorService(
+      { dataRoot: env.dataRoot },
+      new FakeBranchSessionAdapter(),
+    )
+    await reloadedService.initialize()
+    try {
+      const groups = reloadedService.listGroups()
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.revision).toBe(3)
+      expect(groups[0]!.activeSessionId).toBe(child.sessionId)
+      const candidate = groups[0]!.candidates.find(c => c.sessionId === child.sessionId)!
+      expect(candidate).toMatchObject({
+        kind: 'manual',
+        parentSessionId: ROOT_SESSION,
+        boundary: 2,
+        label: 'persist-me',
+      })
+    } finally {
+      reloadedService.dispose()
+    }
+  })
+
+  it('a sidecar write failure leaves the fork session as an orphan outside the group', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+
+    // 把 groups.json 替换成同名目录 → 原子写盘的最终 rename 必然失败
+    // （注：persist 里 mkdir 在 try 之外，故不能走「branches 是文件」的注入路径）
+    await fs.rm(path.join(env.dataRoot, 'branches', 'groups.json'), { force: true })
+    await fs.mkdir(path.join(env.dataRoot, 'branches', 'groups.json'))
+
+    const result = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    expect(result.orphan).toBe(true)
+    expect(result.sessionId).toMatch(/^branch-/)
+    expect(result.revision).toBe(1) // 组未变更，revision 保持
+
+    // fork 确实发生了，但候选没有进入组
+    expect(env.adapter.forkCalls).toHaveLength(1)
+    expect(env.service.getGroup(group.id)!.candidates.some(c => c.sessionId === result.sessionId)).toBe(false)
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('a sidecar write failure during reroll keeps the previous active candidate (orphan, D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await fs.rm(path.join(env.dataRoot, 'branches', 'groups.json'), { force: true })
+    await fs.mkdir(path.join(env.dataRoot, 'branches', 'groups.json'))
+
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.orphan).toBe(true)
+    // 激活从未提交：activeSessionId 保持原值
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('retries transient rename failures before reporting success (Windows rename retry)', async () => {
+    const renameSpy = fs.rename as unknown as Mock
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    // 前两次 rename 以瞬态 EPERM 失败（Windows 文件锁/杀软竞态），第三次成功
+    const eperm = () => {
+      const error = new Error('EPERM: operation not permitted, rename') as NodeJS.ErrnoException
+      error.code = 'EPERM'
+      return Promise.reject(error)
+    }
+    renameSpy.mockClear() // 只统计本次 createBranch 的 rename 调用
+    renameSpy.mockImplementationOnce(eperm).mockImplementationOnce(eperm)
+
+    const result = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    expect(result.orphan).toBe(false)
+    expect(result.revision).toBe(2)
+    expect(renameSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('a non-recoverable rename failure reports STORAGE_WRITE_FAILED with a path-stripped message', async () => {
+    const renameSpy = fs.rename as unknown as Mock
+    // Windows rename 错误消息携带完整源/目标路径；失败必须剥离路径（只留 groups.json）。
+    // 注意：createBranch 的写失败会转 orphan（resolved），路径剥离经非 fork 路径
+    // （ensureGroup 的 persist 直接上抛）观测。
+    const storePath = path.join(env.dataRoot, 'branches', 'groups.json')
+    const eacces = () => {
+      const error = new Error(
+        `EACCES: permission denied, rename '${storePath}' -> '${storePath}.123.tmp'`,
+      ) as NodeJS.ErrnoException
+      error.code = 'EACCES'
+      return Promise.reject(error)
+    }
+    renameSpy.mockClear()
+    for (let i = 0; i < 4; i += 1) renameSpy.mockImplementationOnce(eacces)
+
+    const error = await rejectionOf(env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION }))
+    expect(error).toBeInstanceOf(BranchError)
+    expect((error as BranchError).code).toBe(BranchErrorCode.STORAGE_WRITE_FAILED)
+    // 错误消息剥离完整文件路径：不含 dataRoot，只保留文件名
+    expect((error as BranchError).message).not.toContain(env.dataRoot)
+    expect((error as BranchError).message).toContain('groups.json')
+  })
+
+  it('initialize purges soft-deleted candidates older than the retention period (TREE-09)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    // 直接改写 sidecar：把 child 标记为 31 天前软删
+    const store = await sidecarStore(env.dataRoot)
+    const persistedGroup = store.groups[0] as { candidates: Array<{ sessionId: string; deletedAt?: number }> }
+    persistedGroup.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt =
+      Date.now() - 31 * 24 * 60 * 60 * 1000
+    await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), JSON.stringify(store), 'utf-8')
+
+    const reloaded = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    await reloaded.initialize()
+    try {
+      const groups = reloaded.listGroups()
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.candidates.some(c => c.sessionId === child.sessionId)).toBe(false)
+      expect(groups[0]!.candidates).toHaveLength(1)
+      // 清理结果同步落盘
+      const after = await sidecarStore(env.dataRoot)
+      expect(
+        (after.groups[0] as { candidates: Array<{ sessionId: string }> }).candidates.some(
+          c => c.sessionId === child.sessionId,
+        ),
+      ).toBe(false)
+    } finally {
+      reloaded.dispose()
+    }
+  })
+
+  it('initialize keeps soft-deleted candidates within the retention period', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    const store = await sidecarStore(env.dataRoot)
+    const persistedGroup = store.groups[0] as { candidates: Array<{ sessionId: string; deletedAt?: number }> }
+    persistedGroup.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt =
+      Date.now() - 2 * 24 * 60 * 60 * 1000
+    await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), JSON.stringify(store), 'utf-8')
+
+    const reloaded = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    await reloaded.initialize()
+    try {
+      const groups = reloaded.listGroups()
+      const candidate = groups[0]!.candidates.find(c => c.sessionId === child.sessionId)
+      expect(candidate?.deletedAt).toBeGreaterThan(0)
+    } finally {
+      reloaded.dispose()
+    }
+  })
+})

@@ -1,0 +1,3 @@
+{"role":"user","parts":[{"type":"text","text":"demo seg 0 m0"}],"index":0,"id":"msg_seg0_1"}
+{"role":"model","parts":[{"type":"text","text":"demo seg 0 m1"}],"index":1,"id":"msg_seg0_2"}
+{"role":"user","parts":[{"type":"text","text":"demo seg 0 m2"}],"index":2,"id":"msg_seg0_3"}

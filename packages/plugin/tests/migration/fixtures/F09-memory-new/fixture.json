@@ -1,0 +1,17 @@
+{
+  "kind": "fixture-index",
+  "id": "F09",
+  "name": "F09-memory-new",
+  "title": "memory 新格式（LOG_REC=1024）",
+  "dataRoot": "dataRoot",
+  "purpose": "固定宽度解析、UTF-8 多字节边界、TREE 槽位定位。",
+  "construction": "LOG.txt 5 条 × 1024B（#0..#4，含中文文本，按 UTF-8 字节右侧空格填充至 1023B、末字节 0x0a，文件总长 5×1024）；TREE/2 与 TREE/4 各 1 条 288B 摘要；config 为默认 OptMem 配置。",
+  "expectedBehavior": "正常导入：按 1024 宽度解析全部记录；TREE 按 288 槽位读取。",
+  "specSections": [
+    "legacy-format.md §3.1",
+    "§3.2",
+    "§3.3",
+    "§3.5"
+  ],
+  "synthetic": true
+}

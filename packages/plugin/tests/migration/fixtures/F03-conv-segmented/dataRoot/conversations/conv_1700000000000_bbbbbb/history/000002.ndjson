@@ -1,0 +1,21 @@
+{"role":"user","parts":[{"type":"functionCall","id":"fc_demo_0002","name":"list_files","args":{"path":"src"}}],"index":400,"id":"msg_demo_0401","parentId":"msg_demo_0400","timestamp":1700000400000}
+{"role":"model","parts":[{"type":"text","text":"demo 401"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 402"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 403"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 404"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 405"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 406"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 407"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 408"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 409"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 410"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 411"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 412"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 413"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 414"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 415"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 416"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 417"}]}
+{"role":"user","parts":[{"type":"text","text":"demo 418"}]}
+{"role":"model","parts":[{"type":"text","text":"demo 419"}]}
+{"role":"model","parts":[{"type":"text","text":"demo：最后一条（第 421 条）总结"}],"index":420,"id":"msg_demo_0421","parentId":"msg_demo_0420","timestamp":1700000420000,"modelVersion":"gemini-2.5-flash","isSummary":true,"summarizedMessageCount":420}

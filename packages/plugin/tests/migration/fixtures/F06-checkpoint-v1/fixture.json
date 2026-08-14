@@ -1,0 +1,15 @@
+{
+  "kind": "fixture-index",
+  "id": "F06",
+  "name": "F06-checkpoint-v1",
+  "title": "checkpoint v1（files 内联 manifest）",
+  "dataRoot": "dataRoot",
+  "purpose": "旧 manifest 读取：version:1，files 内联，无 files.json/filesRevision。",
+  "construction": "cp_1700000000000_aa1111/manifest.json（version:1，内联 files 映射，含 hash/size/mtimeMs/mtimeNs），备份文件在 ws_<id>/src/demo.txt（scoped 多根布局），空目录 ws_<id>/dist/empty；excluded 含 1 条 *.log 规则；ignoreSnapshot 为默认快照。",
+  "expectedBehavior": "正常导入：v1 读取 + 懒加载回填 + best-effort 拆分迁移（如实现）。",
+  "specSections": [
+    "legacy-format.md §2.1",
+    "§2.2"
+  ],
+  "synthetic": true
+}

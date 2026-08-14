@@ -1,0 +1,10 @@
+{
+  "id": "conv_1700000000000_e1bbbb",
+  "title": "demo：控制会话",
+  "createdAt": 1700000000000,
+  "updatedAt": 1700000001000,
+  "workspaceUri": "file:///c%3A/Users/demo/my-project",
+  "custom": {
+    "checkpoints": []
+  }
+}

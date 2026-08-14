@@ -1,0 +1,152 @@
+/**
+ * ProjectionJournal 契约测试：环形缓冲、订阅、sidecar 回放、损坏行隔离、滚动。
+ */
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { ProjectionJournal } from '../../src/remote/projection.ts'
+
+const tempDirs: string[] = []
+
+async function tmpDir(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-projection-'))
+  tempDirs.push(dir)
+  return dir
+}
+
+afterEach(async () => {
+  for (const dir of tempDirs.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined)
+  }
+})
+
+describe('ProjectionJournal（内存）', () => {
+  it('record 写入并通知订阅者；退订后不再通知', async () => {
+    const journal = new ProjectionJournal()
+    const seen: unknown[] = []
+    const off = journal.on(entry => seen.push(entry))
+    await journal.record('query:test', { ok: true })
+    await journal.record('query:test2', { ok: false })
+    expect(seen).toHaveLength(2)
+    off()
+    await journal.record('query:test3', { ok: true })
+    expect(seen).toHaveLength(2)
+
+    const replay = await journal.replay()
+    expect(replay.map(e => e.kind)).toEqual(['query:test', 'query:test2', 'query:test3'])
+    expect(replay[0]!.seq).toBe(1)
+    expect(replay[2]!.seq).toBe(3)
+    expect(replay.every(e => typeof e.at === 'number')).toBe(true)
+  })
+
+  it('环形缓冲按 maxEntries 截断（保留最新）', async () => {
+    const journal = new ProjectionJournal({ maxEntries: 3 })
+    for (let i = 1; i <= 5; i++) {
+      await journal.record(`kind-${i}`, i)
+    }
+    const replay = await journal.replay()
+    expect(replay).toHaveLength(3)
+    expect(replay.map(e => e.kind)).toEqual(['kind-3', 'kind-4', 'kind-5'])
+  })
+
+  it('监听器抛错不影响其余订阅者与记录', async () => {
+    const journal = new ProjectionJournal()
+    const seen: string[] = []
+    journal.on(() => {
+      throw new Error('listener boom')
+    })
+    journal.on(entry => seen.push(entry.kind))
+    await journal.record('kind-a', {})
+    expect(seen).toEqual(['kind-a'])
+  })
+})
+
+describe('ProjectionJournal（sidecar 回放通道）', () => {
+  it('record 落盘；同路径新实例 replay 合并（按 seq 去重升序）', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    const a = new ProjectionJournal({ journalPath })
+    await a.record('k1', 1)
+    await a.record('k2', 2)
+    await a.flush()
+
+    const b = new ProjectionJournal({ journalPath })
+    const replay = await b.replay()
+    expect(replay.map(e => e.kind)).toEqual(['k1', 'k2'])
+    expect(replay.map(e => e.seq)).toEqual([1, 2])
+
+    // 续写 seq 递增（新实例 seq 从 0 起但文件 seq 更大 → 合并取最大）
+    await b.record('k3', 3)
+    await b.flush()
+    const c = new ProjectionJournal({ journalPath })
+    const replay2 = await c.replay()
+    expect(replay2.map(e => e.kind)).toEqual(['k1', 'k2', 'k3'])
+  })
+
+  it('损坏行跳过不阻塞回放（尽力通道）', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(journalPath, '{"seq":1,"kind":"ok","at":1,"payload":1}\nnot-json-line\n{"seq":3,"kind":"ok2","at":3,"payload":3}\n', 'utf8')
+    const journal = new ProjectionJournal({ journalPath })
+    const replay = await journal.replay()
+    expect(replay.map(e => e.kind)).toEqual(['ok', 'ok2'])
+  })
+
+  it('行数超上限后滚动（保留后半）', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    const journal = new ProjectionJournal({ journalPath, maxFileLines: 8 })
+    for (let i = 1; i <= 12; i++) {
+      await journal.record(`k-${i}`, i)
+    }
+    await journal.flush()
+    const replay = await journal.replay()
+    // 12 行 → 保留最后 4 行（maxFileLines/2），但内存环还有 12 条 → 合并后应含全部 12
+    expect(replay).toHaveLength(12)
+    // 文件行数已被压缩
+    const content = await fs.readFile(journalPath, 'utf8')
+    const lineCount = content.split('\n').filter(Boolean).length
+    expect(lineCount).toBeLessThanOrEqual(8)
+    expect(lineCount).toBeGreaterThan(0)
+  })
+
+  it('滚动后继续追加不损坏行边界（保留尾行可解析）', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    const journal = new ProjectionJournal({ journalPath, maxFileLines: 8 })
+    for (let i = 1; i <= 12; i++) {
+      await journal.record(`k-${i}`, i)
+    }
+    // 滚动已发生；再追加 3 条 —— 若无尾随换行，滚动后的第 9 行会与新条目
+    // 合并成一条无法解析的脏行，滚动边界前后的记录永久丢失。
+    for (let i = 13; i <= 15; i++) {
+      await journal.record(`k-${i}`, i)
+    }
+    await journal.flush()
+    const content = await fs.readFile(journalPath, 'utf8')
+    // 滚动后保留的每条非空行必须能独立 JSON.parse —— 若无尾随换行，滚动后的
+    // 最后一条记录会与新追加条目合并成一条无法解析的脏行（回归：k-9 之后丢行）。
+    const lines = content.split('\n').filter(Boolean)
+    const kinds = lines.map(line => (JSON.parse(line) as { kind: string }).kind)
+    expect(kinds.length).toBe(lines.length)
+    // 滚动边界之后新追加的记录完整保留，文件尾部是最后一条
+    expect(kinds).toContain('k-13')
+    expect(kinds.at(-1)).toBe('k-15')
+    // 文件回放（新实例）同样不丢滚动边界后的记录
+    const fresh = new ProjectionJournal({ journalPath })
+    const replay = await fresh.replay()
+    expect(replay.map(e => e.kind)).toContain('k-13')
+  })
+
+  it('clear 清空内存与 sidecar', async () => {
+    const dir = await tmpDir()
+    const journalPath = path.join(dir, 'projections.jsonl')
+    const journal = new ProjectionJournal({ journalPath })
+    await journal.record('k1', 1)
+    await journal.clear()
+    expect(await journal.replay()).toHaveLength(0)
+    await expect(fs.stat(journalPath)).rejects.toThrow()
+  })
+})

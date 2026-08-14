@@ -1,0 +1,21 @@
+{
+  "name": "@graycode/dsh",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "GrayCode capabilities as an installable DeepSeek Harness bundle",
+  "license": "MIT",
+  "dependencies": {
+    "@graycode/dsh-plugin": "workspace:^",
+    "@graycode/dsh-client": "workspace:^"
+  },
+  "files": ["cordis.patch.yml", "README.md"],
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+[{"role":"user","parts":[{"type":"text","text":"demo：控制会话消息 1"}],"index":0,"id":"msg_ctrl_0001","parentId":null,"timestamp":1700000000000,"isUserInput":true},{"role":"model","parts":[{"type":"text","text":"demo：控制会话消息 2"}],"index":1,"id":"msg_ctrl_0002","parentId":"msg_ctrl_0001","timestamp":1700000001000,"modelVersion":"gemini-2.5-flash"}]

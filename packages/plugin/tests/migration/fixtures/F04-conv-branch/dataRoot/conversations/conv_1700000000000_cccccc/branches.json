@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "rootNodeId": "node_demo_0001",
+  "activeTailNodeId": "node_demo_0004",
+  "activeChildId": "node_demo_0003b",
+  "nodes": [
+    {
+      "id": "node_demo_0001",
+      "parentId": null,
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：分支根节点"
+        }
+      ],
+      "kind": "normal",
+      "createdAt": 1700000000000,
+      "timestamp": 1700000000000
+    },
+    {
+      "id": "node_demo_0002",
+      "parentId": "node_demo_0001",
+      "role": "model",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：主回复"
+        }
+      ],
+      "kind": "normal",
+      "createdAt": 1700000001000,
+      "timestamp": 1700000001000,
+      "modelVersion": "gemini-2.5-flash",
+      "activeChildId": "node_demo_0003b"
+    },
+    {
+      "id": "node_demo_0003a",
+      "parentId": "node_demo_0002",
+      "role": "model",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：reroll 候选 A"
+        }
+      ],
+      "kind": "reroll",
+      "createdAt": 1700000002000,
+      "timestamp": 1700000002000,
+      "label": "candidate-a"
+    },
+    {
+      "id": "node_demo_0003b",
+      "parentId": "node_demo_0002",
+      "role": "model",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：reroll 候选 B（激活）"
+        }
+      ],
+      "kind": "reroll",
+      "createdAt": 1700000003000,
+      "timestamp": 1700000003000,
+      "label": "candidate-b"
+    },
+    {
+      "id": "node_demo_0004",
+      "parentId": "node_demo_0003b",
+      "role": "model",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：导出节点"
+        }
+      ],
+      "kind": "exported",
+      "exportedFrom": "export_demo_0001",
+      "createdAt": 1700000004000,
+      "timestamp": 1700000004000
+    },
+    {
+      "id": "node_demo_0005",
+      "parentId": "node_demo_0004",
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "demo：已删除节点"
+        }
+      ],
+      "kind": "normal",
+      "deleted": true,
+      "deletedAt": 1700000005000,
+      "createdAt": 1700000004500
+    }
+  ],
+  "candidateSummaries": [
+    {
+      "nodeId": "node_demo_0003b",
+      "text": "demo：分支候选摘要",
+      "createdAt": 1700000003000
+    }
+  ]
+}
