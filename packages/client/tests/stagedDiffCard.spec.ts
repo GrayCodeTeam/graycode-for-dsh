@@ -404,6 +404,17 @@ describe('operation-id tracker', () => {
     tracker.reset()
     expect(tracker.get('accept:e2')).toBeUndefined()
   })
+
+  it('forget removes one operation record so the operation can start again', () => {
+    const tracker = createStagedDiffOperationTracker<string>()
+    const { operationId } = tracker.begin('accept', 'e1')
+    tracker.resolve(operationId, 'done-result')
+    expect(tracker.get(operationId)?.state).toBe('resolved')
+    tracker.forget(operationId)
+    expect(tracker.get(operationId)).toBeUndefined()
+    expect(tracker.isInFlight('e1')).toBe(false)
+    expect(tracker.begin('accept', 'e1').duplicate).toBe(false)
+  })
 })
 
 describe('decision actions (assembly)', () => {
@@ -480,6 +491,45 @@ describe('decision actions (assembly)', () => {
     const outcome = await actions.accept(makeEntry())
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) expect(outcome.error.kind).toBe('internal')
+  })
+
+  it('retryable failures are not cached — the next accept re-invokes the data source', async () => {
+    const entry = makeEntry()
+    const dataSource = spyDataSource({
+      accept: vi.fn(async () => envelopeError(failure({
+        code: GRAY_REMOTE_ERROR_CODES.CONFLICT,
+        details: { causeCode: GRAY_STAGED_CAUSE_CODES.APPLY_FAILED, entry },
+      }))),
+    })
+    const actions = createStagedDiffActions(dataSource)
+    const first = await actions.accept(entry)
+    expect(first.ok).toBe(false)
+    if (!first.ok) expect(first.error.retryable).toBe(true)
+    // A retryable failure (GRAY_STAGED_APPLY_FAILED) must NOT be replayed
+    // from the tracker: the next click re-attempts the decision.
+    const second = await actions.accept(entry)
+    expect(second.ok).toBe(false)
+    expect(dataSource.accept).toHaveBeenCalledTimes(2)
+  })
+
+  it('successful outcomes stay cached (same-entry double click stays deduped)', async () => {
+    const dataSource = spyDataSource()
+    const actions = createStagedDiffActions(dataSource)
+    const entry = makeEntry()
+    await actions.accept(entry)
+    await actions.accept(entry)
+    expect(dataSource.accept).toHaveBeenCalledTimes(1)
+  })
+
+  it('non-retryable failures are not cached either (no stale-error replay)', async () => {
+    const entry = makeEntry()
+    const dataSource = spyDataSource({
+      accept: vi.fn(async () => envelopeError(failure({ code: GRAY_REMOTE_ERROR_CODES.ENDPOINT_NOT_FOUND }))),
+    })
+    const actions = createStagedDiffActions(dataSource)
+    await actions.accept(entry)
+    await actions.accept(entry)
+    expect(dataSource.accept).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -14,6 +14,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  appendMemoryListPage,
   buildMemoryListParams,
   buildMemoryEntryView,
   buildMemoryListViewModel,
@@ -26,6 +27,7 @@ import {
   mapMemoryFailure,
   MEMORY_DIFF_MAX_CELLS,
   normalizeMemoryLimit,
+  parseMemoryNextCursor,
   rejectForget,
   requestForget,
   resolveForget,
@@ -104,6 +106,46 @@ describe('normalizeMemoryLimit', () => {
     expect(normalizeMemoryLimit(7)).toBe(7)
     expect(normalizeMemoryLimit(7.9)).toBe(7)
     expect(normalizeMemoryLimit(1000)).toBe(GRAY_PAGE_LIMIT_MAX)
+  })
+})
+
+describe('parseMemoryNextCursor', () => {
+  it('parses positive safe integer cursors', () => {
+    expect(parseMemoryNextCursor('42')).toBe(42)
+    expect(parseMemoryNextCursor('1')).toBe(1)
+  })
+
+  it('rejects malformed cursors (re-fetching page 1 would duplicate items)', () => {
+    expect(parseMemoryNextCursor(undefined)).toBeNull()
+    expect(parseMemoryNextCursor('')).toBeNull()
+    expect(parseMemoryNextCursor('abc')).toBeNull()
+    expect(parseMemoryNextCursor('0')).toBeNull()
+    expect(parseMemoryNextCursor('-1')).toBeNull()
+    expect(parseMemoryNextCursor('1.5')).toBeNull()
+    expect(parseMemoryNextCursor('9007199254740992')).toBeNull() // not a safe integer
+  })
+})
+
+describe('appendMemoryListPage', () => {
+  const entry = (id: number): GrayMemoryEntryView => ({ id, date: '2025-01-01', text: `memory ${id}` })
+
+  it('appends items and adopts total/nextCursor/hasMore from the newest page', () => {
+    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 3, nextCursor: '2' }, { scope: 'global' })
+    const next = buildMemoryListViewModel({ items: [entry(1)], total: 3, nextCursor: '1' }, { scope: 'global' })
+    const merged = appendMemoryListPage(prev, next)
+    expect(merged.items.map(item => item.id)).toEqual([2, 1])
+    expect(merged.total).toBe(3)
+    expect(merged.nextCursor).toBe('1')
+    expect(merged.hasMore).toBe(true)
+  })
+
+  it('ends pagination when the next page carries no cursor', () => {
+    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 2, nextCursor: '2' }, { scope: 'global' })
+    const next = buildMemoryListViewModel({ items: [entry(1)], total: 2 }, { scope: 'global' })
+    const merged = appendMemoryListPage(prev, next)
+    expect(merged.items.map(item => item.id)).toEqual([2, 1])
+    expect(merged.nextCursor).toBeUndefined()
+    expect(merged.hasMore).toBe(false)
   })
 })
 

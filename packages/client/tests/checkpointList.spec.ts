@@ -601,6 +601,28 @@ describe('checkpoint list store', () => {
     expect(store.state.error).toBeNull()
   })
 
+  it('defers reload while a load is in flight instead of dropping it', async () => {
+    const gate = createGateSource([fakeItem(1), fakeItem(2), fakeItem(3)])
+    const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: gate.source, pageSize: 2 })
+    const first = store.loadFirstPage()
+    const reloadPromise = store.reload() // must not be silently skipped
+    // Do not await yet: the queued reload resolves only after the gated loads
+    // are released. No extra call may go out while the first load is gated.
+    expect(gate.calls).toHaveLength(1)
+    gate.release(0)
+    await first
+    // The deferred reload now runs: clears the list and issues a fresh
+    // first-page call (cursor undefined), instead of being dropped.
+    expect(gate.calls).toHaveLength(2)
+    expect(gate.calls[1]?.cursor).toBeUndefined()
+    gate.release(1)
+    await reloadPromise
+    expect(store.state.loadState).toBe('ready')
+    expect(store.state.entries).toHaveLength(2)
+    expect(store.state.total).toBe(3)
+    expect(store.state.expandedId).toBeNull()
+  })
+
   it('toggleExpand toggles the selected item', async () => {
     const { source } = createFakeSource([fakeItem(1), fakeItem(2)])
     const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: source })

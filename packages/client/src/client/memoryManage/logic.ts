@@ -55,6 +55,20 @@ export function normalizeMemoryLimit(
 }
 
 /**
+ * Parse the host `nextCursor` string into a paging cursor.
+ *
+ * Returns null for anything that is not a positive safe integer. The panel
+ * must not forward a malformed cursor: `buildMemoryListParams` would drop it
+ * and the host would re-serve page 1, duplicating items on every "load more"
+ * click. Callers stop paginating (and surface a hint) on null.
+ */
+export function parseMemoryNextCursor(value: string | undefined): number | null {
+  if (value === undefined) return null
+  const cursor = Number(value)
+  return Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null
+}
+
+/**
  * Build wire params for `memory/list` from the panel query state:
  * - search is trimmed and omitted when empty;
  * - cursor is dropped unless it is a positive safe integer;
@@ -155,6 +169,23 @@ export function buildMemoryListViewModel(
     total: result.total,
     ...(result.nextCursor !== undefined ? { nextCursor: result.nextCursor } : {}),
     hasMore: result.nextCursor !== undefined,
+  }
+}
+
+/**
+ * Accumulate the next page onto the current list view model (load more):
+ * items append in host order, while `total` / `nextCursor` / `hasMore` follow
+ * the newest page. A next page without a cursor ends pagination.
+ */
+export function appendMemoryListPage(
+  prev: MemoryListViewModel,
+  next: MemoryListViewModel,
+): MemoryListViewModel {
+  return {
+    items: [...prev.items, ...next.items],
+    total: next.total,
+    ...(next.nextCursor !== undefined ? { nextCursor: next.nextCursor } : {}),
+    hasMore: next.hasMore,
   }
 }
 

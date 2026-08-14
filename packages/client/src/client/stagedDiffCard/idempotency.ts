@@ -50,6 +50,12 @@ export interface StagedDiffOperationTracker<TResult> {
   isInFlight(entryId: string): boolean
   /** Forget operations; with `entryId` only that entry's operations. */
   reset(entryId?: string): void
+  /**
+   * Forget one operation record. Used for retry semantics: a resolved
+   * failure the caller decides must not be replayed (e.g. a retryable
+   * error) is removed so the same id can start a fresh operation.
+   */
+  forget(operationId: string): void
 }
 
 /** Create an empty operation tracker. */
@@ -93,6 +99,9 @@ export function createStagedDiffOperationTracker<TResult>(): StagedDiffOperation
       for (const [id, record] of records) {
         if (record.entryId === entryId) records.delete(id)
       }
+    },
+    forget(operationId) {
+      records.delete(operationId)
     },
   }
 }

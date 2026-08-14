@@ -120,3 +120,21 @@ export function nextWorkflowPageRequest(
   if (state.phase === 'loading') return null
   return { cursor: state.nextCursor }
 }
+
+/**
+ * Stale-append guard: whether a load-more response issued against the page
+ * state at `issuedRevision` may still commit.
+ *
+ * The panel captures the page revision when the request goes out; a response
+ * is dropped once the page state moved on — in particular when the applied
+ * filter changed and a fresh first page replaced the list, so a stale page
+ * can never append into a newer filter's list.
+ * @param state - the page state at response time.
+ * @param issuedRevision - `state.revision` captured at request time.
+ */
+export function isWorkflowAppendCurrent(
+  state: WorkflowOverviewPageState,
+  issuedRevision: number,
+): boolean {
+  return state.revision === issuedRevision
+}

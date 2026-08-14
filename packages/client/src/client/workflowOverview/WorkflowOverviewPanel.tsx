@@ -34,6 +34,7 @@ import {
   applyWorkflowPageLoaded,
   applyWorkflowPageLoading,
   createWorkflowOverviewPageState,
+  isWorkflowAppendCurrent,
   nextWorkflowPageRequest,
   type WorkflowOverviewPageState,
 } from './paging.ts'
@@ -131,21 +132,33 @@ export function WorkflowOverviewPanel({
   }, [source, query])
 
   // Next page (load more) and retry after an error: append mode with the
-  // accumulated cursor. paging.ts guards concurrent requests.
+  // accumulated cursor. paging.ts guards concurrent requests, and the page
+  // revision captured at request time guards stale responses: once the
+  // applied filter changed (the first-page effect replaced the list), an
+  // in-flight append is dropped instead of mixing into the newer list.
   const loadMore = useCallback((): void => {
     if (source === undefined) return
     setPage((current) => {
       const request = nextWorkflowPageRequest(current)
       if (request === null) return current
       const loading = applyWorkflowPageLoading(current)
+      const issuedRevision = loading.revision
       source.list(buildWorkflowListRequest(query, request.cursor))
         .then((result) => {
           if (disposed.current) return
-          setPage((latest) => applyWorkflowPageLoaded(latest, result, 'append'))
+          setPage((latest) =>
+            isWorkflowAppendCurrent(latest, issuedRevision)
+              ? applyWorkflowPageLoaded(latest, result, 'append')
+              : latest,
+          )
         })
         .catch((error: unknown) => {
           if (disposed.current) return
-          setPage((latest) => applyWorkflowPageError(latest, readWorkflowThrownError(error)))
+          setPage((latest) =>
+            isWorkflowAppendCurrent(latest, issuedRevision)
+              ? applyWorkflowPageError(latest, readWorkflowThrownError(error))
+              : latest,
+          )
         })
       return loading
     })

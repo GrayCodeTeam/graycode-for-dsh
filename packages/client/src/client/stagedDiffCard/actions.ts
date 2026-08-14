@@ -3,8 +3,11 @@
  *
  * `createStagedDiffActions` wraps a `StagedDiffDataSource` into the
  * interaction layer the batch list component consumes:
- * - operation-id idempotency (idempotency.ts) — duplicate clicks never
- *   re-invoke the data source;
+ * - operation-id idempotency (idempotency.ts) — concurrent duplicate clicks
+ *   never re-invoke the data source, and successful outcomes are replayed
+ *   for repeated ids; failed outcomes are never cached, so retryable
+ *   failures (GRAY_STAGED_APPLY_FAILED etc.) stay retryable and a refreshed
+ *   projection never replays a stale error;
  * - envelope → outcome mapping (`StagedDiffDecisionOutcome`), with failures
  *   classified by `mapStagedDiffFailure`;
  * - the entry `revision` read at click time is passed as the CAS
@@ -82,15 +85,31 @@ export function createStagedDiffActions(dataSource: StagedDiffDataSource): Stage
       ? dataSource.accept({ entryId: entry.id, expectedRevision: entry.revision })
       : dataSource.reject({ entryId: entry.id, expectedRevision: entry.revision })
 
+    /**
+     * Record a settled outcome. Only successes are cached: a failed decision
+     * must never be replayed from the tracker — a retryable failure
+     * (GRAY_STAGED_APPLY_FAILED etc., errors.ts) is meant to be re-attempted
+     * as-is, and a refreshRequired failure would replay a stale error after
+     * the host refreshes the projection. The in-flight dedupe (inFlight map)
+     * still prevents double submissions while a call is pending.
+     */
+    const commitOutcome = (operationIdToCommit: string, outcome: StagedDiffDecisionOutcome): void => {
+      if (outcome.ok) {
+        tracker.resolve(operationIdToCommit, outcome)
+      } else {
+        tracker.forget(operationIdToCommit)
+      }
+    }
+
     const promise = call.then((result): StagedDiffDecisionOutcome => {
       const outcome: StagedDiffDecisionOutcome = result.ok
         ? { ok: true, entry: result.value }
         : { ok: false, error: mapStagedDiffFailure(result.error) }
-      tracker.resolve(operationId, outcome)
+      commitOutcome(operationId, outcome)
       return outcome
     }).catch((): StagedDiffDecisionOutcome => {
       const outcome = internalOutcome()
-      tracker.resolve(operationId, outcome)
+      commitOutcome(operationId, outcome)
       return outcome
     })
 

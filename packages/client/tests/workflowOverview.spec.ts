@@ -50,6 +50,7 @@ import {
   applyWorkflowPageLoaded,
   applyWorkflowPageLoading,
   createWorkflowOverviewPageState,
+  isWorkflowAppendCurrent,
   mergeWorkflowRunViews,
   nextWorkflowPageRequest,
 } from '../src/client/workflowOverview/paging.ts'
@@ -478,6 +479,23 @@ describe('workflow overview paging', () => {
       details: {},
     })
     expect(nextWorkflowPageRequest(failed)).toEqual({ cursor: null }) // retry re-issues the first page
+  })
+
+  it('isWorkflowAppendCurrent accepts an untouched page and rejects a replaced one', () => {
+    const loaded = applyWorkflowPageLoaded(createWorkflowOverviewPageState(), {
+      items: [summary()],
+      total: 1,
+    }, 'replace')
+    const loading = applyWorkflowPageLoading(loaded)
+    const issuedRevision = loading.revision
+    // Nothing intervened — the load-more response may still append.
+    expect(isWorkflowAppendCurrent(loading, issuedRevision)).toBe(true)
+    // A filter change replaced the list while the append was in flight.
+    const replaced = applyWorkflowPageLoaded(createWorkflowOverviewPageState(), {
+      items: [summary({ id: '.graycode/review/r1.md', kind: 'review' })],
+      total: 1,
+    }, 'replace')
+    expect(isWorkflowAppendCurrent(replaced, issuedRevision)).toBe(false)
   })
 })
 

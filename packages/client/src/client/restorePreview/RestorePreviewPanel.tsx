@@ -212,6 +212,9 @@ const countsRowStyle: CSSProperties = {
   opacity: 0.85,
 }
 
+/** Masked rendering of the approval token (revealed on demand). */
+const TOKEN_MASK = '•'.repeat(12)
+
 /**
  * Restore preview panel. Mount it wherever the host renders checkpoint
  * restore surfaces (see restorePreview/README.md for wiring).
@@ -233,12 +236,15 @@ export function RestorePreviewPanel({
   const [ack, setAck] = useState(false)
   const [token, setToken] = useState('')
   const [pasteMode, setPasteMode] = useState(false)
+  /** Whether the displayed approval token is revealed (default: masked). */
+  const [tokenVisible, setTokenVisible] = useState(false)
 
   // Local UI state resets whenever the machine moves to a new phase/preview.
   useEffect(() => {
     setAck(false)
     setToken('')
     setPasteMode(false)
+    setTokenVisible(false)
   }, [step.phase, step.previewAt])
 
   const flags = { deleteUntrackedFiles: step.session?.deleteUntrackedFiles ?? deleteUntrackedFiles }
@@ -329,7 +335,17 @@ export function RestorePreviewPanel({
                   {step.session !== null && (
                     <div style={rowStyle}>
                       <span style={labelStyle}>{t('tokenLabel')}</span>
-                      <code style={tokenValueStyle}>{step.session.previewId}</code>
+                      <code style={tokenValueStyle} data-graycode-restorepreview="token-value">
+                        {tokenVisible ? step.session.previewId : TOKEN_MASK}
+                      </code>
+                      <button
+                        type="button"
+                        data-graycode-restorepreview="token-toggle"
+                        style={buttonStyle}
+                        onClick={() => setTokenVisible(visible => !visible)}
+                      >
+                        {t(tokenVisible ? 'tokenHide' : 'tokenShow')}
+                      </button>
                     </div>
                   )}
                   <div style={hintStyle}>{t('stalePreviewHint')}</div>

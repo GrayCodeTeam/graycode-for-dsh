@@ -11,7 +11,7 @@
  * Interaction is optional: with `actions` absent (history replay, unwired
  * host) every card renders read-only with the `replayOnly` hint.
  */
-import { useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StagedEntry } from './contract.ts'
 import type { StagedDiffActions, StagedDiffDecisionOutcome } from './actions.ts'
@@ -93,6 +93,15 @@ export function StagedDiffBatchList({
 }: StagedDiffBatchListProps): ReactNode {
   const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set())
   const [errorsById, setErrorsById] = useState<ReadonlyMap<string, StagedDiffCardError>>(() => new Map())
+  /** Unmount guard: never commit state after the list is gone. */
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const runDecision = (
     entry: StagedEntry,
@@ -105,6 +114,7 @@ export function StagedDiffBatchList({
       return next
     })
     void decide(entry).then(outcome => {
+      if (!mountedRef.current) return // unmounted — drop
       setPendingIds(previous => {
         const next = new Set(previous)
         next.delete(entry.id)

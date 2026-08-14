@@ -83,6 +83,10 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
     revision: 0,
   }
   let loading = false
+  /** A reload requested while a load was in flight — run it once the load settles. */
+  let reloadQueued = false
+  let queuedReloadPromise: Promise<void> | null = null
+  let queuedReloadDone: (() => void) | null = null
 
   function commit(partial: Partial<CheckpointListStoreState>): void {
     state = { ...state, ...partial, revision: state.revision + 1 }
@@ -129,7 +133,7 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
         commit({ loadState: 'error', error: INTERNAL_HINT })
       }
     } finally {
-      loading = false
+      settleLoad()
     }
   }
 
@@ -167,12 +171,28 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
         commit({ loadState: 'error', error: INTERNAL_HINT })
       }
     } finally {
-      loading = false
+      settleLoad()
     }
   }
 
   async function reload(): Promise<void> {
-    if (loading) return
+    if (loading) {
+      // A load is in flight: queue the reload instead of silently dropping it.
+      // Repeated requests collapse into one queued reload; every caller awaits
+      // the same completion.
+      reloadQueued = true
+      if (queuedReloadPromise === null) {
+        queuedReloadPromise = new Promise<void>(resolve => {
+          queuedReloadDone = resolve
+        })
+      }
+      return queuedReloadPromise
+    }
+    return doReload()
+  }
+
+  /** Clear everything and restart from page 1. */
+  async function doReload(): Promise<void> {
     wireItems = []
     commit({
       entries: [],
@@ -184,6 +204,25 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
       expandedId: null,
     })
     await loadFirstPage()
+  }
+
+  /** End of a load: release the guard and run a queued reload if any. */
+  function settleLoad(): void {
+    loading = false
+    if (reloadQueued) {
+      reloadQueued = false
+      void doReload().then(
+        () => finishQueuedReload(),
+        () => finishQueuedReload(),
+      )
+    }
+  }
+
+  function finishQueuedReload(): void {
+    const done = queuedReloadDone
+    queuedReloadDone = null
+    queuedReloadPromise = null
+    done?.()
   }
 
   function toggleExpand(id: string): void {

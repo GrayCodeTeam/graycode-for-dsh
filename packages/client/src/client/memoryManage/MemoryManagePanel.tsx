@@ -23,6 +23,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MemoryManageTransport } from './api.ts'
 import {
   IDLE_FORGET_STATE,
+  appendMemoryListPage,
   buildMemoryEntryView,
   buildMemoryListParams,
   buildMemoryListViewModel,
@@ -31,6 +32,7 @@ import {
   dismissForget,
   mapMemoryFailure,
   normalizeMemoryLimit,
+  parseMemoryNextCursor,
   rejectForget,
   requestForget,
   resolveForget,
@@ -251,6 +253,15 @@ export function MemoryManagePanel({
   const [forget, setForget] = useState<ForgetState>(IDLE_FORGET_STATE)
   /** Stale-response guard: only the latest request may commit state. */
   const seqRef = useRef(0)
+  /** Unmount guard: never commit state after the panel is gone. */
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // Debounce the search box into the applied query (pure UI timing).
   useEffect(() => {
@@ -282,7 +293,7 @@ export function MemoryManagePanel({
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
-    if (seq !== seqRef.current) return // stale response — drop
+    if (seq !== seqRef.current || !mountedRef.current) return // stale response or unmounted — drop
     if (result.ok) {
       setList(buildMemoryListViewModel(result.value, { scope: s, workspace, query: q }))
       setPhase('ready')
@@ -298,13 +309,29 @@ export function MemoryManagePanel({
 
   const loadMore = useCallback(async () => {
     if (transport === undefined || list === null || list.nextCursor === undefined || loadingMore) return
+    // Capture the list generation this request belongs to; responses for a
+    // superseded generation (scope/search changed meanwhile) are dropped so
+    // old pages never append into a newer list.
+    const seq = seqRef.current
     setLoadingMore(true)
-    const cursor = Number(list.nextCursor)
+    const cursor = parseMemoryNextCursor(list.nextCursor)
+    if (cursor === null) {
+      // Malformed host cursor: forwarding it would re-fetch page 1 and
+      // duplicate items. Stop pagination and surface a hint — the banner
+      // retry re-fetches the first page.
+      setLoadingMore(false)
+      setError(mapMemoryFailure(toMemoryFailure(new Error(`invalid nextCursor: ${list.nextCursor}`))))
+      return
+    }
     let result
     try {
       result = await transport.list(buildMemoryListParams(queryState(appliedQuery, scope, cursor)))
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
+    }
+    if (seq !== seqRef.current || !mountedRef.current) {
+      setLoadingMore(false)
+      return // stale generation or unmounted — drop
     }
     setLoadingMore(false)
     if (result.ok) {
@@ -312,12 +339,7 @@ export function MemoryManagePanel({
       setList(prev =>
         prev === null
           ? next
-          : {
-              items: [...prev.items, ...next.items],
-              total: next.total,
-              ...(next.nextCursor !== undefined ? { nextCursor: next.nextCursor } : {}),
-              hasMore: next.hasMore,
-            },
+          : appendMemoryListPage(prev, next),
       )
       setError(null)
     } else {
@@ -335,6 +357,9 @@ export function MemoryManagePanel({
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
+    // Capture the list generation the target belongs to; a response landing
+    // after a scope/search change must not write into the newer list.
+    const seq = seqRef.current
     setEditSaving(true)
     const target = editTarget
     let result
@@ -348,6 +373,13 @@ export function MemoryManagePanel({
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
+    if (seq !== seqRef.current || !mountedRef.current) {
+      // The visible list moved to a newer generation (or the panel unmounted):
+      // close the overlay but never touch the newer list.
+      setEditSaving(false)
+      setEditTarget(null)
+      return
+    }
     setEditSaving(false)
     if (result.ok) {
       const updated = buildMemoryEntryView(result.value, {
@@ -356,8 +388,8 @@ export function MemoryManagePanel({
         query: appliedQuery,
       })
       setList(prev =>
-        prev === null
-          ? prev
+        prev === null || !prev.items.some(item => item.id === updated.id)
+          ? prev // entry no longer part of the current list — drop the write-back
           : { ...prev, items: prev.items.map(item => (item.id === updated.id ? updated : item)) },
       )
       setEditTarget(null)
@@ -375,6 +407,7 @@ export function MemoryManagePanel({
     const submitting = confirmForget(forget)
     setForget(submitting)
     const target = submitting.target!
+    const seq = seqRef.current
     let result
     try {
       result = await transport.forget({
@@ -385,6 +418,13 @@ export function MemoryManagePanel({
       })
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
+    }
+    if (!mountedRef.current) return
+    if (seq !== seqRef.current) {
+      // The list moved to a newer generation: settle the machine but never
+      // mutate the visible list (it no longer contains the target).
+      setForget(result.ok ? resolveForget(submitting, result.value) : rejectForget(submitting, result.error))
+      return
     }
     if (result.ok) {
       setList(prev =>

@@ -55,6 +55,8 @@ export type GrayCodeRestorePreviewLocaleKey =
   | 'confirmCheckbox'
   | 'confirmWarning'
   | 'tokenLabel'
+  | 'tokenShow'
+  | 'tokenHide'
   | 'tokenPlaceholder'
   | 'tokenHint'
   | 'pasteTokenButton'
@@ -137,6 +139,8 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     confirmCheckbox: '我了解此操作会覆盖或删除工作区文件，且不可撤销',
     confirmWarning: '二次确认：恢复会立即写入工作区。请核对上方文件清单',
     tokenLabel: '审批 token',
+    tokenShow: '显示',
+    tokenHide: '隐藏',
     tokenPlaceholder: '粘贴 checkpoint_preview 返回的 previewToken',
     tokenHint: 'token 绑定存档、工作区与预览基线；缺失、过期或错配会被 host 拒绝（GRAY_APPROVAL_REQUIRED / GRAY_CONFLICT）',
     pasteTokenButton: '使用已有 token',
@@ -203,6 +207,8 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     confirmCheckbox: 'I understand this will overwrite or delete workspace files and cannot be undone',
     confirmWarning: 'Final confirmation: restore writes to the workspace immediately. Review the file list above',
     tokenLabel: 'Approval token',
+    tokenShow: 'Show',
+    tokenHide: 'Hide',
     tokenPlaceholder: 'Paste the previewToken returned by checkpoint_preview',
     tokenHint: 'The token binds checkpoint, workspace and preview baseline; missing, expired or mismatched tokens are denied by the host (GRAY_APPROVAL_REQUIRED / GRAY_CONFLICT)',
     pasteTokenButton: 'Use an existing token',
@@ -277,6 +283,8 @@ export const graycodeRestorePreviewJaPlaceholder: LocaleDict = {
   confirmCheckbox: 'この操作でワークスペースのファイルが上書きまたは削除され、元に戻せないことを理解しています',
   confirmWarning: '最終確認：復元はすぐにワークスペースへ書き込みます。上のファイルリストを確認してください',
   tokenLabel: '承認トークン',
+  tokenShow: '表示',
+  tokenHide: '隠す',
   tokenPlaceholder: 'checkpoint_preview が返した previewToken を貼り付け',
   tokenHint: 'トークンはチェックポイント・ワークスペース・プレビュー基準に紐づきます。欠落・期限切れ・不一致はホストに拒否されます（GRAY_APPROVAL_REQUIRED / GRAY_CONFLICT）',
   pasteTokenButton: '既存のトークンを使用',
