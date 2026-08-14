@@ -254,7 +254,7 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The nine locale namespaces the entry registers (dict + ja placeholder each). */
+/** The ten locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
@@ -265,6 +265,7 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.stagedDiffCard',
   'graycode.settingsContribution',
   'graycode.activityHeatmap',
+  'graycode.notifications',
 ]
 
 /**
@@ -398,24 +399,27 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     expect(harness.definitions).toHaveLength(expected)
   })
 
-  it('audits fiber unload coverage: the 9 locale namespaces are NOT fiber-tied today (HMR residue gap)', () => {
+  it('locale namespaces are fiber-tied: an apply→unload→apply HMR cycle leaves no residue', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
     for (const ns of EXPECTED_LOCALE_NS) {
       expect(harness.locale.get(ns), ns).toHaveLength(2) // dict + ja placeholder
     }
     harness.unload()
-    // The workflow Definition disposer IS effect-tied → clean.
+    // Every registration disposer is effect-tied — the workflow Definition AND
+    // every ctx.locale.register disposer are handed to ctx.effect (the same
+    // pattern), so unload runs them in reverse registration order and the live
+    // locale store has zero residue.
     expect(harness.definitions).toHaveLength(0)
-    // The locale registrations are NOT: apply() drops the disposer returned by
-    // ctx.locale.register (only the Definition disposer is passed to
-    // ctx.effect). On a host HMR cycle (unload old fiber → re-apply) the same 9
-    // namespaces would be re-registered on the live store. This pins the
-    // CURRENT contract so the gap stays visible; the fix is to wrap each
-    // locale.register disposer in ctx.effect (the same pattern as the
-    // Definition path) — then this assertion must be updated to expect empty.
+    expect(harness.locale.size).toBe(0)
     for (const ns of EXPECTED_LOCALE_NS) {
-      expect(harness.locale.get(ns), `locale residue for ${ns}`).toHaveLength(2)
+      expect(harness.locale.get(ns), `locale residue for ${ns}`).toBeUndefined()
+    }
+    // A host HMR cycle (unload old fiber → re-apply) re-registers exactly one
+    // set per namespace — nothing accumulates across cycles.
+    apply(harness.ctx)
+    for (const ns of EXPECTED_LOCALE_NS) {
+      expect(harness.locale.get(ns), ns).toHaveLength(2)
     }
   })
 

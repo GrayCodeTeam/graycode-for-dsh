@@ -97,10 +97,13 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('ties the Definition disposer to the fiber via ctx.effect', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
-    expect(effect).toHaveBeenCalledTimes(1)
+    // One ctx.effect per registration disposer: the workflow Definition plus
+    // every locale namespace (10 × dict + ja placeholder) = 1 + 20.
+    expect(effect).toHaveBeenCalledTimes(21)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
-    // The effect body returns the registry disposer, so fiber unload runs it.
+    // The first effect body returns the Definition registry disposer, so
+    // fiber unload runs it.
     expect(effect.mock.calls[0]?.[0]()).toBe(disposer)
   })
 

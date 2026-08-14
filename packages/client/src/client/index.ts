@@ -114,6 +114,10 @@ export const inject = ['slots', 'locale', 'conversationEvents']
  * - registers the workflow conversation node Definition (P4-01) so the 12
  *   Gray workflow tool calls materialize as `kind: 'graycode.workflow'` chat
  *   nodes; the disposer is tied to the fiber via `ctx.effect`;
+ * - ties EVERY locale register disposer to the fiber via `ctx.effect` (the
+ *   same pattern as the Definition disposer) so a host HMR unload→re-apply
+ *   cycle leaves no residue on the live locale store — fiber unload runs the
+ *   effect disposers in reverse registration order;
  * - contributes the "Gray Code loaded" marker into the additive
  *   `shell.overlay` list slot once ui-layout declares it (`ctx.slots.inject`
  *   defers the registration until the declaration exists; the returned
@@ -132,34 +136,58 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => disposeWorkflowDefinition)
 
   // Workflow locale namespace — own ns, kept separate from `graycode` so the
-  // card copy can evolve independently (see workflowNode/locales.ts).
-  ctx.locale.register(GRAYCODE_WORKFLOW_NS, graycodeWorkflowDictionaries)
-  ctx.locale.register(GRAYCODE_WORKFLOW_NS, 'ja', graycodeWorkflowJaPlaceholder)
+  // card copy can evolve independently (see workflowNode/locales.ts). Every
+  // register disposer is tied to the fiber via ctx.effect (the same pattern as
+  // the Definition above), so a host HMR unload→re-apply cycle leaves no
+  // residue on the live locale store.
+  const disposeWorkflowLocale = ctx.locale.register(GRAYCODE_WORKFLOW_NS, graycodeWorkflowDictionaries)
+  ctx.effect(() => disposeWorkflowLocale)
+  const disposeWorkflowLocaleJa = ctx.locale.register(GRAYCODE_WORKFLOW_NS, 'ja', graycodeWorkflowJaPlaceholder)
+  ctx.effect(() => disposeWorkflowLocaleJa)
 
   // Phase 4 management surface locale namespaces (P4-02~P4-07): registered
-  // eagerly so copy is ready before the host mounts any component.
-  ctx.locale.register(GRAYCODE_WORKFLOW_OVERVIEW_NS, graycodeWorkflowOverviewDictionaries)
-  ctx.locale.register(GRAYCODE_WORKFLOW_OVERVIEW_NS, 'ja', graycodeWorkflowOverviewJaPlaceholder)
-  ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, graycodeMemoryManageDictionaries)
-  ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, 'ja', graycodeMemoryManageJaPlaceholder)
-  ctx.locale.register(GRAYCODE_CHECKPOINT_LIST_NS, graycodeCheckpointListDictionaries)
-  ctx.locale.register(GRAYCODE_CHECKPOINT_LIST_NS, 'ja', graycodeCheckpointListJaPlaceholder)
-  ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, graycodeRestorePreviewDictionaries)
-  ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, 'ja', graycodeRestorePreviewJaPlaceholder)
-  ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, graycodeStagedDiffCardDictionaries)
-  ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, 'ja', graycodeStagedDiffCardJaPlaceholder)
-  ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, graycodeSettingsContributionDictionaries)
-  ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, 'ja', graycodeSettingsContributionJaPlaceholder)
-  ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, graycodeActivityHeatmapDictionaries)
-  ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
+  // eagerly so copy is ready before the host mounts any component. Disposers
+  // are fiber-tied like the other registrations.
+  const disposeWorkflowOverview = ctx.locale.register(GRAYCODE_WORKFLOW_OVERVIEW_NS, graycodeWorkflowOverviewDictionaries)
+  ctx.effect(() => disposeWorkflowOverview)
+  const disposeWorkflowOverviewJa = ctx.locale.register(GRAYCODE_WORKFLOW_OVERVIEW_NS, 'ja', graycodeWorkflowOverviewJaPlaceholder)
+  ctx.effect(() => disposeWorkflowOverviewJa)
+  const disposeMemoryManage = ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, graycodeMemoryManageDictionaries)
+  ctx.effect(() => disposeMemoryManage)
+  const disposeMemoryManageJa = ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, 'ja', graycodeMemoryManageJaPlaceholder)
+  ctx.effect(() => disposeMemoryManageJa)
+  const disposeCheckpointList = ctx.locale.register(GRAYCODE_CHECKPOINT_LIST_NS, graycodeCheckpointListDictionaries)
+  ctx.effect(() => disposeCheckpointList)
+  const disposeCheckpointListJa = ctx.locale.register(GRAYCODE_CHECKPOINT_LIST_NS, 'ja', graycodeCheckpointListJaPlaceholder)
+  ctx.effect(() => disposeCheckpointListJa)
+  const disposeRestorePreview = ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, graycodeRestorePreviewDictionaries)
+  ctx.effect(() => disposeRestorePreview)
+  const disposeRestorePreviewJa = ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, 'ja', graycodeRestorePreviewJaPlaceholder)
+  ctx.effect(() => disposeRestorePreviewJa)
+  const disposeStagedDiffCard = ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, graycodeStagedDiffCardDictionaries)
+  ctx.effect(() => disposeStagedDiffCard)
+  const disposeStagedDiffCardJa = ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, 'ja', graycodeStagedDiffCardJaPlaceholder)
+  ctx.effect(() => disposeStagedDiffCardJa)
+  const disposeSettingsContribution = ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, graycodeSettingsContributionDictionaries)
+  ctx.effect(() => disposeSettingsContribution)
+  const disposeSettingsContributionJa = ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, 'ja', graycodeSettingsContributionJaPlaceholder)
+  ctx.effect(() => disposeSettingsContributionJa)
+  const disposeActivityHeatmap = ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, graycodeActivityHeatmapDictionaries)
+  ctx.effect(() => disposeActivityHeatmap)
+  const disposeActivityHeatmapJa = ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
+  ctx.effect(() => disposeActivityHeatmapJa)
 
   // C4 notifications locale namespace (own ns, same pattern as the other
   // Phase 4 surfaces).
-  ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, graycodeNotificationsDictionaries)
-  ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, 'ja', graycodeNotificationsJaPlaceholder)
+  const disposeNotifications = ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, graycodeNotificationsDictionaries)
+  ctx.effect(() => disposeNotifications)
+  const disposeNotificationsJa = ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, 'ja', graycodeNotificationsJaPlaceholder)
+  ctx.effect(() => disposeNotificationsJa)
 
-  ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
-  ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
+  const disposeGraycode = ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
+  ctx.effect(() => disposeGraycode)
+  const disposeGraycodeJa = ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
+  ctx.effect(() => disposeGraycodeJa)
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(
       { name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS },
