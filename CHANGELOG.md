@@ -53,6 +53,17 @@
 - **P0-03 client 刷新/HMR/缓存补测**：`reloadStability.spec.ts`（刷新回放一致性、apply+unload
   HMR 幂等、fiber-tied 注册审计）+ `clientArtifact.spec.ts`（manifest ↔ 产物一致性、
   bundle loader-closure 契约）；发现并记录 `apply()` 未 fiber-tie locale 注册的 HMR 残留缺口。
+- **A1 能力内子集（请求构造层）**：`src/thoughts/`（graycode-thoughts 子插件，默认关闭未挂载）
+  ——llm/stream waterfall 拦截 agent-loop 请求，不可变改写（新 options + 新 messages）注入
+  preset 临时消息、fakeThought 升级为 `{type:'reasoning'}` 块；WeakSet 防递归、fail-closed；
+  .d.ts 复验确认 isAgentLoopRequest/markAgentLoopRequest 公开导出；ADR-0002 §4b 记录非契约用法。
+- **B 组占位清理**：migrationHarden / checkpointChain / conversationSeed 三测试的
+  `createNoopWriter('snapshots')` 替换为真实 snapshot 目标 writer；conversationSeed 新增
+  「含快照源数据」端到端用例（lineage header + 台账 session://）。
+- **Client locale HMR 修复**：`apply()` 全部 20 处 `ctx.locale.register` disposer 改经
+  `ctx.effect` fiber-tied（修复 P0-03 发现的 HMR 残留缺口）；reloadStability 表征测试同步翻转。
+- **发布准备**：`docs/RELEASE.md` 发布检查清单（产物核对/发布顺序 plugin→client→bundle/
+  发布后验收/回滚预案/已知风险）；README 修正 tarball 安装路径并补 registry 安装说明。
 - **Client 包（Phase 4 骨架）**：`@graycode/dsh-client`，`dsh.client` manifest、
   `shell.overlay` slot 注册、zh/en locale、tsdown browser bundle（3.7 kB，可被 DSH 加载）。
 - **CI 与打包**：`.github/workflows/ci.yml`（三平台矩阵、typecheck/test/build/pack/tarball 检查）、

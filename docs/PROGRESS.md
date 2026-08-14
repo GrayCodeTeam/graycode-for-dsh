@@ -199,6 +199,9 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 ### Phase 6 发布 — pending（CI 就绪；npm 发布、三平台验收、升级/回滚演练待做）
 
+- **发布面准备（本批次）**：`docs/RELEASE.md` 发布检查清单已就绪；三包 tarball 产物与
+  files 白名单核对通过（bundle/plugin/client）；npm publish 未执行（需 npm 账号）。
+
 ## §6.5 Agent 作用域注册 — 已实现并在真实运行时验证
 
 - `src/agentScope.ts`：`agent/created` 时 scoped 注册工具（shadow 全局），`agent/disposed` 清理，
@@ -242,6 +245,12 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   （pi-ai 渠道可上 wire；deepseek-official 渠道 serialize 丢弃 plain-turn reasoning，
   需 DSH 渠道层改动或接受差异），维持暂缓——实施时先 `pnpm install` 复验
   llm/stream 订阅形态与 GenerateOptions 载荷（O-1~O-3），再写 ADR-0002 修订。
+  **能力内子集（✅ 已实现，2026-09，未挂载）**：`src/thoughts/`（graycode-thoughts
+  子插件，默认关闭）——.d.ts 复验确认 isAgentLoopRequest/markAgentLoopRequest 公开导出、
+  llm/stream waterfall 签名、GenerateOptions.sessionId、ReasoningBlock；实现不可变改写
+  （新 options + 新 messages，绝不 mutate 深冻结原对象）、WeakSet 防递归、fail-closed；
+  ADR-0002 §4b 记录非契约用法与渠道差异。完整 A1（注入器 requestLayer 联动 + 挂载 +
+  真实渠道验证）待排期。20 用例（rewrite 14 + llmStream 6）。
 
 ### 迁移增强（B 组）
 
