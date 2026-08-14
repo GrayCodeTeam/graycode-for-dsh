@@ -36,6 +36,13 @@
   （旧 apiKey 经 `ctx.credentials.set` 写入 DSH，明文仅内存、失败隔离、报告全程无明文）；
   settings 写时结果（routes/冲突/凭据引用/迁移状态）合流进机器 JSON
   `settingsSummary.writeResult`。
+- **迁移增强 B3**：snapshots 接线——旧快照经 `SessionStore.create`（seed 历史 + header
+  lineage `parentSession`/`seedLength`）导入为 DSH session，孤儿快照照常导入，幂等由台账保证。
+- **Subagents 薄适配层（C1）**：`graycode-subagents` 子插件挂进 composition root——G1
+  hop 熔断（默认 5，老 Gray MAX_HOP_DEPTH）、G2 子→父寻址（直接父/main+root 支持，其余
+  fail-closed）、G3 maxConcurrent（默认 2）；配置 `subagents.maxHopDepth/maxConcurrent`。
+- **P0-02 HMR 补测**：`tests/hmr/hostReload.spec.ts`——`Fiber.restart()` 重载 20 次工具/
+  监听器/定时器不增长、工具名集合逐轮相等、`fiber.update` 配置 HMR 不泄漏。
 - **Client 包（Phase 4 骨架）**：`@graycode/dsh-client`，`dsh.client` manifest、
   `shell.overlay` slot 注册、zh/en locale、tsdown browser bundle（3.7 kB，可被 DSH 加载）。
 - **CI 与打包**：`.github/workflows/ci.yml`（三平台矩阵、typecheck/test/build/pack/tarball 检查）、

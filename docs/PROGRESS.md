@@ -35,7 +35,7 @@
 | 探针 | 状态 | 证据 |
 | --- | --- | --- |
 | P0-01 外部 bundle 增量 patch | done | `dsh plugin add` 目录安装 + `--dump-config` 仅增 Gray 层 |
-| P0-02 Host apply/HMR | done（部分） | 非法 config 被 Schemastery schema 拒绝；HMR 重载测试待补 |
+| P0-02 Host apply/HMR | **done（2026-09 补测）** | 非法 config 被 Schemastery schema 拒绝；`tests/hmr/hostReload.spec.ts`：`Fiber.restart()` 真实 HMR 原语重载 20 次，工具名集合逐轮相等、监听器/定时器不增长、persona section 不重复、`fiber.update` 配置 HMR 不泄漏 |
 | P0-08 fs 路径 | **done（2025 批次）** | 恢复写盘经 `RestoreWorkspaceWriter` 端口：文本走 `ctx.fs.writeText`（原子、sandboxPolicy、signal）；二进制/删除/目录操作按 GAP 回退 node fs，集中在 `checkpoints/domain/RestoreWorkspaceWriter.ts` 一处（GAP 1-5 见该文件与 `checkpoints/README.md`） |
 | agent 扩展面 | done | `agent/created`/`agent/disposed`/`agent/pre-step` 均可由第三方插件订阅（见 §6.5 验证） |
 | P0-13/14/15 提示词扩展面 | 结论已定（ADR-0002） | P0-13 VERIFIED（system-prompt section/variable）；P0-14 GAP（无公开请求构造注入面）；P0-15 SPIKE（渠道开关待 provider matrix，随 D-11=c 落地为注入时门默认 false） |
@@ -236,17 +236,22 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   明文仅内存、失败隔离、报告全程无明文（见上「B1/B2 已落地」节）。
 - **B2 settings 写时信息合流（✅ 已落地，2026-09）**：写时结果（routes/冲突/凭据引用/迁移状态）
   经 `WriteTargetResult.summary` 合流进机器 JSON `report.settingsSummary.writeResult`。
-- **B3 snapshots 迁移接线（待实施）**：旧 snapshots 解析器已就绪（parseSnapshot），但 plan 层
-  恒 unmapped（noopTarget fail-closed）。定案：尽量接 DSH lineage / session fork
-  语义（探明 DSH 公开 API 后实现）。
+- **B3 snapshots 迁移接线（✅ 已落地，2026-09）**：旧 snapshots 解析器 → DSH session（seed
+  快照历史 + header lineage `parentSession`/`seedLength`，确定性 id `migrated-snap-<legacyId>`）；
+  孤儿快照照常导入（parentSession 非外键，父会话后续导入自动连通）；幂等由台账键保证。
+  探明结论：rc.6 `SessionStore.create+seed+meta` 足以承载 lineage，**不用 fork()**（fork 要求
+  live 源会话，孤儿快照必 `SESSION_NOT_FOUND`，迁移场景不可靠）——见
+  `src/migration/README.md` 与 `tests/migration/snapshotSeed.test.ts`（12 用例）。
 
 ### 功能补缺（C 组）
 
-- **C1 subagents 补齐（定案：补，暂缓）**：DSH 覆盖 ≈90%（见上节与
-  docs/SUBAGENTS_VERIFICATION.md），缺口三项需补 Gray 适配层：G1 消息 hop 熔断
-  （老 Gray threadId+hopDepth≤5）、G2 子→父任意寻址（老 Gray agent_send_message 可发
-  main/任意 agent；DSH report 仅直接父代理）、G3 maxConcurrent 并发上限
-  （老 Gray settings subagents.maxConcurrent）。
+- **C1 subagents 补齐（✅ 已落地，2026-09）**：`src/subagents/` 薄适配层（graycode-subagents
+  子插件，已挂进 composition root）：G1 hop 熔断（ThreadHopCounter 纯 TS，默认 5，
+  followup/reportFrom 外层包装，subagent/start 重置、end 清理）；G2 子→父寻址（target 解析为
+  持久化直接父（含 main+root）走 reportFrom，其余 UnsupportedAddressingError fail-closed，
+  不硬写 hack）；G3 maxConcurrent（默认 2，委派前 listChildren 计数）。配置
+  `subagents.maxHopDepth/maxConcurrent`（0=关闭守卫）。39 用例 + 探针守卫。
+  SPIKE 结论：seam 方法是唯一可拦截点（base tool 包未装），`reportFrom` 不支持任意寻址。
 - **C2 media generate_image / remove_background（优先级较低）**：设计已记录于
   media/README.md（deferred）；需模型渠道调用设计（ctx.llm 或独立 provider）。
 - **C3 todo_update 薄适配（✅ 已落地，2026-08）**：graycode-todo 域（src/todo/）——
