@@ -210,4 +210,21 @@ describe('delete_code 工具闭环（真实 fs）', () => {
     // 通过 schema 的畸形条目（start_line 缺失同被拒）之外，运行时校验由
     // validateDeleteEntry 兜底（executeDeleteCode 纯函数层覆盖，见纯函数用例）
   })
+
+  it('超过 5MB 大小护栏的文件被拒绝（不整读不落盘）', async () => {
+    const big = 'x'.repeat(5 * 1024 * 1024 + 1)
+    await writeFile(path.join(tmpDir, 'big.txt'), big)
+    const result = await runTool({ files: [{ path: 'big.txt', start_line: 1, end_line: 1 }] })
+    expect(result.successCount).toBe(0)
+    expect(result.failCount).toBe(1)
+    expect(result.results[0]!.success).toBe(false)
+    expect(result.results[0]!.error).toContain('File too large to edit')
+    expect(result.results[0]!.error).toContain('5242880')
+    // 文件保持原样（未发生任何写入）
+    expect(await readWs('big.txt')).toBe(big)
+    // 恰好等于上限的文件仍可处理（边界）
+    await writeFile(path.join(tmpDir, 'at-limit.txt'), 'x'.repeat(5 * 1024 * 1024))
+    const ok = await runTool({ files: [{ path: 'at-limit.txt', start_line: 1, end_line: 1 }] })
+    expect(ok.results[0]!.success).toBe(true)
+  })
 })

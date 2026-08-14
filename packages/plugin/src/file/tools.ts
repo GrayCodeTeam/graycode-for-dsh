@@ -109,7 +109,14 @@ async function readFileOrNotFound(
     return { ok: false, error: `File not found: ${relPath}` }
   }
   try {
-    return { ok: true, content: await readTargetText(deps, target) }
+    const content = await readTargetText(deps, target)
+    if (Buffer.byteLength(content, 'utf8') > MAX_EDIT_FILE_BYTES) {
+      return {
+        ok: false,
+        error: `File too large to edit (${relPath} exceeds ${MAX_EDIT_FILE_BYTES} bytes)`,
+      }
+    }
+    return { ok: true, content }
   } catch (error) {
     return {
       ok: false,
