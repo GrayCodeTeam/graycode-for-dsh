@@ -41,10 +41,23 @@ pnpm install
 pnpm build
 pnpm pack
 
-# 安装到 DSH profile（以本地 tarball 为例）
-dsh plugin --profile graycode add ./packages/bundle/graycode-dsh-0.1.0.tgz
+# 安装到 DSH profile（以本地 tarball 为例，tarball 生成于仓库根）
+dsh plugin --profile graycode add ./graycode-dsh-0.1.0.tgz
 dsh --profile graycode
 ```
+
+发布后也可从 npm registry 安装（`@graycode/dsh@0.1.0` 已发布）：
+
+```sh
+# bundle 安装：DSH 按 cordis.patch.yml 增量层自动拉取 @graycode/dsh-plugin 与 @graycode/dsh-client
+dsh plugin --profile graycode add @graycode/dsh
+dsh --profile graycode
+```
+
+- 三包：`@graycode/dsh`（bundle 增量层）→ `@graycode/dsh-plugin`（宿主插件）+ `@graycode/dsh-client`（Client UI）。
+- 版本锁定：DSH 基线 `0.1.0-rc.6`（npm `next`，见 [ADR-0001](docs/ADR-0001.md)）；升级 DSH 需独立兼容 PR。
+- bundle 只钉 `id`（graycode / graycode-client）不复制 DSH 配置，默认值在插件 Schemastery schema。
+- 发布检查清单与产物核对见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
 ## 开发
 
