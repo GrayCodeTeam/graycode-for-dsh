@@ -7,15 +7,20 @@
  * （in_progress → completed → reopen）。
  *
  * DSH 差异：
- * - 会话门闸改为进程内 Map<sessionId, 状态>（重启丢失，注释见 sessionState.ts）。
- * - 删除 autoSync 联动（vscode 依赖，暂缓项 DEFERRED）：不再自动同步
- *   `.graycode/progress.md`，返回数据中不含 progress warnings。
+ * - 会话门闸持久化（W-M2）：状态落在 <dataRoot>/workflows/review-sessions.json，
+ *   重启后门闸仍生效（见 sessionState.ts）。
+ * - staged-diff 适配（ADR-0003 §6 后续动作 2）：stagedDiff enabled 时写入意图先
+ *   变成 staged 条目（extra.staged.entryId + warnings 提示），接受后才落盘；
+ *   默认 disabled 行为与源一致（立即落盘）。
+ * - autoSync 联动（审计项 W-M1 恢复）：写入后 best-effort 同步 `.graycode/progress.md`
+ *   （失败只进 extra.warnings，不阻断主流程），warnings 字段与源一致。
  * - create_review 已存在检查用 `ctx.fs.stat(...) === undefined`（源用 FileNotFound 码）。
  */
 
 import { createHash } from 'node:crypto'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
+import { syncProgressFromReviewArtifact } from '../autoSync.ts'
 import type {
   ReviewEvidenceRef,
   ReviewFindingInput,
@@ -151,6 +156,27 @@ function toOverallDecision(value: unknown): ReviewOverallDecision | undefined {
     : undefined
 }
 
+/** 组装 extra：autoSync warnings + staging 提示（staged 时 entryId 双通道：字段 + warnings 文案） */
+function buildReviewExtra(
+  progressWarnings: string[],
+  outcome: Awaited<ReturnType<typeof writeTargetText>>
+): Record<string, unknown> | undefined {
+  const warnings: string[] = [...progressWarnings]
+  if (outcome.staged && outcome.stagedEntryId) {
+    warnings.push(
+      `Document write staged as entry ${outcome.stagedEntryId} (pending user acceptance; not written to disk yet). Accept it with staged_diff_accept to land it.`
+    )
+  } else if (outcome.warnings && outcome.warnings.length > 0) {
+    warnings.push(...outcome.warnings)
+  }
+  const extra: Record<string, unknown> = {}
+  if (warnings.length > 0) extra.warnings = warnings
+  if (outcome.staged && outcome.stagedEntryId) {
+    extra.staged = { entryId: outcome.stagedEntryId, status: 'pending' }
+  }
+  return Object.keys(extra).length > 0 ? extra : undefined
+}
+
 export async function executeCreateReview(
   deps: ToolDeps,
   rawArgs: Record<string, unknown>
@@ -191,7 +217,12 @@ export async function executeCreateReview(
         review,
       }, locale)
       const summary = summarizeReviewDocument(content)
-      await writeTargetText(deps, target, content)
+      const outcome = await writeTargetText(deps, target, content, outPath)
+      const progressWarnings = await syncProgressFromReviewArtifact(deps, {
+        reviewPath: outPath,
+        title: summary.title || title || undefined,
+        eventMessage: `同步审查文档：${outPath}`,
+      })
 
       if (summary.reviewSnapshot) {
         saveReviewSessionState(deps.sessionId, {
@@ -210,6 +241,7 @@ export async function executeCreateReview(
           type: 'created',
           changedFields: ['header', 'scope', 'reviewSnapshot', 'reviewSession'],
         },
+        extra: buildReviewExtra(progressWarnings, outcome),
       })
     })
   })
@@ -259,31 +291,40 @@ export async function executeRecordReviewMilestone(
       reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
       recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
     }, locale)
-    await writeTargetText(deps, target, result.content)
-    return result
+    const outcome = await writeTargetText(deps, target, result.content, path)
+    return { result, outcome }
+  })
+
+  const progressWarnings = await syncProgressFromReviewArtifact(deps, {
+    reviewPath: path,
+    title: next.result.reviewSnapshot.header.title,
+    latestConclusion: next.result.reviewSnapshot.summary.latestConclusion || undefined,
+    nextAction: next.result.reviewSnapshot.summary.recommendedNextAction || undefined,
+    eventMessage: `同步审查里程碑：${next.result.milestoneId}`,
   })
 
   saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.reviewSnapshot.reviewRunId,
+    reviewRunId: next.result.reviewSnapshot.reviewRunId,
     reviewPath: path,
-    status: next.reviewSnapshot.status,
-    createdAt: next.reviewSnapshot.createdAt,
-    finalizedAt: next.reviewSnapshot.finalizedAt,
+    status: next.result.reviewSnapshot.status,
+    createdAt: next.result.reviewSnapshot.createdAt,
+    finalizedAt: next.result.reviewSnapshot.finalizedAt,
   })
 
   return projectReviewToolResultData({
     path,
-    content: next.content,
+    content: next.result.content,
     delta: {
       type: 'milestone_recorded',
-      milestoneId: next.milestoneId,
-      addedFindingIds: next.addedFindingIds,
+      milestoneId: next.result.milestoneId,
+      addedFindingIds: next.result.addedFindingIds,
       changedFields: ['milestones', 'findings', 'summary', 'stats', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      milestoneId: next.milestoneId,
-      findings: next.findings,
-      structuredFindings: next.structuredFindings,
+      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      milestoneId: next.result.milestoneId,
+      findings: next.result.findings,
+      structuredFindings: next.result.structuredFindings,
     },
   })
 }
@@ -321,28 +362,37 @@ export async function executeFinalizeReview(
       recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
       reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
     }, locale)
-    await writeTargetText(deps, target, result.content)
-    return result
+    const outcome = await writeTargetText(deps, target, result.content, path)
+    return { result, outcome }
+  })
+
+  const progressWarnings = await syncProgressFromReviewArtifact(deps, {
+    reviewPath: path,
+    title: next.result.reviewSnapshot.header.title,
+    latestConclusion: next.result.reviewSnapshot.summary.latestConclusion || undefined,
+    nextAction: next.result.reviewSnapshot.summary.recommendedNextAction || undefined,
+    eventMessage: `同步审查结论：${path}`,
   })
 
   saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.reviewSnapshot.reviewRunId,
+    reviewRunId: next.result.reviewSnapshot.reviewRunId,
     reviewPath: path,
-    status: next.reviewSnapshot.status,
-    createdAt: next.reviewSnapshot.createdAt,
-    finalizedAt: next.reviewSnapshot.finalizedAt,
+    status: next.result.reviewSnapshot.status,
+    createdAt: next.result.reviewSnapshot.createdAt,
+    finalizedAt: next.result.reviewSnapshot.finalizedAt,
   })
 
   return projectReviewToolResultData({
     path,
-    content: next.content,
+    content: next.result.content,
     delta: {
       type: 'finalized',
       changedFields: ['status', 'overallDecision', 'finalizedAt', 'summary', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      findings: next.findings,
-      structuredFindings: next.structuredFindings,
+      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      findings: next.result.findings,
+      structuredFindings: next.result.structuredFindings,
     },
   })
 }
@@ -374,28 +424,35 @@ export async function executeReopenReview(
     const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
     const locale = getCurrentReviewDocumentLocale()
     const result = reopenReviewDocument(originalContent, locale)
-    await writeTargetText(deps, target, result.content)
-    return result
+    const outcome = await writeTargetText(deps, target, result.content, path)
+    return { result, outcome }
+  })
+
+  const progressWarnings = await syncProgressFromReviewArtifact(deps, {
+    reviewPath: path,
+    title: next.result.reviewSnapshot.header.title,
+    eventMessage: `重新打开审查：${path}`,
   })
 
   saveReviewSessionState(deps.sessionId, {
-    reviewRunId: next.reviewSnapshot.reviewRunId,
+    reviewRunId: next.result.reviewSnapshot.reviewRunId,
     reviewPath: path,
-    status: next.reviewSnapshot.status,
-    createdAt: next.reviewSnapshot.createdAt,
-    finalizedAt: next.reviewSnapshot.finalizedAt,
+    status: next.result.reviewSnapshot.status,
+    createdAt: next.result.reviewSnapshot.createdAt,
+    finalizedAt: next.result.reviewSnapshot.finalizedAt,
   })
 
   return projectReviewToolResultData({
     path,
-    content: next.content,
+    content: next.result.content,
     delta: {
       type: 'reopened',
       changedFields: ['status', 'overallDecision', 'finalizedAt', 'reviewSnapshot', 'reviewSession'],
     },
     extra: {
-      findings: next.findings,
-      structuredFindings: next.structuredFindings,
+      ...(buildReviewExtra(progressWarnings, next.outcome) ?? {}),
+      findings: next.result.findings,
+      structuredFindings: next.result.structuredFindings,
     },
   })
 }

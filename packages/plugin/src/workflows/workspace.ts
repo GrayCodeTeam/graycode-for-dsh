@@ -17,6 +17,7 @@ import {
 } from './domain/modeToolsPolicy.ts'
 import type { ProgressArtifactRef } from './domain/progress/schema.ts'
 import { normalizeLineEndingsToLF } from './domain/shared/textUtils.ts'
+import { getStagedWriteHook } from './stagedWriteHook.ts'
 
 /** 各文档域的路径白名单 scope 文案（错误消息使用，与源逐字一致） */
 export const DESIGN_PATH_SCOPE_LABEL = '.graycode/design/**.md'
@@ -214,12 +215,73 @@ export async function readTargetText(deps: ToolDeps, target: FsTarget): Promise<
 }
 
 /**
+ * 读取目标当前文本（best-effort）：目标不存在或 IO 失败返回 null（不抛错）。
+ * 供 staged 条目的 `before` 快照使用（FsWriteOutcome.before 语义）。
+ */
+export async function readTargetTextOrNull(deps: ToolDeps, target: FsTarget): Promise<string | null> {
+  try {
+    const info = await deps.fs.stat(target, deps.signal)
+    if (info === undefined) return null
+    return await deps.fs.readText(target, deps.signal)
+  } catch {
+    return null
+  }
+}
+
+/** 一次文档写入的结果 */
+export interface WriteTargetOutcome {
+  /** true = 写入意图已变成 staged 条目（未落盘，待接受）；false = 已直接落盘 */
+  staged: boolean
+  /** staged 时：条目 id（供 staged_diff_accept / staged_diff_reject 使用） */
+  stagedEntryId?: string
+  /** 非阻断性警告（如 staging 失败回退直接落盘） */
+  warnings?: string[]
+}
+
+/**
  * 写入目标文本：内容归一化 LF 后写入。
+ *
+ * staged-diff 适配（ADR-0003 §6 后续动作 2）：当写前钩子已安装且 enabled 时，把
+ * 写入意图先变成 staged 条目（绝不提前写 workspace），用户接受后才落盘；否则直接
+ * 经 ctx.fs 落盘（默认行为，与现状完全一致）。relPath 为 workspace 相对路径
+ * （staged 条目的 path 字段），缺省时即使钩子存在也不接管（回退直接落盘）。
+ *
+ * staging 失败（存储/校验等）不阻断主流程：回退直接落盘并在结果中以 warnings 上报。
  *
  * 不在此处用 node:fs 直接 mkdir 父目录：dsh-fs-local 的 writeFileAtomic 内置
  * recursive mkdir（自动建父目录），且 node:fs 直写会绕过 fs 后端的权限/审批/沙箱层
  * （PLAN_V2 §6.2：文件写入经 ctx.fs）。父目录自动创建由 fs 后端保证。
  */
-export async function writeTargetText(deps: ToolDeps, target: FsTarget, content: string): Promise<void> {
-  await deps.fs.writeText(target, normalizeLineEndingsToLF(content), undefined, deps.signal)
+export async function writeTargetText(
+  deps: ToolDeps,
+  target: FsTarget,
+  content: string,
+  relPath?: string
+): Promise<WriteTargetOutcome> {
+  const normalized = normalizeLineEndingsToLF(content)
+  const hook = getStagedWriteHook()
+  if (hook && hook.enabled && relPath) {
+    try {
+      const before = await readTargetTextOrNull(deps, target)
+      const { entryId } = await hook.stageWrite({
+        relPath,
+        content: normalized,
+        before,
+        cwd: deps.cwd,
+        sessionId: deps.sessionId,
+      })
+      return { staged: true, stagedEntryId: entryId }
+    } catch (error) {
+      // best-effort：staging 失败不阻断主文档流程，回退直接落盘并上报 warning
+      await deps.fs.writeText(target, normalized, undefined, deps.signal)
+      return {
+        staged: false,
+        warnings: [
+          `Failed to stage write for ${relPath}; wrote directly instead: ${error instanceof Error ? error.message : String(error)}`,
+        ],
+      }
+    }
+  }
+  await deps.fs.writeText(target, normalized, undefined, deps.signal)
+  return { staged: false }
 }

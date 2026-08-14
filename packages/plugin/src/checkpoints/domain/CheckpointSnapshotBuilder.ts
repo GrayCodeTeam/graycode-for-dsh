@@ -41,7 +41,8 @@ export interface SnapshotFileStat {
     mtimeMs: number;
     size: number;
     mtimeNs?: string;
-    mode: number;
+    /** 文件权限位（fs.Stats.mode；恢复时 best-effort chmod）。记录回填（旧记录无 mode）时缺省 */
+    mode?: number;
 }
 
 /** 被排除的文件记录（超限/不可读），恢复时用于解释"为什么没有备份" */

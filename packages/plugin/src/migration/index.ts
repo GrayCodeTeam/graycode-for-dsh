@@ -41,7 +41,7 @@ export const Config: z<Config> = z.object({
 export function apply(ctx: Context, config: Config): () => void {
   if (!config.enabled) return () => {}
 
-  const service = createMigrationService({ dataRoot: config.dataRoot })
+  const service = createMigrationService({ dataRoot: config.dataRoot, ctx })
   const registrar = createScopedToolRegistrar(ctx, 'roots')
   registrar.register(createMigrationTools(service, { allowLegacyReaders: config.allowLegacyReaders }))
   return () => {

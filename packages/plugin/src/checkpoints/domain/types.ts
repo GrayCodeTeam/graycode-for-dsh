@@ -340,7 +340,7 @@ export interface CheckpointRecord {
     /** 所有文件的哈希映射（用于增量比较）。只包含真正备份成功的文件 */
     fileHashes?: Record<string, string>;
     /** 快照时的文件 stat 信息（用于增量哈希复用；旧记录无此字段时回退全量哈希） */
-    fileStats?: Record<string, { mtimeMs: number; size: number; mtimeNs?: string }>;
+    fileStats?: Record<string, { mtimeMs: number; size: number; mtimeNs?: string; mode?: number }>;
     /** 快照时的自定义忽略模式（restore 据此判断“快照时该路径是否可见”） */
     ignorePatterns?: string[];
     /** 快照时被排除的文件/目录数（EX-10；恢复时解释“为什么没有备份”） */

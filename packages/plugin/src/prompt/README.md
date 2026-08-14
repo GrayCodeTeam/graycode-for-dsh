@@ -53,6 +53,20 @@ DSH rc.6 无公开请求构造注入点（P0-14 GAP，ADR-0002），因此 D-11 
 - 其余行为：kind 强制 custom、与既有 id 冲突重生成、**同一 payload 内重复 mode id 自动重命名**、
   模板/条目内容归一化。
 
+## 内置模式模板（对齐 Gray Code 1.5.4，D-1 / 审计 H1）
+
+`service.ts` 的 `BUILTIN_MODE_TEMPLATES`（code/design/plan/ask/review）与旧版
+`backend/modules/settings/promptModes.ts` 的五个内置模板**逐字节一致**（仅行尾
+CRLF→LF；JS 模板字面量 cooked 值同样归一化为 LF）。模板文本保留旧版
+`{{$MODULE}}` 占位符，由新渲染管道解析（见下节）：
+
+- `{{$ENVIRONMENT}}`：注入层提供值（默认静态环境段）；
+- `{{$TOOLS}}` / `{{$MEMORY}}`：resolved 模块，未提供值时原样保留；
+- `{{$MCP_TOOLS}}` / `{{$CONTEXT_BADGE_FORMAT}}`：编辑器专属模块，渲染时替换为确定性弃用说明文本。
+
+仅替换了模板文本；渲染管道、占位符机制与 `cleanupEmptyLines` 均未改动。
+旧版模式的 `dynamicTemplate` / `toolPolicy` 等字段不属于本模板范围（见导入兼容与审计 H3）。
+
 ## 渲染与占位符
 
 - 每次渲染（`renderPromptTemplate` 及段组合 `renderModeSectionText`）后应用旧版

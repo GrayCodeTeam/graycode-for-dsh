@@ -3,6 +3,7 @@ import z from '@deepseek-ai/schemastery'
 import { MemoryService } from './service.ts'
 import { createMemoryTools } from './tools.ts'
 import { createMemoryPreStepListener } from './autoInject.ts'
+import { createMemoryRemoteHandlers } from './adapters/dsh/remote.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 
 export const name = 'graycode-memory'
@@ -51,6 +52,9 @@ export function apply(ctx: Context, config: Config): void {
   // unloads the registrations on dispose (service keeps no timers/handles).
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createMemoryTools(service))
+  // Phase 4 host 侧 Remote 查询/命令层（memory 管理）：注册端点；
+  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。
+  ctx.grayRemote?.register(createMemoryRemoteHandlers(service))
   // Auto-injection is independent of the tool install scope: on the first
   // qualified pre-step of each agent (and again only when memory content
   // changes) a bounded snapshot enters the request; failures degrade to no

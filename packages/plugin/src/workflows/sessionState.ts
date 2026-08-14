@@ -1,20 +1,52 @@
 /**
- * Review 会话门闸（DSH 进程内实现）
+ * Review 会话门闸（DSH 持久化实现，审计项 W-M2）
  *
- * 源实现存会话 conversation metadata（vscode 持久化）。DSH 下改为进程内
- * Map<sessionId, 状态>（key = exec.agent.session.header.id）：
- * 进程重启后状态丢失（会话门闸退化为仅文档自身状态约束——reviewDocumentSection
- * 仍会在 finalize 后拒绝追加里程碑、reopen 仅允许 finalized 文档）。
+ * 源实现存会话 conversation metadata（vscode 持久化）。DSH rc.6 无 storageDomain
+ * API（已核实 @deepseek-ai/* 包无该符号），按 ADR-0002 §2 sidecar 模式把会话状态
+ * 落到插件私有目录：`<dataRoot>/workflows/review-sessions.json`（原子 tmp+rename，
+ * Windows rename-overwrite 重试，损坏文件备份隔离后重建空库）。
+ *
+ * 对外 API 保持同步签名（load/save/clear + 门闸函数），现有 tools 调用方无需改动：
+ * - 进程内 Map 是同步缓存（key = exec.agent.session.header.id）；
+ * - 首次访问（load/save）时同步兜底 hydration（readFileSync 一次），保证门闸在
+ *   任何时序下读到磁盘真相，不存在「重启后门闸退化」窗口；
+ * - 每次 save 把整库异步序列化写盘（同一条 promise 链，单进程内顺序一致）；
+ *   插件卸载时经 initReviewSessionStore 返回的 disposer flush 在途写入。
+ *
+ * 行为不变式（与旧版一致）：
+ * - 进程重启后同一会话的活跃 review 门闸仍然生效（可继续拦截第二个 active
+ *   review、路径不匹配、finalize 后追加）；
+ * - 无 dataRoot（空串）时退化为纯内存（与原进程内实现一致，不落盘）。
  */
 
+import * as crypto from 'node:crypto'
+import * as fs from 'node:fs'
+import * as fsp from 'node:fs/promises'
+import * as path from 'node:path'
 import type { ConversationReviewSessionState } from './domain/review/schema.ts'
 
 export const REVIEW_SESSION_METADATA_KEY = 'reviewSession'
 
-const sessionStates = new Map<string, ConversationReviewSessionState>()
+/** sidecar 信封（版本化；损坏/形状非法 → 隔离后重建空库） */
+interface ReviewSessionsStoreFile {
+  version: 1
+  sessions: Record<string, ConversationReviewSessionState>
+}
+
+const REVIEW_SESSIONS_STORE_VERSION = 1
+const REVIEW_SESSIONS_STORE_FILE = 'review-sessions.json'
 
 /** 会话级互斥队列：把「门闸检查 → 写文档 → 保存会话状态」按 sessionId 串行化 */
 const sessionLocks = new Map<string, Promise<unknown>>()
+
+/** 进程内同步缓存（对外 API 的读取面） */
+const sessionStates = new Map<string, ConversationReviewSessionState>()
+
+let storeDir: string | undefined
+let storePath: string | undefined
+let hydrated = false
+/** 持久化串行链：hydration 与每次保存都进同一条链，单进程内顺序一致 */
+let persistChain: Promise<unknown> = Promise.resolve()
 
 /**
  * 在 per-session 互斥内执行 `fn`（sessionId 缺省时退化为单条全局队列）。
@@ -42,13 +74,45 @@ export function withReviewSessionLock<T>(sessionId: string | undefined, fn: () =
   return next
 }
 
-/** 测试与诊断用：清空全部进程内会话状态 */
+/** 测试与诊断用：清空全部进程内会话状态与持久化配置（下次访问回到未 hydration 状态） */
 export function resetReviewSessionStatesForTest(): void {
   sessionStates.clear()
+  storeDir = undefined
+  storePath = undefined
+  hydrated = false
+}
+
+/**
+ * 初始化会话状态持久化（workflows 插件 apply 时调用；dataRoot 为空则纯内存）。
+ *
+ * 返回 disposer：插件卸载时 flush 在途写入（best-effort）。
+ */
+export function initReviewSessionStore(dataRoot: string): () => void {
+  if (!dataRoot) {
+    // 无私有数据根：退化为纯内存（与原进程内实现一致）
+    return () => undefined
+  }
+  storeDir = path.join(dataRoot, 'workflows')
+  storePath = path.join(storeDir, REVIEW_SESSIONS_STORE_FILE)
+  hydrated = false
+  // 异步预取（可选优化）；首次同步访问（load/save）也会兜底 hydration，两者幂等
+  persistChain = persistChain
+    .catch(() => undefined)
+    .then(() => hydrateFromDisk())
+    .catch(() => undefined)
+  return () => {
+    void flushReviewSessionStore()
+  }
+}
+
+/** 等待在途持久化写入完成（测试与卸载 flush 用；无持久化配置时立即返回） */
+export async function flushReviewSessionStore(): Promise<void> {
+  await persistChain.catch(() => undefined)
 }
 
 export function loadReviewSessionState(sessionId?: string): ConversationReviewSessionState | null {
   if (!sessionId) return null
+  ensureHydratedSync()
   return sessionStates.get(sessionId) || null
 }
 
@@ -57,11 +121,13 @@ export function saveReviewSessionState(
   state: ConversationReviewSessionState | null
 ): void {
   if (!sessionId) return
+  ensureHydratedSync()
   if (state === null) {
     sessionStates.delete(sessionId)
-    return
+  } else {
+    sessionStates.set(sessionId, state)
   }
-  sessionStates.set(sessionId, state)
+  queuePersist()
 }
 
 export function clearReviewSessionState(sessionId?: string): void {
@@ -110,4 +176,153 @@ export function ensureMatchingActiveReviewSession(
   }
 
   return { ok: true, session }
+}
+
+// ─── 持久化内部实现 ─────────────────────────────────────────
+
+/** 首次同步访问兜底：从磁盘一次性 hydration（幂等；无配置或已 hydration 直接返回） */
+function ensureHydratedSync(): void {
+  if (hydrated || !storePath) return
+  try {
+    const raw = fs.readFileSync(storePath, 'utf8')
+    const parsed = parseStore(JSON.parse(raw))
+    for (const [id, state] of Object.entries(parsed.sessions)) {
+      sessionStates.set(id, state)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // 损坏/解析失败：备份坏文件（保留证据）后重建空库，不崩溃
+      quarantineCorruptSync()
+    }
+  }
+  hydrated = true
+}
+
+/** 异步 hydration（init 预取；已 hydration 时为空操作，避免与同步兜底互相覆盖） */
+async function hydrateFromDisk(): Promise<void> {
+  if (hydrated || !storePath) return
+  try {
+    const raw = await fsp.readFile(storePath, 'utf8')
+    const parsed = parseStore(JSON.parse(raw))
+    for (const [id, state] of Object.entries(parsed.sessions)) {
+      sessionStates.set(id, state)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      await quarantineCorruptAsync()
+    }
+  }
+  hydrated = true
+}
+
+/** 把整库异步序列化写盘（tmp + rename；失败静默，进程内状态仍有效，下次保存重试） */
+function queuePersist(): void {
+  if (!storePath || !storeDir) return
+  const targetPath = storePath
+  const targetDir = storeDir
+  persistChain = persistChain
+    .catch(() => undefined)
+    .then(async () => {
+      await fsp.mkdir(targetDir, { recursive: true })
+      const tmpPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.tmp`
+      await fsp.writeFile(tmpPath, JSON.stringify(serializeStore(), null, 2), 'utf8')
+      await renameStoreOverwrite(tmpPath, targetPath)
+    })
+    .catch(() => undefined)
+}
+
+function serializeStore(): ReviewSessionsStoreFile {
+  const sessions: Record<string, ConversationReviewSessionState> = {}
+  for (const [id, state] of sessionStates) {
+    sessions[id] = { ...state }
+  }
+  return { version: REVIEW_SESSIONS_STORE_VERSION, sessions }
+}
+
+/** 解析并校验 sidecar；形状非法抛错（由调用方隔离处理） */
+function parseStore(value: unknown): ReviewSessionsStoreFile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid review-sessions store shape')
+  }
+  const record = value as Record<string, unknown>
+  const sessionsRaw = record.sessions
+  if (!sessionsRaw || typeof sessionsRaw !== 'object' || Array.isArray(sessionsRaw)) {
+    throw new Error('invalid review-sessions store: sessions must be an object')
+  }
+  const sessions: Record<string, ConversationReviewSessionState> = {}
+  for (const [id, raw] of Object.entries(sessionsRaw as Record<string, unknown>)) {
+    const state = parseSessionState(raw)
+    if (state) sessions[id] = state
+  }
+  return { version: REVIEW_SESSIONS_STORE_VERSION, sessions }
+}
+
+/** 单条会话状态校验/归一化（与旧 loadReviewSessionState 的清洗逻辑一致；非法返回 null） */
+function parseSessionState(value: unknown): ConversationReviewSessionState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const reviewRunId = typeof record.reviewRunId === 'string' ? record.reviewRunId.trim() : ''
+  const reviewPath = typeof record.reviewPath === 'string' ? record.reviewPath.trim() : ''
+  const status = record.status === 'completed' ? 'completed' : 'in_progress'
+  const createdAt = typeof record.createdAt === 'string' ? record.createdAt.trim() : ''
+  const finalizedAt = typeof record.finalizedAt === 'string' && record.finalizedAt.trim()
+    ? record.finalizedAt.trim()
+    : null
+
+  if (!reviewRunId || !reviewPath || !createdAt) return null
+
+  return { reviewRunId, reviewPath, status, createdAt, finalizedAt }
+}
+
+/** 备份损坏文件（同步；best-effort，失败不阻塞恢复） */
+function quarantineCorruptSync(): void {
+  if (!storePath) return
+  try {
+    const backupPath = `${storePath}.corrupt-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
+    fs.renameSync(storePath, backupPath)
+  } catch {
+    // best-effort
+  }
+}
+
+/** 备份损坏文件（异步；best-effort，失败不阻塞恢复） */
+async function quarantineCorruptAsync(): Promise<void> {
+  if (!storePath) return
+  try {
+    const backupPath = `${storePath}.corrupt-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
+    await fsp.rename(storePath, backupPath)
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Windows rename-overwrite 重试（与 stagedDiff/adapters/storage.ts 同款模式）：
+ * 瞬态 EPERM/EACCES/EBUSY/EEXIST 退避重试；耗尽后对 EEXIST/EPERM 先删旧再最后一次 rename。
+ */
+async function renameStoreOverwrite(tmpPath: string, targetPath: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await fsp.rename(tmpPath, targetPath)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY' && code !== 'EEXIST') {
+        throw error
+      }
+      if (attempt >= 4) {
+        if (code === 'EEXIST' || code === 'EPERM') {
+          try {
+            await fsp.unlink(targetPath)
+          } catch {
+            // 目标不存在或删除失败：最后一次 rename 会暴露真实错误
+          }
+          await fsp.rename(tmpPath, targetPath)
+          return
+        }
+        throw error
+      }
+      await new Promise(resolve => setTimeout(resolve, 30 * attempt))
+    }
+  }
 }

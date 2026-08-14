@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CheckpointService } from './service.ts'
 import { createCheckpointToolDefinitions } from './tools.ts'
+import { createCheckpointsRemoteHandlers } from './adapters/dsh/remote.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 import { createDshFsRestoreWorkspaceWriter } from './domain/RestoreWorkspaceWriter.ts'
 
@@ -49,6 +50,9 @@ export function apply(ctx: Context, config: Config): () => void {
   void service.initialize()
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createCheckpointToolDefinitions(service))
+  // Phase 4 host 侧 Remote 查询/命令层（checkpoint 列表/恢复预览）：注册端点；
+  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。
+  ctx.grayRemote?.register(createCheckpointsRemoteHandlers(service))
   return () => {
     registrar.dispose()
     service.dispose()

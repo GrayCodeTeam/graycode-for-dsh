@@ -69,6 +69,19 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key)
 }
 
+/** staged-diff 接管 / 回退落盘的提示（warnings 通道；默认 disabled 时为 undefined） */
+function buildProgressWriteWarnings(outcome: Awaited<ReturnType<typeof writeTargetText>>): string[] | undefined {
+  const warnings: string[] = []
+  if (outcome.staged && outcome.stagedEntryId) {
+    warnings.push(
+      `Progress document write staged as entry ${outcome.stagedEntryId} (pending user acceptance; not written to disk yet). Accept it with staged_diff_accept to land it.`
+    )
+  } else if (outcome.warnings && outcome.warnings.length > 0) {
+    warnings.push(...outcome.warnings)
+  }
+  return warnings.length > 0 ? warnings : undefined
+}
+
 export interface CreateProgressArgs {
   path?: string
   projectName?: string
@@ -255,7 +268,7 @@ export async function executeCreateProgress(
       log: [{ at: now, type: 'created', message: '初始化项目进度' }],
     }, { generatedAt: now })
 
-    await writeTargetText(deps, target, content)
+    const outcome = await writeTargetText(deps, target, content, outPath)
 
     return projectProgressToolResultData({
       path: outPath,
@@ -264,6 +277,7 @@ export async function executeCreateProgress(
         type: 'created',
         changedFields: ['header', 'summary', 'artifacts', 'todos', 'risks', 'log'],
       },
+      warnings: buildProgressWriteWarnings(outcome),
     })
   })
 }
@@ -379,7 +393,7 @@ export async function executeUpdateProgress(
     }
 
     const { metadata, content } = buildProgressDocument(nextMetadata, { generatedAt: now })
-    await writeTargetText(deps, target, content)
+    const outcome = await writeTargetText(deps, target, content, targetPath)
 
     return projectProgressToolResultData({
       path: targetPath,
@@ -388,6 +402,7 @@ export async function executeUpdateProgress(
         type: 'updated',
         changedFields: Array.from(changedFields.values()),
       },
+      warnings: buildProgressWriteWarnings(outcome),
     })
   })
 }
@@ -496,7 +511,7 @@ export async function executeRecordProgressMilestone(
     }
 
     const { metadata, content } = buildProgressDocument(nextMetadata, { generatedAt: now })
-    await writeTargetText(deps, target, content)
+    const outcome = await writeTargetText(deps, target, content, targetPath)
 
     return projectProgressToolResultData({
       path: targetPath,
@@ -506,6 +521,7 @@ export async function executeRecordProgressMilestone(
         milestoneId,
         changedFields: ['milestones', 'summary', 'log'],
       },
+      warnings: buildProgressWriteWarnings(outcome),
     })
   })
 }

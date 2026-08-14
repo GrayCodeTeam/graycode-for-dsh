@@ -62,6 +62,23 @@ function renderText(value: { text: string }): [{ type: 'text'; text: string }] {
   return [{ type: 'text', text: value.text }]
 }
 
+/**
+ * Drop keys whose value is `undefined`.
+ *
+ * Tool outputs cross the dsh-tools boundary as lossless JSON: a present key
+ * with an `undefined` value fails the snapshot (`walkJsonValue` returns
+ * undefined, surfaced as `value is not lossless JSON`), so optional fields
+ * must be omitted instead of carried as undefined. Defined fields and the
+ * absence semantics of optional fields are unchanged.
+ */
+function omitUndefined<T extends Record<string, unknown>>(value: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [key, v] of Object.entries(value)) {
+    if (v !== undefined) out[key] = v
+  }
+  return out as T
+}
+
 const MEMORY_CONFIG_KEYS = ['wakeLines', 'entryChars', 'partChars', 'partLines'] as const
 
 function formatConfig(config: MemoryConfig): string {
@@ -217,7 +234,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
         }
       }
 
-      return {
+      return omitUndefined({
         text: lines.join('\n'),
         blocks: [...(globalResult?.blocks ?? []), ...(wsResult?.blocks ?? [])],
         part: Math.max(globalResult?.part ?? 0, wsResult?.part ?? 0),
@@ -230,7 +247,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
           return base ? { ...base, prompt: napLines.join('\n\n') } : undefined
         })(),
         workspace: wsResult && cwd ? { cwd, totalMemories: wsResult.totalMemories } : undefined,
-      }
+      })
     },
   })
 
@@ -270,11 +287,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
           output.push('')
           output.push(result.pendingCompression.prompt)
         }
-        return {
+        return omitUndefined({
           id: result.id,
           text: output.join('\n'),
           pendingCompression: result.pendingCompression,
-        }
+        })
       } catch (e: unknown) {
         let message = e instanceof Error ? e.message : String(e)
         if (/^Too long:/.test(message)) {
@@ -350,12 +367,12 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
         lines.push('(Workspace memory is not initialized; only global memory was searched.)')
       }
 
-      return {
+      return omitUndefined({
         text: lines.join('\n'),
         totalHits: globalResult.totalHits + (wsResult?.totalHits ?? 0),
         truncated: globalResult.truncated || !!wsResult?.truncated,
         workspaceNotInitialized: workspaceNotInitialized || undefined,
-      }
+      })
     },
   })
 
@@ -405,11 +422,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       } else {
         lines.push('Nothing left to compress.')
       }
-      return {
+      return omitUndefined({
         text: lines.join('\n'),
         done: result.done,
         pendingCompression: result.pendingCompression,
-      }
+      })
     },
   })
 

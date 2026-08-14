@@ -9,15 +9,21 @@
  * - 失败项移入 quarantine（不静默删除证据）；单文件失败不中断存档导入；
  * - 目录名/路径全程安全校验（isSafeCheckpointDirName / resolvePathInsideRoot）。
  *
- * 已知降级（本阶段）：增量链（backupSourceCheckpointId / baseCheckpointId）不在
- * 备份目录中的文件不会被回溯到前置存档——manifest 只收录物理存在的文件。
+ * 增量链跨目录回溯：files 条目带 backupSourceCheckpointId 时，物理文件可能不在
+ * 本存档目录而在链上祖先（跨不同 cp_* 目录，F08：cp_aa3333 → cp_bb4444 →
+ * cp_cc5555）——按 checkpointId 懒加载父 manifest 逐级回溯
+ * （resolveIncrementalFileSource），从祖先目录复制并按子节点声明哈希校验；
+ * 父缺失/损坏/越界/成环按损坏隔离跳过该文件，不中断存档导入。
  */
 
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { createHash } from 'node:crypto'
 import { BlobStore, isSafeBlobHash, type StageMismatchError } from '../../../checkpoints/domain/BlobStore.ts'
-import { CheckpointManifestRepository } from '../../../checkpoints/domain/CheckpointManifestRepository.ts'
+import {
+  CheckpointManifestRepository,
+  isSafeCheckpointDirName,
+} from '../../../checkpoints/domain/CheckpointManifestRepository.ts'
 import {
   createWorkspaceRootId,
   normalizeSafeCheckpointPath,
@@ -26,7 +32,12 @@ import {
 } from '../../../checkpoints/domain/CheckpointWorkspace.ts'
 import type { CheckpointManifest, CheckpointManifestFileEntry, CheckpointExcludedEntry, CheckpointExcludeReason } from '../../../checkpoints/domain/types.ts'
 import type { TargetWriterPort, WriteTargetInput, WriteTargetResult } from '../../application/ports.ts'
-import type { ParsedLegacyCheckpoint } from '../legacy/checkpointManifestParser.ts'
+import {
+  parseLegacyCheckpointManifest,
+  resolveIncrementalFileSource,
+  type LegacyCheckpointLookup,
+  type ParsedLegacyCheckpoint,
+} from '../legacy/checkpointManifestParser.ts'
 
 const SHA256_RE = /^[a-f0-9]{64}$/
 
@@ -107,6 +118,32 @@ function fingerprintOfRoots(roots: CheckpointWorkspaceRoot[]): string {
   return builder.digest('hex')
 }
 
+/**
+ * 读取链上父存档（manifest + files.json），供 backupSourceCheckpointId 跨目录回溯。
+ * 目录名非法/缺失/损坏 → null（损坏隔离：调用方跳过该文件，不整体失败）。
+ */
+async function readLegacyCheckpointForChain(
+  sourceDir: string,
+  checkpointId: string,
+): Promise<ParsedLegacyCheckpoint | null> {
+  if (!isSafeCheckpointDirName(checkpointId)) return null
+  const dir = path.join(sourceDir, 'checkpoints', checkpointId)
+  let manifestRaw: string
+  try {
+    manifestRaw = await fs.readFile(path.join(dir, 'manifest.json'), 'utf-8')
+  } catch {
+    return null
+  }
+  let filesJsonRaw: string | undefined
+  try {
+    filesJsonRaw = await fs.readFile(path.join(dir, 'files.json'), 'utf-8')
+  } catch {
+    filesJsonRaw = undefined
+  }
+  const parsed = parseLegacyCheckpointManifest(checkpointId, manifestRaw, { filesJsonRaw })
+  return parsed.corrupt ? null : parsed
+}
+
 export function createCheckpointTargetWriter(options: { dataRoot: string }): TargetWriterPort {
   return {
     kind: 'checkpoints',
@@ -151,6 +188,19 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
       const hashes: string[] = []
       const notes: string[] = []
       let skippedFiles = 0
+      let chainResolvedFiles = 0
+
+      // 增量链跨目录回溯：按 checkpointId 懒加载父存档（memoized；缺失/损坏 → null）
+      const chainCache = new Map<string, ParsedLegacyCheckpoint | null>()
+      const chainLookup: LegacyCheckpointLookup = {
+        get: async (checkpointId: string) => {
+          const cached = chainCache.get(checkpointId)
+          if (cached !== undefined) return cached
+          const value = await readLegacyCheckpointForChain(input.sourceDir, checkpointId)
+          chainCache.set(checkpointId, value)
+          return value
+        },
+      }
 
       for (const [scopedKey, entry] of Object.entries(parsed.files).sort(([a], [b]) => a.localeCompare(b))) {
         // 旧存档可能用扁平相对路径（无 ws_ 前缀）：统一 scoped 到 workspaceId 下
@@ -168,10 +218,45 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
         try {
           stat = await fs.stat(srcPath)
         } catch {
-          // 增量链文件不在本目录（backupSourceCheckpointId）：本阶段不回溯前置存档
-          skippedFiles += 1
-          notes.push(`备份文件缺失（增量链未回溯）: ${scopedKey}`)
-          continue
+          // 本目录无物理文件：若条目带 backupSourceCheckpointId，沿增量链跨目录回溯
+          if (!entry.backupSourceCheckpointId) {
+            skippedFiles += 1
+            notes.push(`备份文件缺失: ${scopedKey}`)
+            continue
+          }
+          const resolved = await resolveIncrementalFileSource(
+            parsed.checkpointId,
+            [scopedPath, scopedKey],
+            entry,
+            chainLookup,
+          )
+          if (!resolved.ok) {
+            // 父缺失/损坏/越界/成环：损坏隔离——跳过该文件，不中断存档导入
+            skippedFiles += 1
+            notes.push(`增量链回溯失败（${resolved.reason}）: ${scopedKey} — ${resolved.message}`)
+            continue
+          }
+          try {
+            srcPath = resolvePathInsideRoot(
+              path.join(input.sourceDir, 'checkpoints', resolved.sourceCheckpointId),
+              resolved.sourceKey,
+            )
+          } catch {
+            skippedFiles += 1
+            notes.push(`路径越界跳过（增量链）: ${scopedKey}`)
+            continue
+          }
+          try {
+            stat = await fs.stat(srcPath)
+          } catch {
+            skippedFiles += 1
+            notes.push(`增量链回溯失败（物理文件缺失）: ${scopedKey} @ ${resolved.sourceCheckpointId}`)
+            continue
+          }
+          if (!resolved.hashConsistent) {
+            notes.push(`增量链哈希不一致（仍按子节点声明哈希校验）: ${scopedKey}`)
+          }
+          chainResolvedFiles += 1
         }
         if (!stat.isFile()) {
           skippedFiles += 1
@@ -212,7 +297,9 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
       await manifests.writeManifest(parsed.checkpointId, manifest)
       await blobs.incrementRefs(hashes)
 
-      notes.push(`blob 数: ${hashes.length}（复用由 BlobStore 判定）；备份文件缺失跳过: ${skippedFiles}`)
+      notes.push(
+        `blob 数: ${hashes.length}（复用由 BlobStore 判定）；备份文件缺失跳过: ${skippedFiles}；增量链回溯: ${chainResolvedFiles}`,
+      )
       return { targetRef: `checkpoint://${workspaceId}/${parsed.checkpointId}`, notes }
     },
     async probe(targetRef: string): Promise<boolean> {

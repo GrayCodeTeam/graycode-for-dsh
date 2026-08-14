@@ -13,10 +13,11 @@ import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from
 import { PromptSettingsService } from './service.ts'
 import { createPromptInjector } from './promptInjector.ts'
 import { createPromptTools } from './tools.ts'
+import { createModeToolPolicyGuard, resolveBuiltinModeToolPolicy } from '../workflows/domain/modeToolsPolicy.ts'
 
 export const name = 'graycode-prompt'
 
-export const inject = ['agents'] as const
+export const inject = ['agents', 'tools'] as const
 
 /**
  * Prompt mode configuration.
@@ -37,6 +38,13 @@ export interface Config {
   agentScope: AgentScopeMode
   /** D-11 = c fake-thought gate (default false, see comment above). */
   sendHistoryThoughts: boolean
+  /**
+   * D-4 mode toolPolicy enforcement switch (default true = legacy preflight
+   * semantics): built-in design/plan/ask/review modes force their allowlist,
+   * code and custom modes stay unfiltered. `false` skips guard registration
+   * entirely (zero intrusion).
+   */
+  modeToolPolicy: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -44,6 +52,7 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   agentScope: agentScopeSchema,
   sendHistoryThoughts: z.boolean().default(false),
+  modeToolPolicy: z.boolean().default(true),
 })
 
 export function apply(ctx: Context, config: Config): () => void {
@@ -66,6 +75,23 @@ export function apply(ctx: Context, config: Config): () => void {
       ctx.logger.warn('prompt modes store unavailable; prompt mode injection disabled', error)
     },
   )
+
+  // D-4：模式 toolPolicy 执行链（探针 VERIFIED，实现见 workflows/domain/modeToolsPolicy.ts）。
+  // ctx.tools.guard() 是 DSH 的单调拥有方守卫：返回 reason 即拒绝，监听器顺序无法把
+  // 拒绝翻回放行，适合做安全边界；resolveToolPolicy 抛错时 fail-closed（拒绝而非放行）。
+  // 模式切换无需重新挂接：resolve 每次执行实时求值（与注入器的 refresh 机制解耦）。
+  // 内置 design/plan/ask/review 强制白名单；code 与自定义模式无过滤（旧版语义对齐）。
+  // modeToolPolicy=false 时不注册（零侵入）；disposer 挂 ctx.effect 随插件卸载注销。
+  if (config.modeToolPolicy) {
+    ctx.effect(() =>
+      ctx.tools.guard(
+        createModeToolPolicyGuard({
+          resolveToolPolicy: () => resolveBuiltinModeToolPolicy(service.currentModeSnapshot()?.id),
+          resolveModeId: () => service.currentModeSnapshot()?.id,
+        }),
+      ),
+    )
+  }
 
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createPromptTools(service, () => config.sendHistoryThoughts))

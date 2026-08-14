@@ -58,3 +58,71 @@ writeText(target: FsTarget, content: string, expected?: FsWriteIntent,
 
 GAP 1-4 集中在 `domain/RestoreWorkspaceWriter.ts`（DSH 实现内），后续 DSH 提供对应公开
 API 时只需改这一个文件即可关闭。
+
+## 恢复前自动保护点（PLAN_V2 §7.6，已落地）
+
+restore 执行前**默认**先创建一个新 checkpoint 作为可恢复保护点（记录恢复前状态，恢复出错时
+可回滚），创建成功后日志 `restore_protection_point_created`；**保护点创建失败不阻断恢复**，
+仅告警并继续。
+
+- 开关：`CheckpointServiceConfig.restoreProtectionPoint`（缺省 `true`）。显式传 `false` 关闭
+  ——关闭后恢复不再自动留保护点，`checkpoint_restore` 工具描述已注明（index.ts 的 Config
+  可转发该字段）。
+- 实现位置：`service.ts` 的 `createProtectionPoint`（复用 `executeBackup`，在已持有的工作区
+  锁内直接执行，不再二次取锁，避免同工作区排队自锁）。
+
+## 跨进程文件锁（CheckpointOperationLock，CP-LOCK-5）
+
+工作区级互斥从进程内 Map 升级为**跨进程文件锁**（API 不变）：
+
+- 锁文件：`<checkpoints>/.locks/<sha256(workspaceId) 前 32 hex>.lock`，`wx` 原子创建即持有；
+- 持有者元数据（pid/createdAt/ownerId）+ **心跳刷新**（周期性写回句柄更新 mtime/createdAt），
+  陈旧锁检测只对「长时间无心跳」的锁生效——长操作不会被误判打破；
+- 获取超时 `lockTimeoutMs`（缺省 5 分钟，0 = 不限时；只约束文件锁轮询，进程内排队仍无超时，
+  见 M-CP-3）；轮询重试（缺省 100ms）；
+- Windows 兼容：EPERM/EACCES（他进程持有句柄、杀软瞬时占用）按未获取重试；释放先 close
+  文件句柄再 unlink（句柄释放），unlink 失败残留由陈旧检测兜底；
+- 多工作区操作按字典序获取锁，避免跨进程 ABBA 死锁；
+- 进程内队列语义保留：同 owner 可重入、排队可 abort 取消（CP-LOCK-1）、队列容量上限
+  （CP-LOCK-4）、超集请求 fail-fast（CP-LOCK-3）。
+
+`CheckpointDeletionService` 批删路径使用进程级单例 `checkpointOperationLockManager`（缺省锁目录
+`os.tmpdir()/graycode-dsh-checkpoint-locks`）；生产路径（`CheckpointService`）使用插件私有根内
+锁目录，多进程共享同一 dataRoot 时互斥跨进程生效。
+
+## stat 级哈希复用（CP-HASH-REUSE，性能）
+
+快照构建时若文件 size+mtime（mtimeNs，bigint 纳秒精度）未变化，复用上一检查点记录的 blob
+哈希（跳过重新哈希读盘）；文件变化才重算。
+
+- 记录持久化 `fileStats`（size/mtimeNs/mode，只含真正备份成功的文件）；旧记录无 `fileStats`
+  时回退全量哈希（安全降级）。
+- 正确性：复用仅发生在 stat 未变（mtimeNs+size 双重校验，覆盖 FAT32 等粗粒度 mtime 文件系统）
+  时，sha256(内容) 必然不变；复用哈希与增量父链差集（与 resolveChainState 同源）及 blob
+  引用计数（manifest.files 仍引用同一 blob，`incrementRefs` 按新 manifest 全量计数）完全一致。
+
+## 决策记录：GC 语义（D-5）与恢复自愈（D-6）
+
+### D-5：GC = 引用计数 + grace period（取代旧「按天保留 + merge」，是有意设计）
+
+- 删除/驱逐只**减 blob 引用**（`blobRefs.json` count + orphanedAt）；物理回收只发生在
+  refcount=0 且超过 `blobGracePeriodDays`（缺省 7 天）的 blob 上，且 GC 独立 dry-run 优先；
+- 旧实现（CheckpointRetentionService）按 retentionDays 保留 + 链上文件 merge 到后继；
+  内容寻址下 blob 物理共享，驱逐只重挂父链，**无需文件 merge**（物理等价）；
+- 保留数量上限 `maxCheckpoints` 驱逐最旧存档（链重挂 + 减引用），blob 回收交给 GC。
+  这是有意的设计取舍，非实现遗漏（审查报告 C-05/U-01）。
+
+### D-6：恢复自愈 = fail-closed（取代旧 auto-prune，更安全）
+
+- 旧实现 prepareRestore 对链上缺失备份目录的节点 auto-prune（从记录移除后继续恢复）；
+  新实现 `resolveChainState` 对链上 manifest 缺失/损坏/不一致**拒绝恢复**（fail-closed），
+  绝不静默裁剪链节点——更安全，但少自愈（审查报告 C-06）；
+- 失败路径给出明确错误提示文案，用户可据此定位损坏节点：
+  - `Incremental chain is broken (missing or cyclic baseCheckpointId)`（链断裂/成环）
+  - `Checkpoint manifest missing: <id>`（节点 manifest 缺失）
+  - `Chain changes inconsistent with files at <id>: <path>` / `Chain overlay mismatch at <id>: <path>`（changes 与 files 不一致）
+  - `Checkpoint not found` / `Current workspace does not match the checkpoint workspace`（记录缺失/工作区不符）
+  - 损坏定位工具：`checkpoint_verify`（只读，报告 blob 缺失/hash 不一致/链完整性）。
+
+审查依据：`docs/review/audit-memory-checkpoints.md`（C-05/C-06/U-01/U-02；本 README 为决策
+记录，审计报告为对照证据）。

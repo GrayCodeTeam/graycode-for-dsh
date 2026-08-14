@@ -1,6 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
+import { initReviewSessionStore } from './sessionState.ts'
+import {
+  STAGED_DIFF_SERVICE_KEY,
+  type StagedDiffServiceHandle,
+} from '../stagedDiff/adapters/dsh/index.ts'
+import { createStagedWriteHookFromHandle, setStagedWriteHook } from './stagedWriteHook.ts'
 import { createCreateDesignTool, createUpdateDesignTool } from './tools/design.ts'
 import {
   createCreateProgressTool,
@@ -16,6 +22,7 @@ import {
   createReopenReviewTool,
   createValidateReviewDocumentTool,
 } from './tools/review.ts'
+import { createWorkflowsRemoteHandlers } from './adapters/dsh/remote.ts'
 
 export const name = 'graycode-workflows'
 
@@ -41,6 +48,18 @@ export const Config: z<Config> = z.object({
 })
 
 export function apply(ctx: Context, config: Config): void {
+  // 会话门闸持久化（W-M2）：状态落在 <dataRoot>/workflows/review-sessions.json，
+  // 重启后门闸仍生效；dataRoot 为空时退化为纯内存（与原行为一致）。
+  ctx.effect(() => initReviewSessionStore(config.dataRoot))
+  // staged-diff 写前钩子接线（ADR-0003 §6 后续动作 2）：staged-diff 子插件经 cordis
+  // service 'graycode.stagedDiff' 提供 handle。service 出现时安装钩子（writeTargetText
+  // 开始把写入意图变成 staged 条目），service 卸载/插件重载时经 effect 移除钩子；
+  // stagedDiff enabled=false 时钩子不接管写入，行为与现状完全一致（默认关闭）。
+  ctx.inject([STAGED_DIFF_SERVICE_KEY], (child) => {
+    const handle = child.get(STAGED_DIFF_SERVICE_KEY) as StagedDiffServiceHandle | undefined
+    setStagedWriteHook(handle ? createStagedWriteHookFromHandle(handle) : null)
+    child.effect(() => () => setStagedWriteHook(null))
+  })
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register([
     createCreateDesignTool(ctx.fs),
@@ -58,6 +77,9 @@ export function apply(ctx: Context, config: Config): void {
     createValidateReviewDocumentTool(ctx.fs),
     createCompareReviewDocumentsTool(ctx.fs),
   ])
+  // Phase 4 host 侧 Remote 查询层（workflow 总览）：向根装配的 ctx.grayRemote 注册端点；
+  // 独立挂载（无 grayRemote）时静默跳过（可选链），工具行为不受影响。
+  ctx.grayRemote?.register(createWorkflowsRemoteHandlers({ fs: ctx.fs, documentRoot: config.documentRoot }))
   // The registrar binds its own teardown to this fiber; this effect keeps the
   // HMR contract explicit and idempotent.
   ctx.effect(() => registrar.dispose)

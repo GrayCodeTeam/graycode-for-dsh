@@ -103,6 +103,12 @@ export interface CheckpointServiceConfig {
     maxFileSizeBytes: number;
     /** Blob GC grace period（天）；<= 0 = 引用归零立即回收 */
     blobGracePeriodDays: number;
+    /**
+     * 恢复前自动保护点（PLAN_V2 §7.6）：restore 执行前默认先创建一个新 checkpoint 作为
+     * 可恢复保护点（恢复出错时可回滚）。显式传 false 关闭；关闭时恢复不再自动留保护点
+     * （工具描述/README 已注明）。保护点创建失败不阻断恢复，仅告警。缺省 true。
+     */
+    restoreProtectionPoint?: boolean;
 }
 
 /** checkpoint_create 返回 */
@@ -241,7 +247,7 @@ export class CheckpointService {
     readonly recordsFile: string;
 
     private readonly config: CheckpointServiceConfig;
-    private readonly lockManager = new CheckpointOperationLockManager();
+    private readonly lockManager: CheckpointOperationLockManager;
     private readonly deletionService: CheckpointDeletionService;
     private readonly store: RecordStoreImpl;
     /**
@@ -268,6 +274,10 @@ export class CheckpointService {
         this.workspaceWriter = workspaceWriter;
         this.checkpointsDir = path.join(config.dataRoot, 'checkpoints');
         this.recordsFile = path.join(this.checkpointsDir, 'records.json');
+        // 跨进程文件锁（CP-LOCK-5）：锁文件位于插件私有根内（checkpoints/.locks/），
+        // 多进程/多实例共享同一 dataRoot 时工作区级互斥跨进程生效；.locks 位于
+        // dataRoot 内，快照构建整体排除 dataRoot，锁文件绝不会进入存档。
+        this.lockManager = new CheckpointOperationLockManager({ lockDir: path.join(this.checkpointsDir, '.locks') });
         this.store = new RecordStoreImpl(this);
         this.deletionService = new CheckpointDeletionService({
             conversationManager: this.store,
@@ -414,6 +424,18 @@ export class CheckpointService {
 
             // §7.6 第 1 步：枚举并规范化相对路径（四层排除 + 防穿越 + 符号链接/设备文件排除）
             const workspaceSnapshot = createWorkspaceSnapshot(roots);
+            // stat 级哈希复用（CP-HASH-REUSE）：上一检查点记录了 fileStats 时，快照构建对
+            // size+mtime（mtimeNs）未变化的文件复用已记录的 blob 哈希（跳过重新哈希），文件
+            // 变化才重算。正确性：复用仅发生在 stat 未变（mtimeNs+size 双重校验，覆盖 FAT32
+            // 粗粒度 mtime）时，hash=sha256(内容) 必然不变；复用哈希与增量父链差集
+            // （prevState.fileHashes 同源）及 blob 引用计数（manifest.files 仍引用同一 blob，
+            // incrementRefs 按新 manifest 全量计数）完全一致。旧记录无 fileStats 时回退全量哈希。
+            const previous = prevState
+                ? {
+                      fileHashes: prevState.fileHashes,
+                      fileStats: lastCheckpoint?.fileStats ?? {}
+                  }
+                : undefined;
             const snapshot = await buildWorkspaceSnapshot({
                 roots,
                 customIgnorePatterns: this.config.excludePatterns,
@@ -421,9 +443,7 @@ export class CheckpointService {
                 maxFileSizeBytes: this.config.maxFileSizeBytes,
                 // 排除整个插件私有数据根（含 checkpoints/records.json 等）：绝不进入存档
                 excludeAbsolutePaths: [path.dirname(this.checkpointsDir)],
-                // 内容寻址下 blob 不可变，mtime 等易变字段不随存档存储——
-                // 不做 stat 级哈希复用（每次全量重哈希，仅写入量按 hash 差集收敛）
-                previous: undefined
+                previous
             });
 
             const currentHashes: Record<string, string> = { ...snapshot.fileHashes };
@@ -563,6 +583,10 @@ export class CheckpointService {
                 type: isIncremental ? 'incremental' : 'full',
                 baseCheckpointId: isIncremental ? prevState?.checkpointId : undefined,
                 changes,
+                // CP-HASH-REUSE：持久化快照 stat（size/mtimeNs/mode），供下一次快照
+                // 构建 stat 级哈希复用（复用判定在 CheckpointSnapshotBuilder.statAndHashEntry）；
+                // 只含真正备份成功的文件（markUnbacked 已从 currentStats 移除失败项）。
+                fileStats: currentStats,
                 ignorePatterns: this.config.excludePatterns,
                 excludedCount: snapshot.excluded.length,
                 excludedBytes: snapshot.excluded.reduce((sum, entry) => sum + (entry.size ?? 0), 0),
@@ -941,6 +965,32 @@ export class CheckpointService {
                         };
                     }
 
+                    // PLAN_V2 §7.6 恢复前自动保护点：默认在恢复执行前创建一个新 checkpoint
+                    // 记录「恢复前」状态（恢复出错时可回滚）。用户显式关闭
+                    // （restoreProtectionPoint=false）时跳过；保护点创建失败不阻断恢复，仅告警。
+                    if (this.config.restoreProtectionPoint !== false && !options?.signal?.aborted) {
+                        try {
+                            const protectionPointId = await this.createProtectionPoint(
+                                conversationId,
+                                roots,
+                                checkpointId,
+                                options?.signal
+                            );
+                            if (protectionPointId) {
+                                log('restore_protection_point_created', { checkpointId, protectionPointId });
+                            } else if (!options?.signal?.aborted) {
+                                warn(
+                                    `Restore protection point creation failed for checkpoint ${checkpointId}; ` +
+                                    'continuing restore without a protection point'
+                                );
+                            }
+                        } catch (err) {
+                            if (!(err instanceof CheckpointAbortError) && !options?.signal?.aborted) {
+                                warn('Failed to create restore protection point (restore continues):', err);
+                            }
+                        }
+                    }
+
                     const engineResult = await restoreWorkspaceSnapshot(
                         {
                             checkpointsDir: this.checkpointsDir,
@@ -997,6 +1047,36 @@ export class CheckpointService {
             error('Failed to restore checkpoint:', err);
             return { success: false, restored: 0, deleted: 0, skipped: 0, error: err instanceof Error ? err.message : 'Unknown error' };
         }
+    }
+
+    /**
+     * 恢复前自动保护点（PLAN_V2 §7.6）：为当前工作区创建一个新 checkpoint，记录
+     * 「恢复前」状态，供恢复出错时回滚。
+     *
+     * 必须在已持有工作区锁的上下文中调用：直接复用 executeBackup（不再二次取锁，
+     * 避免同工作区排队自锁）。失败返回 null（不抛错），由调用方告警后继续恢复。
+     */
+    private async createProtectionPoint(
+        conversationId: string,
+        roots: RuntimeWorkspaceRoot[],
+        targetCheckpointId: string,
+        signal?: AbortSignal
+    ): Promise<string | null> {
+        const checkpointId = generateCheckpointId();
+        const opId = generateOperationId();
+        const storage = this.workspaceStorageFor(conversationId);
+        await storage.blobs.initialize();
+        const result = await this.executeBackup({
+            conversationId,
+            roots,
+            checkpointId,
+            opId,
+            storage,
+            title: '恢复前自动保护点',
+            notes: `auto protection point before restore of ${targetCheckpointId}`,
+            signal
+        });
+        return result ? result.checkpointId : null;
     }
 
     /** 恢复门闸 token：previewId（checkpointId+workspace 指纹 sha256）+ 绑定基线/manifest hash */

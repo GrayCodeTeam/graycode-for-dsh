@@ -223,6 +223,9 @@ export class LegacyImportService {
         targetCount: committed,
         ...(failed > 0 ? { errorCode: 'PARTIAL_DOMAIN_FAILURES' } : {}),
       })
+      // 审计备注并入 run.notes（already-imported / conflict / error / duplicate /
+      // writer 备注，如增量链回溯），随提交点一起持久化；空数组不产生任何 note
+      for (const note of domainNotes) run = appendNote(run, note)
       run = appendNote(run, `[提交点] ${domain}: ${committed} 导入 / ${failed} 失败`)
       // 提交点：域完成后持久化 run（成功部分可校验、失败部分可重跑）
       await this.deps.runStore.save(run)

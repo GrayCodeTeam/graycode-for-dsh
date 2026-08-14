@@ -5,14 +5,28 @@
  * from gray-code-plugin's PromptManager. Pure TS, no host imports.
  *
  * Placeholder module catalog:
- * - `resolved` modules (ENVIRONMENT, WORKSPACE_FILES, PINNED_FILES, TOOLS,
- *   TODO_LIST, MEMORY) have DSH-host semantics: the injection adapter may
- *   supply values for them (e.g. ENVIRONMENT from the agent session header).
- *   When no value is provided the placeholder is preserved verbatim.
- * - `deprecated` modules (OPEN_TABS, ACTIVE_EDITOR, DIAGNOSTICS and other
- *   editor-only modules) have no DSH host equivalent (ADR-0002 §3): the
- *   renderer always substitutes a deterministic notice so templates never
- *   leak raw editor-specific tokens to the model.
+ * - `resolved` modules (ENVIRONMENT, WORKSPACE_FILES, TOOLS, TODO_LIST, MEMORY)
+ *   have DSH-host semantics: the injection adapter may supply values for them
+ *   (e.g. ENVIRONMENT from the agent session header). When no value is
+ *   provided the renderer substitutes a deterministic "not available in DSH"
+ *   notice, so a raw `{{$MODULE}}` reference never reaches the final product.
+ * - `deprecated` modules (PINNED_FILES, OPEN_TABS, ACTIVE_EDITOR, DIAGNOSTICS,
+ *   MCP_TOOLS, CONTEXT_BADGE_FORMAT and other editor-only modules) have no
+ *   DSH host equivalent (ADR-0002 §3): the renderer always substitutes a
+ *   deterministic notice so templates never leak raw editor-specific tokens to
+ *   the model.
+ *
+ * DSH-safety invariant (B3-P2): the rendered product must not contain any
+ * `{{...}}` group that the DSH system-prompt assembler would reject. The
+ * assembler scans every section text and only accepts `{{name}}` where name
+ * matches /^[a-z][a-z0-9_]*$/ and the variable is registered
+ * (dsh-system-prompt lib/index.js interpolate()); anything else throws
+ * `malformed prompt variable reference` at assembly time and aborts the turn.
+ * The renderer therefore substitutes a deterministic notice for every
+ * reference it cannot resolve — deprecated modules, resolved modules without
+ * a supplied value, unknown references with non-lowercase names — and
+ * preserves only DSH-safe lowercase variable references (e.g.
+ * `{{graycode_prompt_mode}}`) for the DSH layer to resolve.
  */
 
 /** Canonical (uppercase, `$`/braces stripped) placeholder module name. */
@@ -33,11 +47,11 @@ export const PLACEHOLDER_MODULES: readonly PlaceholderModuleInfo[] = [
   // DSH-host-meaningful modules: values may be supplied by the injection layer.
   { module: 'ENVIRONMENT', status: 'resolved' },
   { module: 'WORKSPACE_FILES', status: 'resolved' },
-  { module: 'PINNED_FILES', status: 'resolved' },
   { module: 'TOOLS', status: 'resolved' },
   { module: 'TODO_LIST', status: 'resolved' },
   { module: 'MEMORY', status: 'resolved' },
   // Editor / host-only modules without a DSH equivalent (V2 §6.4, ADR-0002 §3).
+  { module: 'PINNED_FILES', status: 'deprecated' },
   { module: 'MCP_TOOLS', status: 'deprecated' },
   { module: 'CONTEXT_BADGE_FORMAT', status: 'deprecated' },
   { module: 'OPEN_TABS', status: 'deprecated' },
@@ -52,12 +66,27 @@ export function placeholderModuleStatus(module: string): PlaceholderModuleStatus
 }
 
 /**
- * Deterministic substitution for deprecated editor-only modules. `token` is
- * the exact placeholder text from the source (e.g. `{{$OPEN_TABS}}`) so the
- * notice stays byte-stable in golden tests.
+ * Deterministic substitution for deprecated editor-only modules. `module` is
+ * the module name (e.g. `OPEN_TABS`) — deliberately NOT the raw `{{$...}}`
+ * token: embedding the braces would let the uppercase reference survive into
+ * the rendered product and trip the DSH assembler's strict variable-name
+ * validation (B3-P2 root cause). The notice stays byte-stable in golden tests.
  */
-export function deprecatedPlaceholderText(token: string): string {
-  return `[deprecated placeholder ${token}: editor-specific module with no DSH host equivalent; remove it from the template]`
+export function deprecatedPlaceholderText(module: string): string {
+  const canonical = module.trim().toUpperCase()
+  return `[deprecated placeholder ${canonical}: editor-specific module with no DSH host equivalent; remove it from the template]`
+}
+
+/**
+ * Deterministic substitution for references the renderer cannot resolve to a
+ * value: resolved DSH-host modules with no supplied value (e.g. TOOLS before
+ * the injection layer provides it) and unknown references that are not
+ * DSH-safe lowercase variables. Like {@link deprecatedPlaceholderText} the
+ * notice never contains `{{...}}`, keeping the final product assembly-safe.
+ */
+export function unavailablePlaceholderText(module: string): string {
+  const canonical = module.trim().toUpperCase()
+  return `[placeholder ${canonical}: not available in DSH; remove it from the template]`
 }
 
 /**
@@ -70,20 +99,37 @@ export function cleanupEmptyLines(text: string): string {
   return text.replace(/\n{3,}/g, '\n\n').trim()
 }
 
+/** The DSH assembler's variable-name rule (dsh-system-prompt lib/index.js). */
+const DSH_SAFE_VARIABLE = /^[a-z][a-z0-9_]*$/
+
+/** Any complete `{{...}}` group; the DSH assembler scans for exactly these. */
+const GROUP_PATTERN = /\{\{[^{}]*\}\}/g
+
 /**
- * Match `{{$MODULE}}`-style placeholders, robust to case, whitespace and a
- * missing `$` (`{{ $environment }}`, `{{ENVIRONMENT}}`, `{{  $  MODULE  }}`).
+ * Parse the inner text of a `{{...}}` group into a placeholder module name
+ * (`$` and surrounding whitespace tolerated, case preserved). Returns
+ * undefined when the group is not a well-formed module reference
+ * (e.g. `{{a-b}}`, `{{}}`, `{{$}}`).
  */
-const PLACEHOLDER_PATTERN = /\{\{\s*\$?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g
+function parseModuleName(inner: string): string | undefined {
+  const name = inner.replace(/^\s*\$?\s*/, '')
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : undefined
+}
 
 /**
  * Substitute `{{$MODULE}}` placeholders.
  *
+ * Every complete `{{...}}` group in the template is handled:
  * - Deprecated modules are always replaced by {@link deprecatedPlaceholderText}.
- * - Resolved modules are replaced when `values` has an entry (key = canonical
- *   uppercase module name); otherwise the placeholder is preserved verbatim.
- * - Unknown modules are preserved verbatim (decision: safer for custom
- *   templates written against future module names than failing the render).
+ * - Resolved modules are replaced by `values[canonical]` when present;
+ *   otherwise by {@link unavailablePlaceholderText} (never left verbatim).
+ * - Unknown references that are DSH-safe lowercase variables (e.g.
+ *   `{{graycode_prompt_mode}}`) are preserved for the DSH assembler to
+ *   resolve; any other unknown reference is replaced by
+ *   {@link unavailablePlaceholderText} so the final product contains no
+ *   reference the DSH assembler would reject.
+ * - Substituted values are never re-scanned (byte-verbatim, matching DSH's
+ *   own "substituted values are not scanned again" behavior).
  * - The rendered text then goes through {@link cleanupEmptyLines} (old
  *   `contextSections.ts:43-47` parity): 3+ consecutive newlines collapse to
  *   `\n\n` and the result is trimmed.
@@ -95,11 +141,25 @@ export function renderPromptTemplate(
   template: string,
   values: Readonly<Record<PlaceholderModuleName, string>> = {},
 ): string {
-  const rendered = template.replace(PLACEHOLDER_PATTERN, (raw, name: string) => {
-    const canonical = name.trim().toUpperCase()
-    if (placeholderModuleStatus(canonical) === 'deprecated') return deprecatedPlaceholderText(raw)
-    const value = values[canonical]
-    return value !== undefined ? value : raw
+  const rendered = template.replace(GROUP_PATTERN, raw => {
+    const inner = raw.slice(2, -2).trim()
+    const name = parseModuleName(inner)
+    if (name === undefined) {
+      // Not a module-shaped reference (e.g. `{{a-b}}`, `{{}}`): neutralize.
+      return unavailablePlaceholderText(inner)
+    }
+    const canonical = name.toUpperCase()
+    const status = placeholderModuleStatus(canonical)
+    if (status === 'deprecated') return deprecatedPlaceholderText(canonical)
+    if (status === 'resolved') {
+      const value = values[canonical]
+      return value !== undefined ? value : unavailablePlaceholderText(canonical)
+    }
+    // Unknown module: keep only DSH-safe lowercase variable references
+    // (e.g. `{{graycode_prompt_mode}}`); anything else would fail the DSH
+    // assembler's strict name validation.
+    if (DSH_SAFE_VARIABLE.test(inner)) return `{{${inner}}}`
+    return unavailablePlaceholderText(inner)
   })
   // Old Gray applied cleanupEmptyLines after every render (PromptManager.ts:387/713);
   // keep the same post-processing so templates render byte-compatibly.

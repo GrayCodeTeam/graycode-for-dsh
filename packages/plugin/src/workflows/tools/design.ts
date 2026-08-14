@@ -7,8 +7,11 @@
  * DSH 差异：
  * - 无 `requiresUserConfirmation` 语义（GrayCode 中需要用户在确认面板手动确认后
  *   才真正落盘；DSH 没有对应物），文件在工具调用内立即落盘。
- * - 删除 autoSync.ts 联动（vscode 依赖，暂缓项 DEFERRED）：不再自动同步
- *   `.graycode/progress.md`，返回数据中也不含 progress warnings。
+ * - staged-diff 适配（ADR-0003 §6 后续动作 2）：stagedDiff enabled 时写入意图先
+ *   变成 staged 条目（返回 `staged.entryId` + warnings 提示），接受后才落盘；
+ *   默认 disabled 行为与源一致（立即落盘）。
+ * - autoSync 联动（审计项 W-M1 恢复）：写入后 best-effort 同步 `.graycode/progress.md`
+ *   （失败只进 warnings，不阻断主流程），warnings 字段与源一致。
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -16,6 +19,7 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { withProgressWriteLock } from '../domain/progress/progressWriteLock.ts'
 import { slugify } from '../domain/shared/slugify.ts'
 import { normalizeLineEndingsToLF } from '../domain/shared/textUtils.ts'
+import { syncProgressFromDesignArtifact } from '../autoSync.ts'
 import {
   DESIGN_PATH_SCOPE_LABEL,
   buildPathRejectedError,
@@ -47,6 +51,10 @@ export interface DesignToolResultData {
   path: string
   content: string
   changeSummary?: string
+  /** autoSync / staging 的非阻断警告（与源 `data.warnings` 语义一致） */
+  warnings?: string[]
+  /** staged-diff 接管时：条目 id（供 staged_diff_accept / staged_diff_reject 使用） */
+  staged?: { entryId: string; status: 'pending' }
 }
 
 function assertDesignText(value: string, fieldName: string): string {
@@ -55,6 +63,29 @@ function assertDesignText(value: string, fieldName: string): string {
     throw new Error(`${fieldName} is required and must be a non-empty string`)
   }
   return trimmed
+}
+
+/** 组装结果：autoSync warnings + staging 提示（staged 时 entryId 双通道：字段 + warnings 文案） */
+function buildDesignResult(
+  base: DesignToolResultData,
+  progressWarnings: string[],
+  outcome: Awaited<ReturnType<typeof writeTargetText>>
+): DesignToolResultData {
+  const warnings: string[] = [...progressWarnings]
+  if (outcome.staged && outcome.stagedEntryId) {
+    warnings.push(
+      `Document write staged as entry ${outcome.stagedEntryId} (pending user acceptance; not written to disk yet). Accept it with staged_diff_accept to land it.`
+    )
+  } else if (outcome.warnings && outcome.warnings.length > 0) {
+    warnings.push(...outcome.warnings)
+  }
+  return {
+    ...base,
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(outcome.staged && outcome.stagedEntryId
+      ? { staged: { entryId: outcome.stagedEntryId, status: 'pending' as const } }
+      : {}),
+  }
 }
 
 /**
@@ -86,8 +117,12 @@ export async function executeCreateDesign(
     }
 
     const content = normalizeLineEndingsToLF(design)
-    await writeTargetText(deps, target, content)
-    return { path: outPath, content }
+    const outcome = await writeTargetText(deps, target, content, outPath)
+    const progressWarnings = await syncProgressFromDesignArtifact(deps, {
+      designPath: outPath,
+      title: title || undefined,
+    })
+    return buildDesignResult({ path: outPath, content }, progressWarnings, outcome)
   })
 }
 
@@ -115,11 +150,19 @@ export async function executeUpdateDesign(
     }
 
     const content = normalizeLineEndingsToLF(design)
-    await writeTargetText(deps, target, content)
+    const outcome = await writeTargetText(deps, target, content, targetPath)
     const changeSummary = typeof args.changeSummary === 'string' && args.changeSummary.trim()
       ? args.changeSummary.trim()
       : undefined
-    return { path: targetPath, content, changeSummary }
+    const progressWarnings = await syncProgressFromDesignArtifact(deps, {
+      designPath: targetPath,
+      title: typeof args.title === 'string' ? args.title : undefined,
+    })
+    return buildDesignResult(
+      { path: targetPath, content, ...(changeSummary ? { changeSummary } : {}) },
+      progressWarnings,
+      outcome
+    )
   })
 }
 

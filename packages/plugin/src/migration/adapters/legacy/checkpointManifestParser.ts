@@ -9,7 +9,10 @@
  * - `"files": []` 数组形状拒绝（防恢复误删语义，F14l）；
  * - 目录名越界（backupDir 等）→ CHECKPOINT_UNSAFE_DIR（F14g）；
  * - 大工作区 files 可达 10-20MB：本解析器只按需读取 manifest + files.json，
- *   不展开备份目录内容（文件哈希由目标侧逐文件校验）。
+ *   不展开备份目录内容（文件哈希由目标侧逐文件校验）；
+ * - 增量链（backupSourceCheckpointId）：物理文件可能在链上祖先存档目录
+ *   （跨不同 cp_* 目录，F08），本模块提供纯函数 resolveIncrementalFileSource
+ *   逐级回溯父链（调用方提供 lookup，缺失/损坏父节点按损坏隔离返回失败）。
  */
 
 import {
@@ -257,4 +260,180 @@ export function parseLegacyCheckpointManifest(
     ...(manifest.partial === true ? { partial: true } : {}),
     fileCount: Object.keys(files).length,
   }
+}
+
+// ─── 增量链（backupSourceCheckpointId）跨目录回溯 ─────────────────────
+//
+// legacy-format.md §2.3：增量存档的 files 条目可带 backupSourceCheckpointId，
+// 指向「该文件实际备份所在的前置节点」——物理文件不在本存档目录，而在链上
+// 祖先（可能跨不同 cp_* 目录，F08：cp_aa3333 → cp_bb4444 → cp_cc5555）。
+// 本组函数为纯逻辑：给定 lookup（按 checkpointId 取已解析存档），逐级回溯
+// backupSourceCheckpointId 链定位物理文件所在节点；父节点缺失/损坏/越界
+// 目录名/自引用/成环/超深均按「损坏隔离」返回失败，由调用方跳过该文件
+// （不整体失败）。调用方（checkpointTarget）负责提供带 memo 的磁盘 lookup。
+
+export const CHECKPOINT_CHAIN_MAX_HOPS = 32
+
+/** 按 checkpointId 提供已解析存档的查找器（缺失/损坏/目录名非法 → null） */
+export interface LegacyCheckpointLookup {
+  get(checkpointId: string): Promise<ParsedLegacyCheckpoint | null>
+}
+
+export type IncrementalChainFailureReason =
+  | 'unsafe-dir'
+  | 'missing-parent'
+  | 'missing-entry'
+  | 'self-ref'
+  | 'cycle'
+  | 'too-deep'
+
+export type IncrementalFileResolution =
+  | {
+      ok: true
+      /** 物理文件所在存档（= 本存档或链上祖先） */
+      sourceCheckpointId: string
+      /** sourceCheckpointId 存档 files 映射中命中的键（lookupKeys 之一） */
+      sourceKey: string
+      sourceEntry: LegacyCheckpointFileEntry
+      /** 链上经过的节点（含起点） */
+      hops: string[]
+      /** 子节点声明哈希与解析节点声明哈希是否一致（任一缺失视为一致） */
+      hashConsistent: boolean
+    }
+  | {
+      ok: false
+      reason: IncrementalChainFailureReason
+      message: string
+      hops: string[]
+    }
+
+/**
+ * 逐级回溯 backupSourceCheckpointId 链，定位文件物理备份所在节点。
+ *
+ * 规则：
+ * - 无 backupSourceCheckpointId → 本节点；
+ * - 每级先校验目录名安全（F14g 同源），再查父节点 files（lookupKeys 逐个尝试，
+ *   兼容子节点扁平键 → 父节点 scoped 键的归一化差异）；
+ * - 父条目若仍带 backupSourceCheckpointId → 继续向上（多级链）；
+ * - 父缺失/损坏（lookup 返回 null）、父无条目、越界目录名、自引用、成环、
+ *   超深 → 失败（调用方按损坏隔离跳过该文件，不中断整体导入）。
+ */
+export async function resolveIncrementalFileSource(
+  checkpointId: string,
+  lookupKeys: readonly string[],
+  entry: LegacyCheckpointFileEntry,
+  lookup: LegacyCheckpointLookup,
+): Promise<IncrementalFileResolution> {
+  const start = entry.backupSourceCheckpointId
+  if (!start) {
+    return {
+      ok: true,
+      sourceCheckpointId: checkpointId,
+      sourceKey: lookupKeys[0] ?? '',
+      sourceEntry: entry,
+      hops: [checkpointId],
+      hashConsistent: true,
+    }
+  }
+
+  const hops: string[] = [checkpointId]
+  const visited = new Set<string>([checkpointId])
+  let current = start
+
+  for (let depth = 0; depth < CHECKPOINT_CHAIN_MAX_HOPS; depth += 1) {
+    if (current === checkpointId) {
+      return { ok: false, reason: 'self-ref', message: `增量链自引用: ${current}`, hops }
+    }
+    if (!isSafeCheckpointDirName(current)) {
+      return { ok: false, reason: 'unsafe-dir', message: `父节点目录名非法: ${current}`, hops }
+    }
+    if (visited.has(current)) {
+      return { ok: false, reason: 'cycle', message: `增量链成环: ${[...hops, current].join(' -> ')}`, hops }
+    }
+    visited.add(current)
+    hops.push(current)
+
+    const parent = await lookup.get(current)
+    if (!parent) {
+      return { ok: false, reason: 'missing-parent', message: `父节点缺失或损坏: ${current}`, hops }
+    }
+
+    let sourceKey: string | undefined
+    let sourceEntry: LegacyCheckpointFileEntry | undefined
+    for (const key of lookupKeys) {
+      const found = parent.files[key]
+      if (found) {
+        sourceKey = key
+        sourceEntry = found
+        break
+      }
+    }
+    if (sourceEntry === undefined || sourceKey === undefined) {
+      return {
+        ok: false,
+        reason: 'missing-entry',
+        message: `父节点 ${current} 无文件条目: ${lookupKeys.join(' / ')}`,
+        hops,
+      }
+    }
+
+    const next = sourceEntry.backupSourceCheckpointId
+    if (next && next !== current) {
+      current = next
+      continue
+    }
+    if (next === current) {
+      return { ok: false, reason: 'self-ref', message: `父节点 ${current} 自引用`, hops }
+    }
+
+    const hashConsistent = !entry.hash || !sourceEntry.hash || entry.hash === sourceEntry.hash
+    return { ok: true, sourceCheckpointId: current, sourceKey, sourceEntry, hops, hashConsistent }
+  }
+
+  return {
+    ok: false,
+    reason: 'too-deep',
+    message: `增量链过深（超过 ${CHECKPOINT_CHAIN_MAX_HOPS} 层）`,
+    hops,
+  }
+}
+
+export type CheckpointChainIssueCode = IncrementalChainFailureReason | 'hash-mismatch'
+
+export interface CheckpointChainIssue {
+  checkpointId: string
+  scopedPath: string
+  code: CheckpointChainIssueCode
+  message: string
+}
+
+/**
+ * 校验单个存档的全部 backupSourceCheckpointId 引用（引用一致性审计）：
+ * 逐文件回溯，收集解析失败与「子/父声明哈希不一致」问题；不抛错、不修改任何状态。
+ */
+export async function validateCheckpointChainReferences(
+  parsed: ParsedLegacyCheckpoint,
+  lookup: LegacyCheckpointLookup,
+): Promise<CheckpointChainIssue[]> {
+  const issues: CheckpointChainIssue[] = []
+  for (const [scopedPath, entry] of Object.entries(parsed.files)) {
+    if (!entry.backupSourceCheckpointId) continue
+    const resolved = await resolveIncrementalFileSource(parsed.checkpointId, [scopedPath], entry, lookup)
+    if (!resolved.ok) {
+      issues.push({
+        checkpointId: parsed.checkpointId,
+        scopedPath,
+        code: resolved.reason,
+        message: resolved.message,
+      })
+    } else if (!resolved.hashConsistent) {
+      issues.push({
+        checkpointId: parsed.checkpointId,
+        scopedPath,
+        code: 'hash-mismatch',
+        message: `子/父声明哈希不一致: ${entry.hash} vs ${resolved.sourceEntry.hash}`,
+      })
+    }
+  }
+  return issues
 }
