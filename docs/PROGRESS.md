@@ -149,6 +149,11 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   overview、memory 管理、checkpoint 列表、restore 预览（双门确认 + previewToken 绑定）、
   staged diff 卡片（批量幂等）、settings 贡献（secret 无明文）；各 surface 独立 locale 命名空间
   已注册进 client 入口；组件以可挂接导出交付
+- **P0-03 client 刷新/HMR/缓存补测（✅ 2026-09）**：`tests/reloadStability.spec.ts`（11 用例：
+  刷新回放一致性——workflow 会话窗口/memory 分页重放结果一致；HMR 幂等——apply+unload 循环
+  零残留、fiber-tied 注册审计；发现 `apply()` 未 fiber-tie locale 注册的 HMR 残留缺口，已记录）
+  + `tests/clientArtifact.spec.ts`（3 用例：dsh.client manifest ↔ tsdown 产物一致性、bundle
+  loader-closure 契约、发布白名单无悬空引用）
 - **已知 GAP（记录于各 surface README）**：rc.6 无管理视图 slot（shell 仅 shell.overlay；
   settings.section 需补 dsh-client-ui-settings 依赖后可用）；rc.6 无浏览器→host Remote 通道
   （Typert 仅 host 侧）→ surface 全部以 mock 数据源 + 契约消费点交付，host 升级后平移 Typert
@@ -214,8 +219,8 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 ## 已定案待实施（产品决策批次，全部暂缓，仅记录）
 
-> 决策批次（2026-08）：以下事项均已定案方向。**A/B 组与 C1/C2/C4 暂不实施**，仅在此记录，
-> 待另行排期；**C3/C5/C6/C7 已落地**（见下）。执行顺序与优先级由后续产品排期决定。
+> 决策批次（2026-08）：以下事项均已定案方向。**A 组与 B 组剩余项暂不实施**，仅在此记录，
+> 待另行排期；**C1~C7 已全部落地**（见下）。执行顺序与优先级由后续产品排期决定。
 
 ### 提示词编排（A 组）
 
@@ -228,6 +233,15 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   sendHistoryThoughts 构造时剥离 → WeakSet 防递归 short-circuit 重发。
   实现要点：与 llm-retry/llm-replay 挂载顺序探针、非契约用法需 ADR 记录、
   渠道差异（pi-ai 通道保留 reasoning；deepseek 官方通道依赖官方 passback 语义）。
+  **SPIKE 复核（2026-09）**：rc.6 公开契约面无请求构造注入面（P0-14 GAP 维持）——
+  pre-step 仅 UserMessage 且必落盘、agent/request 只能改 LlmCallConfig 不能改消息、
+  llm/stream waterfall 是唯一可达成全语义的面但 loop 请求带 markAgentLoopRequest 标记
+  且深冻结（改写=非契约用法，需 ADR-0002 修订）；类型面支持 ReasoningBlock
+  {type:'reasoning'} 与 createAssistantMessage（ContentBlock/MessageId 公开导出实证）；
+  isAgentLoopRequest 谓词需 .d.ts 复验（node_modules 未装）。判定：能力内子集可行
+  （pi-ai 渠道可上 wire；deepseek-official 渠道 serialize 丢弃 plain-turn reasoning，
+  需 DSH 渠道层改动或接受差异），维持暂缓——实施时先 `pnpm install` 复验
+  llm/stream 订阅形态与 GenerateOptions 载荷（O-1~O-3），再写 ADR-0002 修订。
 
 ### 迁移增强（B 组）
 
@@ -252,15 +266,28 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
   不硬写 hack）；G3 maxConcurrent（默认 2，委派前 listChildren 计数）。配置
   `subagents.maxHopDepth/maxConcurrent`（0=关闭守卫）。39 用例 + 探针守卫。
   SPIKE 结论：seam 方法是唯一可拦截点（base tool 包未装），`reportFrom` 不支持任意寻址。
-- **C2 media generate_image / remove_background（优先级较低）**：设计已记录于
-  media/README.md（deferred）；需模型渠道调用设计（ctx.llm 或独立 provider）。
+- **C2 media generate_image / remove_background（✅ 已落地，2026-09）**：新增
+  ChannelImagePort 模型渠道端口 + 两个工具（参数/结果/错误码契约与 media/README.md
+  deferred 设计一致；默认输出 `<workspace>/media-output/gen-<ts>.png` 与
+  `<name>-bg-removed-<ts>.png`；AbortSignal 可取消）。SPIKE 结论：dsh-llm rc.6 无公开
+  图像生成 API → 未注入渠道时 fail-closed（`GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE`），
+  真实渠道稳定后平移接入（挂 ctx.llm 或独立 provider）——见 `src/media/README.md`
+  模型渠道节与 `tests/media/modelValidate.test.ts` / `modelTools.test.ts`（27 用例）。
 - **C3 todo_update 薄适配（✅ 已落地，2026-08）**：graycode-todo 域（src/todo/）——
   读最近 todo/write 事件快照 → 内容 hash 合成稳定 id → 应用老 Gray 5 种增量 ops →
   整表写回（append todo/write，turn-enclosed）。差异：DSH 无 cancelled（写回映射
   completed，统计如实）；id 不落盘（结果返回带 id 快照供模型引用）。25 用例。
-- **C4 多平台系统通知（定案：做，暂缓）**：整合进本插件（非独立插件），支持多平台——
-  Windows 原生 toast（参考老 Gray WinRtLingerToastAdapter / toast-linger 方案）+
-  浏览器 Notification API（含安卓浏览器/WebView 场景）；host 工具触发 → client 通知展示。
+- **C4 多平台系统通知（✅ 已落地，2026-09）**：`src/notifications/` 域
+  （graycode-notifications 子插件，已挂载 composition root）：`notify` 工具
+  （title/message/level/silent，参数校验稳定码 GRAY_NOTIFY_*）+ Windows 原生 toast 后端
+  （child_process → PowerShell 5.1 WinRT interop，零新增依赖；宿主无 AUMID 时 fail-closed
+  投递 failed 绝不抛出）+ noop 降级（非 win32 / windowsToast=false）；跨域服务
+  `graycode.notifications` + `graycode/notifications/notify` 事件（best-effort）。client 侧
+  `src/client/notifications/` surface：会话事件流折叠（notificationsFromWindow，防御性
+  readers + replay-safe）+ BrowserNotificationPresenter（Notification API，权限
+  default→request、denied 降级应用内列表、绝不 reject）+ NotificationCenter 挂接组件。
+  通道结论：rc.6 无 host→client 推送通道（GAP），client 经会话事件观察 notify 调用——
+  host 侧无需也不能主动推送。44 用例（host 28 + client 16）。
 - **C5 branch_rename 工具面 + branches Remote 端点（✅ 已落地，2026-08）**：branch_rename
   工具（1-200 字符对齐老版 renameBranchCandidate）+ branches/list、branches/rename 端点
   （workspace 过滤 + 游标分页 + expectedRevision CAS）；BranchError → 稳定 Remote 码

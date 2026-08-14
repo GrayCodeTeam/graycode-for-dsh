@@ -43,6 +43,16 @@
   fail-closed）、G3 maxConcurrent（默认 2）；配置 `subagents.maxHopDepth/maxConcurrent`。
 - **P0-02 HMR 补测**：`tests/hmr/hostReload.spec.ts`——`Fiber.restart()` 重载 20 次工具/
   监听器/定时器不增长、工具名集合逐轮相等、`fiber.update` 配置 HMR 不泄漏。
+- **Media 模型渠道（C2）**：generate_image / remove_background 落地——ChannelImagePort
+  渠道端口 + 默认输出路径/参数校验/取消；dsh-llm rc.6 无公开图像 API → 未注入渠道
+  fail-closed（`GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE`），真实渠道稳定后平移接入。
+- **多平台系统通知（C4）**：`graycode-notifications` 子插件——`notify` 工具 + Windows 原生
+  toast 后端（child_process → PowerShell 5.1 WinRT，零新增依赖，AUMID 缺失 fail-closed）+
+  noop 降级；跨域服务 `graycode.notifications` + best-effort 事件；client 侧
+  `graycode.notifications` surface（会话事件折叠 + Notification API 展示器 + 通知中心组件）。
+- **P0-03 client 刷新/HMR/缓存补测**：`reloadStability.spec.ts`（刷新回放一致性、apply+unload
+  HMR 幂等、fiber-tied 注册审计）+ `clientArtifact.spec.ts`（manifest ↔ 产物一致性、
+  bundle loader-closure 契约）；发现并记录 `apply()` 未 fiber-tie locale 注册的 HMR 残留缺口。
 - **Client 包（Phase 4 骨架）**：`@graycode/dsh-client`，`dsh.client` manifest、
   `shell.overlay` slot 注册、zh/en locale、tsdown browser bundle（3.7 kB，可被 DSH 加载）。
 - **CI 与打包**：`.github/workflows/ci.yml`（三平台矩阵、typecheck/test/build/pack/tarball 检查）、
