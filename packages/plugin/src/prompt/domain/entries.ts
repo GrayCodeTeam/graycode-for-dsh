@@ -79,6 +79,13 @@ export interface AssembleEntriesInput {
   chatHistoryText?: string
   /** D-11 = c fake-thought gate; see {@link fakeThoughtPolicy}. */
   sendHistoryThoughts?: boolean
+  /**
+   * A1 request layer: when true, user/assistant entries stay out of the
+   * system text (no context paragraphs) because a request-construction layer
+   * (graycode-thoughts) injects them as real messages. Blocks are still
+   * produced so consumers can read the entry order.
+   */
+  requestLayer?: boolean
 }
 
 export interface AssembleEntriesResult {
@@ -136,7 +143,11 @@ export function assembleEntries(
     if (policy.text.trim().length === 0) continue
     const paragraph = `${contextParagraphLabel(role)}\n${policy.text}`
     blocks.push({ id: entry.id, role: entry.role, order: entry.order, text: paragraph })
-    paragraphs.push(paragraph)
+    // A1 request layer: user/assistant entries are handed to the request-
+    // construction layer (real messages) instead of being rendered as system
+    // context paragraphs — otherwise the same preset would be injected twice
+    // (once as system text by D-11 = c, once as messages by graycode-thoughts).
+    if (!input.requestLayer) paragraphs.push(paragraph)
   }
 
   const base = input.systemText
@@ -157,6 +168,8 @@ export function assembleEntries(
 export interface RenderModeSectionOptions {
   /** D-11 = c fake-thought gate. */
   sendHistoryThoughts?: boolean
+  /** A1 request layer: skip user/assistant context paragraphs (thoughts injects real messages). */
+  requestLayer?: boolean
   /** `{{$MODULE}}` placeholder values (canonical module names). */
   placeholderValues?: Readonly<Record<string, string>>
 }
@@ -174,6 +187,7 @@ export function renderModeSectionText(
   const assembled = assembleEntries(mode.promptEntries, {
     systemText: mode.template,
     sendHistoryThoughts: options.sendHistoryThoughts,
+    requestLayer: options.requestLayer,
   })
   const values = options.placeholderValues ?? {}
   const body = renderPromptTemplate(assembled.systemText, values)

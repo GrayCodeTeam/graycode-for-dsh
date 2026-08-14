@@ -1,27 +1,32 @@
-# GrayCode thoughts 域（A1 能力内子集，默认关闭未挂载）
+# GrayCode thoughts 域（A1 请求构造层，默认关闭，已挂载）
 
 请求构造层：把 preset user/assistant 条目作为**真实临时消息**上 wire，fakeThought
-升级为 **typed reasoning 块**（`{type:'reasoning'}`）。本域是 docs/ADR-0002 §A1
+升级为 **typed reasoning 块**（`{type:'reasoning'}`）。本域是 docs/ADR-0002 §4b
 「真临时消息 + typed thought」路线的能力内子集实现（非契约用法，见 ADR）。
 
 ## 状态（重要）
 
-- **默认关闭、未挂载 composition root**。`graycode-thoughts` 子插件可独立挂载，
-  但完整语义需与 prompt 注入器的 `requestLayer` 联动（否则 D-11 = c 的段落文本与
-  本域的临时消息**双重注入**）——该联动留到后续批次。
-- 零行为变化：挂载但 `enabled: false`（默认）时，`llm/stream` 每个请求原样透传。
+- **默认关闭、已挂载 composition root（2026-09）**。`graycode-thoughts` 已挂进
+  `src/index.ts`；`enabled: false`（默认）时 `llm/stream` 每个请求原样透传。
+- **requestLayer 联动已完成**：`prompt.requestLayer: true` 时 prompt 注入器跳过
+  user/assistant 上下文段落（不双重注入）——开启完整 A1 需同时配
+  `prompt.requestLayer: true` 与 `thoughts.enabled: true`（配置侧配对，见
+  prompt/domain/entries.ts requestLayer 注释与 ADR-0002 §4b）。
+- 状态源：默认从 prompt 域 `graycode.promptModes` 服务（`ctx.get` 惰性查询）投影
+  当前 mode 的 preset 条目；服务缺失/无 mode → 空注入透传（fail-safe）。
 
 ## 结构
 
 ```
 src/thoughts/
-  index.ts            子插件（Config: enabled/sendHistoryThoughts，均默认 false）
+  index.ts            子插件（Config: enabled/sendHistoryThoughts，均默认 false；
+                      默认状态源 = graycode.promptModes 服务投影）
   adapters/
     llmStream.ts      llm/stream waterfall 拦截（isAgentLoopRequest 识别 + WeakSet 防递归 + fail-closed）
   domain/
     rewrite.ts        纯 TS：presetEntriesToInjections / placementOf / placeInjections / injectionMessage / rewriteLoopRequest
   README.md           本文件
-tests/thoughts/       rewrite.test.ts（纯函数）+ llmStream.test.ts（adapter 集成）
+tests/thoughts/       rewrite.test.ts + llmStream.test.ts + apply.test.ts（apply 接线）
 ```
 
 ## 数据流
@@ -59,7 +64,9 @@ tests/thoughts/       rewrite.test.ts（纯函数）+ llmStream.test.ts（adapte
 - 重入 `ctx.llm.stream(newOptions)` 会触发全部 llm/stream 监听器（retry/replay 等）；
   本域用 WeakSet 短路自身，其余监听器对 newOptions 的语义需真实 profile 挂载顺序探针
   （lockfile 当前无 dsh-llm-retry/replay 于插件依赖图内）。
-- 完整 A1（注入器 requestLayer 联动 + 挂载 + 真实渠道验证）见 ADR-0002 §A1 后续动作。
+- 完整 A1 剩余动作：**真实 profile 挂载顺序探针**（retry/replay 对 newOptions 的语义）
+  与**真实渠道验证**（deepseek-official 丢弃 plain-turn reasoning 的接受差异）待排期
+  ——见 ADR-0002 §4b 后续动作。
 
 ## 测试
 
@@ -67,4 +74,6 @@ tests/thoughts/       rewrite.test.ts（纯函数）+ llmStream.test.ts（adapte
 - `rewrite.test.ts`：entries→injections（过滤/排序/thought 门/空文本）、placement 切分、
   injectionMessage 块形状（reasoning 前置）、rewriteLoopRequest 不可变 + 插入位置 + 原对象未动；
 - `llmStream.test.ts`：enabled/disabled、非 loop 请求透传、注入错误 fail-closed、
-  WeakSet 防递归（重入只 stream 一次）、dispose 后不拦截。
+  WeakSet 防递归（重入只 stream 一次）、dispose 后不拦截；
+- `apply.test.ts`：promptModes 服务缺失/无 mode 降级、真实 mode 投影改写（before/after
+  位置 + reasoning）、sendHistoryThoughts 门、enabled=false 透传、getState 注入覆盖。

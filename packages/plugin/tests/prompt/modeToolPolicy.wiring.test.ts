@@ -79,6 +79,7 @@ async function makeWorld(modeToolPolicy?: boolean): Promise<World> {
     enabled: true,
     agentScope: 'roots',
     sendHistoryThoughts: false,
+    requestLayer: false,
     // 不传时显式走默认 true，与 Config schema 的 default(true) 一致
     modeToolPolicy: modeToolPolicy ?? true,
   })

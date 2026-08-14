@@ -15,6 +15,7 @@ import * as file from './file/index.ts'
 import * as todo from './todo/index.ts'
 import * as subagents from './subagents/index.ts'
 import * as notifications from './notifications/index.ts'
+import * as thoughts from './thoughts/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
 export const name = 'graycode'
@@ -49,6 +50,8 @@ export interface Config {
   subagents: subagents.Config
   /** Notifications domain (C4): notify tool + multi-platform delivery backends. */
   notifications: notifications.Config
+  /** Thoughts request layer (A1): llm/stream rewrite, off by default. */
+  thoughts: thoughts.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -67,6 +70,7 @@ export const Config: z<Config> = z.object({
   todo: todo.Config,
   subagents: subagents.Config,
   notifications: notifications.Config,
+  thoughts: thoughts.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -97,4 +101,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(subagents, { ...config.subagents })
   // Notifications domain (C4): notify tool + Windows native toast / noop backends.
   ctx.plugin(notifications, { ...config.notifications })
+  // Thoughts request layer (A1): llm/stream waterfall rewrite (non-contract,
+  // ADR-0002 §4b), off by default. Reads the prompt-mode service lazily via
+  // ctx.get — prompt must mount first (it does, above) so the service exists.
+  ctx.plugin(thoughts, { ...config.thoughts })
 }

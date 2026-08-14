@@ -73,6 +73,23 @@ describe('assembleEntries 编排', () => {
     expect(result.systemText).toBe('base')
   })
 
+  test('requestLayer=true：user/assistant 段落不进入 contextParagraphs，blocks 仍产出（A1 联动）', () => {
+    const result = assembleEntries(
+      [
+        entry({ id: 'u1', role: 'user', order: 0, content: 'user body' }),
+        entry({ id: 'a1', role: 'assistant', order: 1, content: 'assistant body', fakeThought: 'think' }),
+        entry({ id: 'h1', role: 'chat_history', order: 2 }),
+      ],
+      { systemText: 'base', requestLayer: true },
+    )
+    // 段落交给请求构造层（thoughts 注入真实消息），system 段保持干净
+    expect(result.contextParagraphs).toEqual([])
+    expect(result.systemText).toBe('base')
+    expect(result.chatHistoryMarkers).toBe(1)
+    // blocks 仍产出全部 enabled 条目，供请求层读取顺序锚点
+    expect(result.blocks.map(block => block.id)).toEqual(['u1', 'a1', 'h1'])
+  })
+
   test('空条目与空 systemText：原样透传', () => {
     const result = assembleEntries([], { systemText: 'base' })
     expect(result.systemText).toBe('base')
@@ -155,6 +172,17 @@ describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
     expect(on).toContain('[thinking]\nthink!\n[/thinking]\n\nassistant entry')
     const off = renderModeSectionText(mode, { sendHistoryThoughts: false })
     expect(off).not.toContain('[thinking]')
+  })
+
+  test('requestLayer=true：段落不进 section 文本，模板/系统条目/前后缀保留（A1 联动）', () => {
+    const text = renderModeSectionText(mode, {
+      sendHistoryThoughts: true,
+      requestLayer: true,
+      placeholderValues: { ENVIRONMENT: 'env-value' },
+    })
+    expect(text).toBe(['PREFIX', 'Template with env-value\n\nsys entry', 'SUFFIX'].join('\n\n'))
+    expect(text).not.toContain('[GrayCode preset entry:')
+    expect(text).not.toContain('[thinking]')
   })
 
   test('无 prefix/suffix 时不产生空段', () => {

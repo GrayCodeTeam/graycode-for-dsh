@@ -105,7 +105,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     },
     branches: { dataRoot, agentScope: 'roots' },
     persona: { enabled: true, agentScope: 'roots' },
-    prompt: { dataRoot, enabled: true, agentScope: 'roots', sendHistoryThoughts: false, modeToolPolicy: true },
+    prompt: { dataRoot, enabled: true, agentScope: 'roots', sendHistoryThoughts: false, modeToolPolicy: true, requestLayer: false },
     migration: { dataRoot, enabled: false, allowLegacyReaders: false },
     stagedDiff: { dataRoot, enabled: false, agentScope: 'roots' },
     activity: { dataRoot, enabled: true, agentScope: 'roots', sampleIntervalMs: 60_000 },
@@ -114,6 +114,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     todo: { enabled: true, agentScope: 'roots' },
     subagents: { maxHopDepth: 5, maxConcurrent: 2 },
     notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
+    thoughts: { enabled: false, sendHistoryThoughts: false },
   }
 }
 

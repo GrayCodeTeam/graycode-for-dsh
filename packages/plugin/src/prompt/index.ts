@@ -17,6 +17,14 @@ import { createModeToolPolicyGuard, resolveBuiltinModeToolPolicy } from '../work
 
 export const name = 'graycode-prompt'
 
+/**
+ * Cross-domain service key: exposes the live prompt-mode service to other
+ * domains (e.g. graycode-thoughts reads the current mode to build its
+ * request-layer injections). Provided by prompt's apply, consumed lazily via
+ * `ctx.get` so a missing service degrades to no-op instead of failing.
+ */
+export const PROMPT_MODES_SERVICE = 'graycode.promptModes'
+
 export const inject = ['agents', 'tools'] as const
 
 /**
@@ -45,6 +53,15 @@ export interface Config {
    * entirely (zero intrusion).
    */
   modeToolPolicy: boolean
+  /**
+   * A1 request layer (default false = D-11 = c as-is): when true, the
+   * injector skips user/assistant context paragraphs because the thoughts
+   * plugin (graycode-thoughts) injects them as real messages at the
+   * request-construction layer. Pair with `thoughts.enabled` for the full
+   * A1 subset; paragraphs are otherwise double-injected (see
+   * domain/entries.ts requestLayer notes).
+   */
+  requestLayer: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -53,15 +70,20 @@ export const Config: z<Config> = z.object({
   agentScope: agentScopeSchema,
   sendHistoryThoughts: z.boolean().default(false),
   modeToolPolicy: z.boolean().default(true),
+  requestLayer: z.boolean().default(false),
 })
 
 export function apply(ctx: Context, config: Config): () => void {
   if (!config.enabled) return () => {}
 
   const service = new PromptSettingsService({ dataRoot: config.dataRoot })
+  // Cross-domain service (A1): thoughts reads the current mode snapshot to
+  // build request-layer injections; absent consumers degrade to no-op.
+  ctx.provide(PROMPT_MODES_SERVICE, service)
   const injector = createPromptInjector(ctx, config.agentScope, () => ({
     mode: service.currentModeSnapshot(),
     sendHistoryThoughts: config.sendHistoryThoughts,
+    requestLayer: config.requestLayer,
   }))
 
   // Store edits / mode switches re-inject live agents synchronously (the

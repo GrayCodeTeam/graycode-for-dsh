@@ -50,6 +50,12 @@ export interface PromptRenderState {
   mode: PromptMode | undefined
   /** D-11 = c fake-thought gate (replaces the old send-side strip). */
   sendHistoryThoughts: boolean
+  /**
+   * A1 request layer: skip user/assistant context paragraphs — the thoughts
+   * plugin injects them as real messages at the request-construction layer.
+   * Optional for state providers that predate the flag (defaults to false).
+   */
+  requestLayer?: boolean
   /** `{{$MODULE}}` placeholder values (canonical module names); optional. */
   placeholderValues?: Readonly<Record<string, string>>
 }
@@ -108,6 +114,7 @@ function renderStateText(state: PromptRenderState, cwd: string | undefined): str
   if (!mode) return ''
   return renderModeSectionText(mode, {
     sendHistoryThoughts: state.sendHistoryThoughts,
+    requestLayer: state.requestLayer ?? false,
     placeholderValues: state.placeholderValues ?? defaultPlaceholderValues(cwd),
   })
 }
@@ -124,6 +131,7 @@ function stateKey(state: PromptRenderState): string {
     mode.template,
     fingerprint(mode.promptEntries),
     state.sendHistoryThoughts ? '1' : '0',
+    state.requestLayer ? '1' : '0',
   ].join('\u0000')
 }
 
