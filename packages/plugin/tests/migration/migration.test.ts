@@ -327,6 +327,8 @@ describe('损坏输入隔离（F14）', () => {
       const applied = await fx.service.apply(sourceDir, scan.report.planToken)
       // 损坏对象被隔离（域步记 failed/计数为 error），run 为 partial 而非崩溃
       expect(applied.run.status).toBe('partial')
+      // T5：域级审计备注（error/跳过/writer 备注）并入 run.notes，随提交点持久化
+      expect(applied.run.notes.join('\n')).toContain('error: conversation:conv_demo [META_CORRUPT]')
       expect(applied.report.objects.find(o => o.objectType === 'memory-global')?.outcome).toBe('import')
     } finally {
       fx.cleanup()

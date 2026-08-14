@@ -1,11 +1,15 @@
 /**
  * Branch 工具层测试：直接调用 createBranchTools 返回的 7 个 execute（不经 ctx.tools
  * 注册管线），以 stub exec 模拟会话上下文；服务由假适配器 + 真实临时 dataRoot 支撑。
+ *
+ * F-07：每个用例在 beforeEach 中独立构建 service/group（测试隔离）——不再共享
+ * beforeAll 状态，未来在文件前部插入任何分支操作测试都不会破坏 revision/candidates
+ * 等依赖初始状态的断言。
  */
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { BranchCoordinatorService, createBranchWorkspaceId } from '../../src/branches/service.ts'
 import type { BranchSessionAdapter } from '../../src/branches/service.ts'
@@ -77,22 +81,50 @@ interface ToolOutput extends Record<string, unknown> {
   code?: string
 }
 
-let tmpDir: string
-let dataRoot: string
-let adapter: FakeBranchSessionAdapter
-let service: BranchCoordinatorService
-let tools: Map<string, ToolDefinition>
-let groupId: string
+interface TestEnv {
+  tmpDir: string
+  dataRoot: string
+  adapter: FakeBranchSessionAdapter
+  service: BranchCoordinatorService
+  tools: Map<string, ToolDefinition>
+  groupId: string
+}
+
+let env: TestEnv
+
+beforeEach(async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-ws-'))
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-data-'))
+  const adapter = new FakeBranchSessionAdapter()
+  adapter.addSession(ROOT_SESSION, rootEvents())
+  const service = new BranchCoordinatorService({ dataRoot }, adapter)
+  await service.initialize()
+  const group = await service.ensureGroup({ workspaceId: createBranchWorkspaceId(tmpDir), rootSessionId: ROOT_SESSION })
+  env = {
+    tmpDir,
+    dataRoot,
+    adapter,
+    service,
+    tools: new Map(createBranchTools(service).map(tool => [tool.name, tool])),
+    groupId: group.id,
+  }
+})
+
+afterEach(async () => {
+  env.service.dispose()
+  await fs.rm(env.tmpDir, { recursive: true, force: true })
+  await fs.rm(env.dataRoot, { recursive: true, force: true })
+})
 
 function makeExec(): ToolRunContext {
   return {
-    agent: { session: { id: ROOT_SESSION, header: { cwd: tmpDir } } },
+    agent: { session: { id: ROOT_SESSION, header: { cwd: env.tmpDir } } },
     signal: new AbortController().signal,
   } as unknown as ToolRunContext
 }
 
 async function execute(name: string, args: Record<string, unknown>): Promise<ToolOutput> {
-  const tool = tools.get(name)!
+  const tool = env.tools.get(name)!
   return (await tool.execute(args, makeExec())) as ToolOutput
 }
 
@@ -100,24 +132,6 @@ function groupCandidates(result: ToolOutput): Array<{ sessionId: string; deleted
   const groups = result.groups as Array<{ candidates: Array<{ sessionId: string; deleted: boolean }> }>
   return groups[0]!.candidates
 }
-
-beforeAll(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-ws-'))
-  dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-branch-tools-data-'))
-  adapter = new FakeBranchSessionAdapter()
-  adapter.addSession(ROOT_SESSION, rootEvents())
-  service = new BranchCoordinatorService({ dataRoot }, adapter)
-  await service.initialize()
-  const group = await service.ensureGroup({ workspaceId: createBranchWorkspaceId(tmpDir), rootSessionId: ROOT_SESSION })
-  groupId = group.id
-  tools = new Map(createBranchTools(service).map(tool => [tool.name, tool]))
-})
-
-afterAll(async () => {
-  service.dispose()
-  await fs.rm(tmpDir, { recursive: true, force: true })
-  await fs.rm(dataRoot, { recursive: true, force: true })
-})
 
 describe('branch tools', () => {
   it('branch_list returns the group with its root candidate and a turn summary for the active candidate', async () => {
@@ -134,10 +148,11 @@ describe('branch tools', () => {
       turns: Array<{ turn: number; closed: boolean; userMessages: number }>
     }>
     expect(groups).toHaveLength(1)
-    expect(groups[0]!.groupId).toBe(groupId)
-    expect(groups[0]!.workspaceId).toBe(createBranchWorkspaceId(tmpDir))
+    expect(groups[0]!.groupId).toBe(env.groupId)
+    expect(groups[0]!.workspaceId).toBe(createBranchWorkspaceId(env.tmpDir))
     expect(groups[0]!.rootSessionId).toBe(ROOT_SESSION)
     expect(groups[0]!.activeSessionId).toBe(ROOT_SESSION)
+    // 独立 env：revision/candidates 为初始状态（无跨用例共享状态）
     expect(groups[0]!.revision).toBe(1)
     expect(groups[0]!.candidates).toHaveLength(1)
     expect(groups[0]!.candidates[0]).toMatchObject({ sessionId: ROOT_SESSION, kind: 'root', deleted: false })
@@ -150,7 +165,6 @@ describe('branch tools', () => {
   it('branch_create forks the parent through the last complete turn and reports the new session', async () => {
     const result = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'created' })
     expect(result.success).toBe(true)
-    expect(result.sessionId).toBeTruthy()
     expect(String(result.sessionId)).toMatch(/^branch-/)
     expect(result.boundary).toBe(5) // 缺省边界 = 最近完整轮次末尾
     expect(result.kind).toBe('manual')
@@ -168,7 +182,7 @@ describe('branch tools', () => {
     expect(result.boundary).toBe(2) // turn/start(2) seq3 - 1
     expect(result.orphan).toBe(false)
 
-    const sent = adapter.sentMessages.find(m => m.sessionId === result.sessionId)
+    const sent = env.adapter.sentMessages.find(m => m.sessionId === result.sessionId)
     expect(sent).toBeTruthy()
     expect(sent!.content).toEqual([{ type: 'text', text: 'second question' }])
   })
@@ -181,7 +195,7 @@ describe('branch tools', () => {
 
   it('branch_switch moves the active pointer to the created candidate', async () => {
     const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'switch target' })
-    const result = await execute('branch_switch', { groupId, sessionId: created.sessionId })
+    const result = await execute('branch_switch', { groupId: env.groupId, sessionId: created.sessionId })
     expect(result.success).toBe(true)
     expect(result.activeSessionId).toBe(created.sessionId)
     expect(result.revision).toBeGreaterThan(0)
@@ -189,28 +203,28 @@ describe('branch tools', () => {
 
   it('branch_delete tombstones a non-active candidate; branch_list reports deleted true', async () => {
     const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'delete me' })
-    const result = await execute('branch_delete', { groupId, sessionId: created.sessionId })
+    const result = await execute('branch_delete', { groupId: env.groupId, sessionId: created.sessionId })
     expect(result.success).toBe(true)
 
-    const listed = await execute('branch_list', { groupId })
+    const listed = await execute('branch_list', { groupId: env.groupId })
     const candidate = groupCandidates(listed).find(c => c.sessionId === created.sessionId)!
     expect(candidate.deleted).toBe(true)
   })
 
   it('branch_delete on the root candidate fails with GRAY_INVALID_INPUT', async () => {
-    const result = await execute('branch_delete', { groupId, sessionId: ROOT_SESSION })
+    const result = await execute('branch_delete', { groupId: env.groupId, sessionId: ROOT_SESSION })
     expect(result.success).toBe(false)
     expect(result.code).toBe(BranchErrorCode.INVALID_INPUT)
   })
 
   it('branch_restore clears the tombstone of a deleted candidate', async () => {
     const created = await execute('branch_create', { sessionId: ROOT_SESSION, label: 'restore me' })
-    await execute('branch_delete', { groupId, sessionId: created.sessionId })
+    await execute('branch_delete', { groupId: env.groupId, sessionId: created.sessionId })
 
-    const result = await execute('branch_restore', { groupId, sessionId: created.sessionId })
+    const result = await execute('branch_restore', { groupId: env.groupId, sessionId: created.sessionId })
     expect(result.success).toBe(true)
 
-    const listed = await execute('branch_list', { groupId })
+    const listed = await execute('branch_list', { groupId: env.groupId })
     const candidate = groupCandidates(listed).find(c => c.sessionId === created.sessionId)!
     expect(candidate.deleted).toBe(false)
   })
@@ -221,7 +235,7 @@ describe('branch tools', () => {
     expect(result.messageSent).toBe(true)
     expect(result.targetTurn).toBe(2)
 
-    const sent = adapter.sentMessages.find(m => m.sessionId === result.sessionId)
+    const sent = env.adapter.sentMessages.find(m => m.sessionId === result.sessionId)
     expect(sent).toBeTruthy()
     expect(sent!.content).toEqual([{ type: 'text', text: 'edited second question' }])
   })
@@ -232,15 +246,14 @@ describe('branch tools', () => {
     expect(result.code).toBe('GRAY_BRANCH_GROUP_NOT_FOUND')
   })
 
-  // ── D-2 回归：reroll / edit_retry 成功后新候选自动激活（追加在文件末尾，
-  //    不干扰文件前部依赖初始共享状态的用例）──
+  // ── D-2 回归：reroll / edit_retry 成功后新候选自动激活 ──
 
   it('branch_reroll auto-activates the forked session; branch_list reports it as active (D-2)', async () => {
     const result = await execute('branch_reroll', { sessionId: ROOT_SESSION, turn: 2 })
     expect(result.success).toBe(true)
     expect(result.activeSessionId).toBe(result.sessionId)
 
-    const listed = await execute('branch_list', { groupId })
+    const listed = await execute('branch_list', { groupId: env.groupId })
     const groups = listed.groups as Array<{ activeSessionId: string; candidates: Array<{ sessionId: string }> }>
     expect(groups[0]!.activeSessionId).toBe(result.sessionId)
     expect(groups[0]!.candidates.some(c => c.sessionId === result.sessionId)).toBe(true)
@@ -251,7 +264,7 @@ describe('branch tools', () => {
     expect(result.success).toBe(true)
     expect(result.activeSessionId).toBe(result.sessionId)
 
-    const listed = await execute('branch_list', { groupId })
+    const listed = await execute('branch_list', { groupId: env.groupId })
     const groups = listed.groups as Array<{ activeSessionId: string }>
     expect(groups[0]!.activeSessionId).toBe(result.sessionId)
   })

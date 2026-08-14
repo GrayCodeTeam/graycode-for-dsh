@@ -1,6 +1,10 @@
 /**
  * MemoryService 作用域隔离测试：global 与 workspace 数据不串、
  * scope key 归一化（win 小写 + 正斜杠 + sha256 前 16 位）、只读不建目录
+ *
+ * scope.json schema 契约（F-09）：以新格式（memory-format.md）为准——
+ * 写路径产出 {fsPath, name, cwd}；旧文档（legacy-format.md §3.4）的 uri 字段
+ * 在新格式中不存在，测试显式锁定 cwd 存在 + uri 缺失，给迁移器明确契约。
  */
 import * as os from 'os'
 import * as path from 'path'
@@ -95,7 +99,7 @@ describe('MemoryService 作用域隔离', () => {
     }
   })
 
-  test('scope.json 元信息随写路径持久化', async () => {
+  test('scope.json 元信息随写路径持久化（新格式契约 {fsPath, name, cwd}，无 uri）', async () => {
     const { service, dataRoot } = makeService()
     try {
       await service.getWorkspace('C:/workspace/with-meta', true)
@@ -103,8 +107,12 @@ describe('MemoryService 作用域隔离', () => {
       const meta = JSON.parse(
         fs.readFileSync(path.join(dataRoot, 'memory-workspaces', dir[0]!, 'scope.json'), 'utf-8')
       )
+      // 新格式（memory-format.md）：cwd 原样持久化，name 取 basename，fsPath 为归一化路径
       expect(meta.cwd).toBe('C:/workspace/with-meta')
       expect(meta.name).toBe('with-meta')
+      expect(meta.fsPath).toMatch(/with-meta$/)
+      // 显式锁定：新格式无 uri 字段（旧 legacy-format.md §3.4 为旧格式文档）
+      expect(meta.uri).toBeUndefined()
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }

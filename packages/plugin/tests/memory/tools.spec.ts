@@ -1,6 +1,11 @@
 /**
  * 工具级测试：memory_wake / memory_note / memory_config / memory_forget
  * 经 service 闭包（createMemoryTools）走真实临时数据根
+ *
+ * 文案断言说明（F-10）：工具输出 text 字段（'Saved as #0.' / 'You are awake.' /
+ * 'Removed memory #1' 等）是模型可见契约，保留断言；错误路径已优先断言结构化
+ * 字段（id/removed/totalHits/config）与精确错误消息（memory 工具无结构化错误码，
+ * message 即行为契约）。
  */
 import * as os from 'os'
 import * as path from 'path'
@@ -30,7 +35,7 @@ interface WakeToolResult {
 
 /** memory_config 返回值 */
 interface ConfigToolResult {
-  config: { entryChars: number }
+  config: { wakeLines: number; entryChars: number; partChars: number; partLines: number }
 }
 
 /** memory_forget 返回值 */
@@ -133,9 +138,70 @@ describe('memory 工具（经 service 闭包）', () => {
       const noted = (await note.execute({ text: 'y'.repeat(300) }, fakeExec(wsDir))) as NoteToolResult
       expect(noted.id).toBe(0)
 
-      // 非法值：显式传入 0 报可读错误
+      // 非法值：显式传入 0 报可读错误（memory 工具无结构化错误码，文案即行为契约）
       const bad = (await config.execute({ entryChars: 0 }, fakeExec(wsDir)).catch(e => e as Error)) as Error
       expect(bad.message).toMatch(/Invalid value for memory config "entryChars"/)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_config 更新 wakeLines/partChars/partLines：合法值生效并持久化（F-08）', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-config-'))
+    try {
+      const config = tools.get('memory_config')!
+
+      // 纯读：默认全量配置
+      const read = (await config.execute({}, fakeExec(wsDir))) as ConfigToolResult
+      expect(read.config).toEqual({ wakeLines: 96, entryChars: 280, partChars: 20000, partLines: 500 })
+
+      // 一次更新三个参数面
+      const updated = (await config.execute(
+        { wakeLines: 120, partChars: 40000, partLines: 800 },
+        fakeExec(wsDir),
+      )) as ConfigToolResult
+      expect(updated.config).toEqual({ wakeLines: 120, entryChars: 280, partChars: 40000, partLines: 800 })
+
+      // 持久化到共享 config：经服务重读同一实例确认
+      const wsMgr = await service.getForTool(wsDir, undefined)
+      expect(wsMgr!.getConfig()).toMatchObject({ wakeLines: 120, partChars: 40000, partLines: 800 })
+
+      // 单独更新 partLines 后其余键保持不变
+      const single = (await config.execute({ partLines: 900 }, fakeExec(wsDir))) as ConfigToolResult
+      expect(single.config).toEqual({ wakeLines: 120, entryChars: 280, partChars: 40000, partLines: 900 })
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_config 非法值：越界整数走 execute 校验，非整数被工具 schema 拒绝（F-08）', async () => {
+    const { tools, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-config-bad-'))
+    try {
+      const config = tools.get('memory_config')!
+      // 整数但越界（< 1）：到达 execute 层，报配置键名错误
+      for (const [key, bad] of [
+        ['wakeLines', 0],
+        ['entryChars', -1],
+      ] as const) {
+        const error = (await config.execute({ [key]: bad }, fakeExec(wsDir)).catch(e => e as Error)) as Error
+        expect(error.message).toMatch(new RegExp(`Invalid value for memory config "${key}"`))
+      }
+      // 非整数（浮点/NaN/字符串）：被 dsh-tools 参数 schema 在 execute 前拒绝
+      for (const [key, bad] of [
+        ['partChars', 1.5],
+        ['partLines', NaN],
+        ['wakeLines', 'abc'],
+      ] as const) {
+        const error = (await config.execute({ [key]: bad }, fakeExec(wsDir)).catch(e => e as Error)) as Error
+        expect(error.message).toMatch(new RegExp(`invalid arguments: "${key}" must be an integer`))
+      }
+      // 非法值不落盘：配置仍为默认
+      const read = (await config.execute({}, fakeExec(wsDir))) as ConfigToolResult
+      expect(read.config).toEqual({ wakeLines: 96, entryChars: 280, partChars: 20000, partLines: 500 })
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
       fs.rmSync(wsDir, { recursive: true, force: true })

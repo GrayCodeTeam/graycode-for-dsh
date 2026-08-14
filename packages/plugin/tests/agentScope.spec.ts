@@ -233,9 +233,4 @@ describe('createScopedToolRegistrar', () => {
     registrar.dispose()
     expect(ctx.createdListeners).toHaveLength(0)
   })
-
-  test('mode 显式类型收窄：roots/all/disabled 字面量可作 AgentScopeMode', () => {
-    const modes: AgentScopeMode[] = ['roots', 'all', 'disabled']
-    expect(modes).toHaveLength(3)
-  })
 })

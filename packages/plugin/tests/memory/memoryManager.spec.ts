@@ -50,6 +50,7 @@ describe('MemoryManager.note → wake', () => {
         await mm.note(t)
       }
       await mm.compress('0-1', 'ab')
+      // wake 缺失摘要的报错文案（无结构化错误码，message 即行为契约）
       const error = (await mm.wake(undefined, 8).catch(e => e as Error)) as Error
       expect(error.message).toContain('needs #0-3')
       expect(error.message).toContain('Compress memories #0-3')
@@ -228,6 +229,9 @@ describe('MemoryManager.updateConfig 钳制', () => {
       await expect(mm.updateConfig({ entryChars: 1001 })).rejects.toThrow(/Invalid entryChars/)
       await expect(mm.updateConfig({ wakeLines: 0 })).rejects.toThrow(/Invalid wakeLines/)
       await expect(mm.updateConfig({ partLines: 1.5 })).rejects.toThrow(/Invalid partLines/)
+      // F-08：partChars/wakeLines 上限钳制（MEMORY_CONFIG_BOUNDS 上界）
+      await expect(mm.updateConfig({ partChars: 1000001 })).rejects.toThrow(/Invalid partChars/)
+      await expect(mm.updateConfig({ wakeLines: 10001 })).rejects.toThrow(/Invalid wakeLines/)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

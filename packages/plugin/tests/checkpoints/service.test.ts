@@ -17,7 +17,7 @@ import * as path from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
-import { CheckpointService, type CheckpointServiceConfig } from '../../src/checkpoints/service.ts'
+import { CheckpointService, type CheckpointServiceConfig, type CreateCheckpointResult } from '../../src/checkpoints/service.ts'
 import { createDshFsRestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
 import { computeForcedKeepIds } from '../../src/checkpoints/domain/CheckpointDeletionService.ts'
 import { BlobStore, BLOB_HASH_PATTERN } from '../../src/checkpoints/domain/BlobStore.ts'
@@ -63,7 +63,9 @@ describe('CheckpointService round-trip (content-addressed layout)', () => {
       expect(created!.checkpointId).toMatch(/^cp_[0-9a-f]{32}$/)
       expect(created!.type).toBe('full')
       expect(created!.fileCount).toBe(2) // a.txt + sub/b.ts
-      expect(created!.excludedCount).toBeGreaterThanOrEqual(3) // node_modules/.git/logs
+      // 排除面精确断言：node_modules + .git + logs/app.log 恰好 3 条排除
+      // （目录被忽略时整棵子树不遍历，只计目录本身 1 条）
+      expect(created!.excludedCount).toBe(3)
       expect(created!.sizeBytes).toBeGreaterThan(0)
 
       // V2 §7.6 布局：<checkpoints>/<wsId>/{blobs,manifests,staging,quarantine}
@@ -235,10 +237,12 @@ describe('CheckpointService restore gate (preview -> token -> restore)', () => {
       expect(preview1.previewToken).toBeTruthy()
       expect(preview1.baselineDigest).toMatch(/^[a-f0-9]{64}$/)
 
-      // 无 token 拒绝
+      // 无 token 拒绝：结构化失败 + 稳定错误前缀（F-10：错误码/结构化字段优先，文案仅作补充）
       const noToken = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, '')
       expect(noToken.success).toBe(false)
-      expect(noToken.error).toContain('previewToken')
+      expect(noToken.restored).toBe(0)
+      expect(noToken.error).toMatch(/^Restore denied:/)
+      expect(noToken.error).toContain('previewToken') // 补充：指明缺失的字段
 
       // 错 token 拒绝
       const wrongToken = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, 'x'.repeat(32))
@@ -256,7 +260,7 @@ describe('CheckpointService restore gate (preview -> token -> restore)', () => {
       // token 一次性：成功恢复后作废
       const replay = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview1.previewToken!)
       expect(replay.success).toBe(false)
-      expect(replay.error).toContain('previewToken')
+      expect(replay.error).toMatch(/^Restore denied:/)
     } finally {
       service.dispose()
       await cleanup(workspaceDir)
@@ -281,7 +285,7 @@ describe('CheckpointService restore gate (preview -> token -> restore)', () => {
       await writeFile(workspaceDir, 'a.txt', 'changed after preview')
       const denied = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
       expect(denied.success).toBe(false)
-      expect(denied.error).toContain('preview')
+      expect(denied.error).toMatch(/^Restore denied:/)
       // 工作区未被改写
       expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('changed after preview')
 
@@ -729,6 +733,140 @@ describe('CheckpointService restore writes via DSH fs (P0-08)', () => {
     } finally {
       await fiber.dispose()
       await cleanup(workspaceDir, dataRoot)
+    }
+  })
+})
+
+describe('CheckpointService restore protection point (PLAN_V2 §7.6)', () => {
+  test('restore creates a recoverable protection point by default and restore still succeeds', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      await writeFile(workspaceDir, 'a.txt', 'changed after snapshot')
+
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('snapshot')
+
+      // 保护点：恢复前自动创建的新 checkpoint（最新一条；描述在 domain 记录中）
+      const records = await service.listCheckpoints(workspaceDir)
+      expect(records.total).toBe(2)
+      const protection = records.items[0]!
+      expect(protection.id).not.toBe(created!.checkpointId)
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8'))
+      const protectionRecord = recordsRaw.find((r: { id: string }) => r.id === protection.id) as { description?: string }
+      expect(protectionRecord.description).toContain('恢复前自动保护点')
+
+      // 保护点可恢复：恢复它 = 回到恢复前状态（a.txt = changed after snapshot）
+      const preview2 = await service.previewRestore(workspaceDir, protection.id)
+      expect(preview2.preview.success).toBe(true)
+      const restored2 = await service.restoreCheckpoint(workspaceDir, protection.id, preview2.previewToken!)
+      expect(restored2.success).toBe(true)
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('changed after snapshot')
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+
+  test('restoreProtectionPoint=false skips the automatic protection point', async () => {
+    const { workspaceDir, service } = await makeEnv({ restoreProtectionPoint: false })
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      await writeFile(workspaceDir, 'a.txt', 'changed')
+
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      // 未新增保护点：记录数不变
+      const records = await service.listCheckpoints(workspaceDir)
+      expect(records.total).toBe(1)
+      expect(records.items[0]!.id).toBe(created!.checkpointId)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+
+  test('protection point creation failure does not block restore (warn + continue)', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      await writeFile(workspaceDir, 'a.txt', 'changed')
+
+      // 注入：恢复前保护点创建失败（executeBackup 返回 null = 失败）——恢复必须继续
+      const spy = vi
+        .spyOn(
+          service as unknown as { executeBackup: (...args: never[]) => Promise<CreateCheckpointResult | null> },
+          'executeBackup',
+        )
+        .mockResolvedValue(null)
+
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('snapshot')
+      spy.mockRestore()
+
+      // 保护点创建失败 → 未新增记录
+      const records = await service.listCheckpoints(workspaceDir)
+      expect(records.total).toBe(1)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService stat-level hash reuse (CP-HASH-REUSE)', () => {
+  test('unchanged files are not re-hashed when size+mtime are unchanged; changed files are re-hashed', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'v1')
+      await writeFile(workspaceDir, 'b.txt', 'keep')
+      const first = await service.createCheckpoint(workspaceDir)
+      expect(first).not.toBeNull()
+
+      // 记录持久化 fileStats（含 mode），供下一次快照 stat 级复用
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8'))
+      const firstRecord = recordsRaw[0] as { fileStats?: Record<string, { size?: number; mtimeNs?: string; mode?: number }> }
+      expect(firstRecord.fileStats).toBeTruthy()
+      const wsId = service.conversationIdFor(workspaceDir)
+      expect(firstRecord.fileStats![`${wsId}/a.txt`]).toMatchObject({ size: 2 })
+      expect(typeof firstRecord.fileStats![`${wsId}/b.txt`]!.mode).toBe('number')
+
+      // 只改 a.txt：b.txt 应复用哈希（不重新读盘哈希），a.txt 重算
+      await writeFile(workspaceDir, 'a.txt', 'v2')
+      const hashing = vi.mocked(fileHashing.hashFileStreaming)
+      hashing.mockClear()
+      const second = await service.createCheckpoint(workspaceDir)
+      expect(second).not.toBeNull()
+      expect(second!.type).toBe('incremental')
+
+      const bPath = path.join(workspaceDir, 'b.txt')
+      const aPath = path.join(workspaceDir, 'a.txt')
+      expect(hashing.mock.calls.some(call => call[0] === bPath)).toBe(false) // 未变化 → 未重哈希
+      expect(hashing.mock.calls.some(call => call[0] === aPath)).toBe(true) // 变化 → 重哈希
+
+      // 复用结果正确：b.txt hash 与第一份一致；a.txt hash 变化；changes 只含 a.txt
+      const wsDir = path.join(service.checkpointsDir, wsId)
+      const m1 = JSON.parse(await fs.readFile(path.join(wsDir, 'manifests', `${first!.checkpointId}.json`), 'utf-8'))
+      const m2 = JSON.parse(await fs.readFile(path.join(wsDir, 'manifests', `${second!.checkpointId}.json`), 'utf-8'))
+      expect(m2.files[`${wsId}/b.txt`].hash).toBe(m1.files[`${wsId}/b.txt`].hash)
+      expect(m2.files[`${wsId}/a.txt`].hash).not.toBe(m1.files[`${wsId}/a.txt`].hash)
+      expect(m2.changes).toHaveLength(1)
+      expect(m2.changes[0]).toMatchObject({ path: `${wsId}/a.txt`, type: 'modified' })
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
     }
   })
 })

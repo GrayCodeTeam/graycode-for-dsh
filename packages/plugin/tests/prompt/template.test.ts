@@ -1,6 +1,9 @@
 /**
  * template.ts 测试：{{$MODULE}} 占位符渲染（golden 字节级断言）、占位符模块
  * 目录、模板归一化。
+ *
+ * B3-P2：渲染产物必须不含 DSH 装配器会拒绝的 {{...}} 组（大写/带 $ 的引用
+ * 全部替换为确定性说明文本；仅保留 {{lowercase_name}} 形态的 DSH 变量）。
  */
 import { describe, expect, test } from 'vitest'
 import {
@@ -10,6 +13,7 @@ import {
   normalizeTemplate,
   placeholderModuleStatus,
   renderPromptTemplate,
+  unavailablePlaceholderText,
 } from '../../src/prompt/domain/template.ts'
 
 describe('renderPromptTemplate golden', () => {
@@ -27,10 +31,17 @@ describe('renderPromptTemplate golden', () => {
     expect(renderPromptTemplate('a {{$EnvIrOnMeNt}} b', values)).toBe('a x b')
   })
 
-  test('未知占位符保留原样（不报错）', () => {
-    const template = 'keep {{$FUTURE_MODULE}} and {{$UNKNOWN_123}}'
-    expect(renderPromptTemplate(template, {})).toBe(template)
-    expect(renderPromptTemplate('x {{future_module}} y', {})).toBe('x {{future_module}} y')
+  test('未知小写引用（DSH 变量形态）原样保留；大写/带 $ 的未知引用被确定性中和', () => {
+    // {{graycode_prompt_mode}} 是 DSH 注册变量：渲染器不得触碰
+    expect(renderPromptTemplate('a {{graycode_prompt_mode}} b', {})).toBe('a {{graycode_prompt_mode}} b')
+    // 空白变体归一化为规范形态（仍由 DSH 解析）
+    expect(renderPromptTemplate('a {{ future_module }} b', {})).toBe('a {{future_module}} b')
+    // 大写/带 $ 的未知模块若保留会触发 DSH malformed 错误 → 替换为说明文本
+    const rendered = renderPromptTemplate('keep {{$FUTURE_MODULE}} and {{$UNKNOWN_123}}', {})
+    expect(rendered).toBe(
+      `keep ${unavailablePlaceholderText('$FUTURE_MODULE')} and ${unavailablePlaceholderText('$UNKNOWN_123')}`,
+    )
+    expect(rendered).not.toMatch(/\{\{/)
   })
 
   test('同一占位符多次出现全部替换', () => {
@@ -44,38 +55,49 @@ describe('renderPromptTemplate golden', () => {
 })
 
 describe('deprecated 编辑器专属模块', () => {
-  test('OPEN_TABS/ACTIVE_EDITOR/DIAGNOSTICS/MCP_TOOLS/CONTEXT_BADGE_FORMAT 被确定性说明文本替换', () => {
-    const template = '{{$OPEN_TABS}} {{$ACTIVE_EDITOR}} {{$DIAGNOSTICS}} {{$MCP_TOOLS}} {{$CONTEXT_BADGE_FORMAT}}'
+  test('OPEN_TABS/ACTIVE_EDITOR/DIAGNOSTICS/MCP_TOOLS/CONTEXT_BADGE_FORMAT/PINNED_FILES 被确定性说明文本替换', () => {
+    const modules = [
+      'OPEN_TABS',
+      'ACTIVE_EDITOR',
+      'DIAGNOSTICS',
+      'MCP_TOOLS',
+      'CONTEXT_BADGE_FORMAT',
+      'PINNED_FILES',
+    ]
+    const template = modules.map(module => `{{$${module}}}`).join(' ')
     const rendered = renderPromptTemplate(template, {})
-    expect(rendered).toBe(
-      [
-        deprecatedPlaceholderText('{{$OPEN_TABS}}'),
-        deprecatedPlaceholderText('{{$ACTIVE_EDITOR}}'),
-        deprecatedPlaceholderText('{{$DIAGNOSTICS}}'),
-        deprecatedPlaceholderText('{{$MCP_TOOLS}}'),
-        deprecatedPlaceholderText('{{$CONTEXT_BADGE_FORMAT}}'),
-      ].join(' '),
-    )
-    // 输出中唯一的 {{...}} token 就是说明文本内嵌的 5 个原始 token（无裸占位符残留）
-    expect(rendered.match(/\{\{[^}]+\}\}/g)).toEqual([
-      '{{$OPEN_TABS}}',
-      '{{$ACTIVE_EDITOR}}',
-      '{{$DIAGNOSTICS}}',
-      '{{$MCP_TOOLS}}',
-      '{{$CONTEXT_BADGE_FORMAT}}',
-    ])
+    expect(rendered).toBe(modules.map(deprecatedPlaceholderText).join(' '))
+    // B3-P2：说明文本不含 {{...}}，渲染产物零残留（DSH 装配器可安全接受）
+    expect(rendered).not.toMatch(/\{\{/)
   })
 
-  test('deprecated 替换文本字节稳定且内嵌原始 token', () => {
-    const text = deprecatedPlaceholderText('{{$OPEN_TABS}}')
-    expect(text).toBe('[deprecated placeholder {{$OPEN_TABS}}: editor-specific module with no DSH host equivalent; remove it from the template]')
+  test('deprecated 替换文本字节稳定且不含原始 {{...}} token（B3-P2 根因）', () => {
+    const text = deprecatedPlaceholderText('OPEN_TABS')
+    expect(text).toBe('[deprecated placeholder OPEN_TABS: editor-specific module with no DSH host equivalent; remove it from the template]')
+    expect(text).not.toMatch(/\{\{/)
     // 大小写变体也命中同一 canonical 模块
-    expect(renderPromptTemplate('{{$open_tabs}}', {})).toBe(deprecatedPlaceholderText('{{$open_tabs}}'))
+    expect(renderPromptTemplate('{{$open_tabs}}', {})).toBe(deprecatedPlaceholderText('OPEN_TABS'))
   })
 
   test('deprecated 优先于 values：即使提供值也不替换', () => {
     expect(renderPromptTemplate('{{$OPEN_TABS}}', { OPEN_TABS: 'supplied' })).toBe(
-      deprecatedPlaceholderText('{{$OPEN_TABS}}'),
+      deprecatedPlaceholderText('OPEN_TABS'),
+    )
+  })
+})
+
+describe('resolved 模块无值时（B3-P2：不再原样保留）', () => {
+  test('TOOLS/MEMORY/WORKSPACE_FILES/TODO_LIST 无值 → 确定性 unavailable 说明文本', () => {
+    const modules = ['TOOLS', 'MEMORY', 'WORKSPACE_FILES', 'TODO_LIST']
+    const rendered = renderPromptTemplate(modules.map(module => `{{$${module}}}`).join('|'), {})
+    expect(rendered).toBe(modules.map(unavailablePlaceholderText).join('|'))
+    expect(rendered).not.toMatch(/\{\{/)
+  })
+
+  test('提供值后仍按值替换；说明文本字节稳定', () => {
+    expect(renderPromptTemplate('{{$TOOLS}}', { TOOLS: 'hammer' })).toBe('hammer')
+    expect(unavailablePlaceholderText('TOOLS')).toBe(
+      '[placeholder TOOLS: not available in DSH; remove it from the template]',
     )
   })
 })
@@ -83,10 +105,17 @@ describe('deprecated 编辑器专属模块', () => {
 describe('placeholder 模块目录', () => {
   test('目录含 DSH 有宿主语义的保留模块与编辑器专属 DEPRECATED 模块', () => {
     const byName = new Map(PLACEHOLDER_MODULES.map(info => [info.module, info.status]))
-    for (const module of ['ENVIRONMENT', 'WORKSPACE_FILES', 'PINNED_FILES', 'TOOLS', 'TODO_LIST', 'MEMORY']) {
+    for (const module of ['ENVIRONMENT', 'WORKSPACE_FILES', 'TOOLS', 'TODO_LIST', 'MEMORY']) {
       expect(byName.get(module)).toBe('resolved')
     }
-    for (const module of ['OPEN_TABS', 'ACTIVE_EDITOR', 'DIAGNOSTICS', 'MCP_TOOLS', 'CONTEXT_BADGE_FORMAT']) {
+    for (const module of [
+      'PINNED_FILES',
+      'OPEN_TABS',
+      'ACTIVE_EDITOR',
+      'DIAGNOSTICS',
+      'MCP_TOOLS',
+      'CONTEXT_BADGE_FORMAT',
+    ]) {
       expect(byName.get(module)).toBe('deprecated')
     }
   })
@@ -94,6 +123,7 @@ describe('placeholder 模块目录', () => {
   test('placeholderModuleStatus 大小写/空白不敏感；未知模块返回 undefined', () => {
     expect(placeholderModuleStatus(' environment ')).toBe('resolved')
     expect(placeholderModuleStatus('Open_Tabs')).toBe('deprecated')
+    expect(placeholderModuleStatus('Pinned_Files')).toBe('deprecated')
     expect(placeholderModuleStatus('NOT_A_MODULE')).toBeUndefined()
   })
 })

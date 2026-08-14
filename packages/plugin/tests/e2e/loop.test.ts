@@ -73,6 +73,24 @@ function headerTools(events: readonly SessionEvent[]): string[] {
   return (header?.data.header.tools ?? []).map(tool => tool.name)
 }
 
+/**
+ * 确定性等待：轮询会话事件直到谓词满足（F-12：替代固定 setTimeout 时间依赖）。
+ * 超时抛错给出可诊断信息，避免测试静默挂起。
+ */
+async function waitForEvent(
+  events: () => readonly SessionEvent[],
+  predicate: (event: SessionEvent) => boolean,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (events().some(predicate)) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`)
+}
+
 describe('mock-LLM loop E2E', () => {
   it('S1 发消息→文本回复；真实请求头内已组装 Gray persona', async () => {
     let harness: Harness | undefined
@@ -224,17 +242,25 @@ describe('mock-LLM loop E2E', () => {
   it('S5 取消：脚本中途 pause，cancel({kind:"user"}) 后 turn/end reason=aborted', async () => {
     let harness: Harness | undefined
     try {
-      harness = await makeHarness([[{ type: 'text', text: 'part one' }, { type: 'pause', ms: 30_000 }]])
+      // pause 5s（原 30s）：轮询到首段文本即取消；若 cancel 未被 honor，5s 内失败而非挂 30s
+      harness = await makeHarness([[{ type: 'text', text: 'part one' }, { type: 'pause', ms: 5_000 }]])
       const { agent } = await harness.createAgent('s5-session')
-      // 不 await whenIdle（脚本 pause 30s，会一直挂着）；发消息后等驱动进入
-      // running 再取消。
+      // 不 await whenIdle（脚本 pause，会一直挂着）；发消息后确定性等待驱动进入
+      // running（assistant/chunk 在 pause 步骤之前被 yield，证明驱动已开始流式输出）。
       agent.followup(
         createUserMessage({
           content: [{ type: 'text', text: 'go' }],
           source: { kind: 'user' },
         }),
       )
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await waitForEvent(
+        () => harness!.eventsOf(agent),
+        event =>
+          event.type === 'assistant/chunk' &&
+          event.data.chunk.type === 'text-delta' &&
+          event.data.chunk.text === 'part one',
+        "assistant/chunk 'part one'（驱动进入 running）",
+      )
       agent.cancel({ kind: 'user' })
       await agent.whenIdle()
 
