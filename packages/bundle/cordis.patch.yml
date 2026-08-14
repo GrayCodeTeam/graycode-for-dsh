@@ -5,3 +5,5 @@
 - insert:
     - id: graycode
       name: '@graycode/dsh-plugin'
+    - id: graycode-client
+      name: '@graycode/dsh-client'
