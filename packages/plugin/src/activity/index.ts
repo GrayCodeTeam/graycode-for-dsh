@@ -18,6 +18,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ActivityService } from './service.ts'
 import { createActivityTools } from './tools.ts'
+import { createActivityRemoteHandlers } from './adapters/dsh/remote.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 import { ACTIVITY_HEARTBEAT_MS } from './domain/types.ts'
 
@@ -72,6 +73,11 @@ export function apply(ctx: Context, config: Config): void {
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createActivityTools(service))
 
+  // C6：向根装配的 ctx.grayRemote 注册 activity/stats 端点（前端面板数据源）；
+  // 独立挂载（无 grayRemote）时静默跳过。注销函数挂进本 fiber：HMR 重载时
+  // 旧端点先注销，新实例同 key 可重新注册。
+  const disposeRemote = ctx.grayRemote?.register(createActivityRemoteHandlers(service))
+
   const logger = ctx.logger
   const warn = (error: unknown): void => {
     logger.warn(`graycode-activity: sample append failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -99,6 +105,7 @@ export function apply(ctx: Context, config: Config): void {
 
   // 订阅随本 fiber dispose 卸载；停用时立即落盘尽量不丢数据。
   ctx.effect(() => () => {
+    disposeRemote?.()
     registrar.dispose()
     detachInbox()
     detachPreStep()

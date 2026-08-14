@@ -13,6 +13,7 @@ import {
 } from './types.ts'
 import { StagedDiffError, StagedDiffErrorCode } from '../stagedDiff/domain/types.ts'
 import { BranchError, BranchErrorCode } from '../branches/domain/types.ts'
+import { ActivityError, ActivityErrorCode } from '../activity/domain/types.ts'
 
 /** 领域错误 → 稳定机器码的单点映射表（当前：stagedDiff / branches；其余域直接抛 GrayRemoteError）。 */
 const STAGED_DIFF_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
@@ -42,6 +43,13 @@ const BRANCH_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
   [BranchErrorCode.FORK_REJECTED]: GRAY_REMOTE_ERROR_CODES.CONFLICT,
   [BranchErrorCode.STORAGE_CORRUPT]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
   [BranchErrorCode.STORAGE_WRITE_FAILED]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
+}
+
+/** activity 域错误码 → 稳定码。 */
+const ACTIVITY_CODE_MAP: Readonly<Record<string, GrayRemoteErrorCode>> = {
+  [ActivityErrorCode.INVALID_INPUT]: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+  [ActivityErrorCode.STORE_READ_FAILED]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
+  [ActivityErrorCode.STORE_WRITE_FAILED]: GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
 }
 
 /** 带稳定机器码的 Remote 业务错误。 */
@@ -138,6 +146,14 @@ export function toGrayRemoteFailure(err: unknown, signal?: AbortSignal): GrayRem
         causeCode: err.code,
         ...(err.authoritativeGroup ? { authoritativeGroup: err.authoritativeGroup } : {}),
       },
+    }
+  }
+  if (err instanceof ActivityError) {
+    const code = ACTIVITY_CODE_MAP[err.code] ?? GRAY_REMOTE_ERROR_CODES.INTERNAL
+    return {
+      code,
+      message: err.message,
+      details: { causeCode: err.code },
     }
   }
   return {
