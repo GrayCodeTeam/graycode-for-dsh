@@ -69,6 +69,8 @@ describe('MemoryService 作用域隔离', () => {
     const { service, dataRoot } = makeService()
     try {
       // 同一目录不同拼写（Windows 大小写/反斜杠）→ 同一 scope
+      expect(cwdToScopeKey('X:/synthetic/project')).toBe('x:/synthetic/project')
+      expect(cwdToScopeKey('x:\\SYNTHETIC\\project')).toBe('x:/synthetic/project')
       const a = await service.getForTool('X:/synthetic/project', undefined)
       const b = await service.getForTool('x:\\SYNTHETIC\\project', undefined)
       expect(a).toBe(b)

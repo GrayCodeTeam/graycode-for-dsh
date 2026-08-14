@@ -37,6 +37,7 @@ import {
   buildConversationCheckpointLists,
   buildConversationCwdIssues,
   buildScopeMap,
+  deriveWorkspaceUriCwd,
   parseScopeOverrideMap,
   resolveScopeOverride,
   type ScopeOverrideMap,
@@ -171,6 +172,9 @@ describe('buildScopeMap / 报告事实派生', () => {
   })
 
   test('buildConversationCwdIssues：file:// 可派生 → 不在清单；远程/损坏 URI → 入清单', () => {
+    expect(deriveWorkspaceUriCwd('file:///c%3A/Users/demo/proj')).toBe('c:/Users/demo/proj')
+    expect(deriveWorkspaceUriCwd('file:///home/demo/proj')).toBe('/home/demo/proj')
+
     const objects: PlannedObject[] = [
       {
         domain: 'conversations',

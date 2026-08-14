@@ -125,6 +125,9 @@ describe('模型渠道默认输出路径', () => {
     // 注意：不选 'a:b.png'——Windows path.basename 会把 'a:' 当 drive 剥离
     const out = buildBackgroundRemovedOutputPath(root, 'a|b.png', 3)
     expect(out).toBe(path.join(root, 'media-output', 'a_b-bg-removed-3.png'))
+    expect(buildBackgroundRemovedOutputPath(root, 'a/b\\c:d.png', 4)).toBe(
+      path.join(root, 'media-output', 'c_d-bg-removed-4.png'),
+    )
   })
 })
 

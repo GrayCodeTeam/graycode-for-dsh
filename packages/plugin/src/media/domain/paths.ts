@@ -74,7 +74,9 @@ export function buildDefaultOutputPath(
   ts: number,
   n = 0,
 ): string {
-  const inputBase = path.basename(inputPath)
+  // win32.basename recognizes both slash styles, keeping foreign-host paths
+  // deterministic when they are processed by Linux or macOS CI runners.
+  const inputBase = path.win32.basename(inputPath)
   const dotIndex = inputBase.lastIndexOf('.')
   const stem = dotIndex > 0 ? inputBase.slice(0, dotIndex) : inputBase
   // 清理不允许出现在文件名里的字符（保留常见多语言字符，仅替换分隔符/控制字符）
@@ -98,7 +100,7 @@ export function buildGeneratedOutputPath(cwd: string, ext: string, ts: number, n
  * buildDefaultOutputPath 同规则清理）。
  */
 export function buildBackgroundRemovedOutputPath(cwd: string, inputPath: string, ts: number): string {
-  const inputBase = path.basename(inputPath)
+  const inputBase = path.win32.basename(inputPath)
   const dotIndex = inputBase.lastIndexOf('.')
   const stem = dotIndex > 0 ? inputBase.slice(0, dotIndex) : inputBase
   const safeStem = stem.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_') || 'image'

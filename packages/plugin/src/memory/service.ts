@@ -33,10 +33,14 @@ export type MemoryScope = 'global' | 'workspace'
 
 const WIN32 = process.platform === 'win32'
 
-/** Normalize a workspace key: forward slashes; case-folded on win32. */
+/** Normalize a workspace key: forward slashes; case-fold Windows-style paths. */
 export function normalizeWorkspaceKey(fsPath: string): string {
   let p = fsPath.replace(/\\/g, '/')
-  if (WIN32) p = p.toLowerCase()
+  // A Windows path remains case-insensitive when it is migrated or replayed on
+  // another host. Detect its syntax instead of relying only on this process OS.
+  if (WIN32 || /^[A-Za-z]:\//.test(p) || p.startsWith('//')) {
+    p = p.toLowerCase()
+  }
   return p
 }
 

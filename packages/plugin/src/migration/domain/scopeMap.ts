@@ -101,9 +101,9 @@ export type ResolvedScopeOverride =
 
 /**
  * 从 legacy workspaceUri（file:// 形式）派生 DSH header.cwd（绝对路径）。
- * 仅在派生结果对当前宿主是绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
+ * 仅在派生结果是 POSIX 或 Windows 绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
  * undefined（调用方省略 cwd，避免单个坏 URI 使整个会话创建失败）。
- * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（Windows 宿主）。
+ * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（与当前宿主无关）。
  */
 export function deriveWorkspaceUriCwd(uri: string | undefined): string | undefined {
   if (!uri || !uri.startsWith('file://')) return undefined
@@ -117,7 +117,7 @@ export function deriveWorkspaceUriCwd(uri: string | undefined): string | undefin
   // file:///c%3A/... → /c:/... → c:/...（去掉盘符路径的前导斜杠）
   const drive = decoded.match(/^\/[A-Za-z]:\//)
   const candidate = drive ? decoded.slice(1) : decoded
-  return path.isAbsolute(candidate) ? candidate : undefined
+  return isAbsoluteScopeOverridePath(candidate) ? candidate : undefined
 }
 
 /**
