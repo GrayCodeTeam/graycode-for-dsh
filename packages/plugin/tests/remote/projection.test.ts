@@ -69,8 +69,7 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
     const a = new ProjectionJournal({ journalPath })
     await a.record('k1', 1)
     await a.record('k2', 2)
-    // 等待串行写链完成
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await a.flush()
 
     const b = new ProjectionJournal({ journalPath })
     const replay = await b.replay()
@@ -79,7 +78,7 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
 
     // 续写 seq 递增（新实例 seq 从 0 起但文件 seq 更大 → 合并取最大）
     await b.record('k3', 3)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await b.flush()
     const c = new ProjectionJournal({ journalPath })
     const replay2 = await c.replay()
     expect(replay2.map(e => e.kind)).toEqual(['k1', 'k2', 'k3'])
@@ -102,7 +101,7 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
     for (let i = 1; i <= 12; i++) {
       await journal.record(`k-${i}`, i)
     }
-    await new Promise(resolve => setTimeout(resolve, 30))
+    await journal.flush()
     const replay = await journal.replay()
     // 12 行 → 保留最后 4 行（maxFileLines/2），但内存环还有 12 条 → 合并后应含全部 12
     expect(replay).toHaveLength(12)
@@ -125,7 +124,7 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
     for (let i = 13; i <= 15; i++) {
       await journal.record(`k-${i}`, i)
     }
-    await new Promise(resolve => setTimeout(resolve, 30))
+    await journal.flush()
     const content = await fs.readFile(journalPath, 'utf8')
     // 滚动后保留的每条非空行必须能独立 JSON.parse —— 若无尾随换行，滚动后的
     // 最后一条记录会与新追加条目合并成一条无法解析的脏行（回归：k-9 之后丢行）。
@@ -146,7 +145,6 @@ describe('ProjectionJournal（sidecar 回放通道）', () => {
     const journalPath = path.join(dir, 'projections.jsonl')
     const journal = new ProjectionJournal({ journalPath })
     await journal.record('k1', 1)
-    await new Promise(resolve => setTimeout(resolve, 20))
     await journal.clear()
     expect(await journal.replay()).toHaveLength(0)
     await expect(fs.stat(journalPath)).rejects.toThrow()

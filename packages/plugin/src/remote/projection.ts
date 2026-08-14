@@ -94,11 +94,18 @@ export class ProjectionJournal {
     return merged.slice(-max)
   }
 
+  /** 等待当前已排队的 sidecar 写入完成（生命周期收尾与确定性测试使用）。 */
+  async flush(): Promise<void> {
+    await this.writeChain.catch(() => undefined)
+  }
+
   /** 清空（测试用；同时删除 sidecar）。 */
   async clear(): Promise<void> {
     this.entries = []
     this.listeners.clear()
     this.cleared = true
+    // 等待已进入 appendToFile 的任务退出，避免 rm 后迟到写入重新创建 sidecar。
+    await this.flush()
     if (this.journalPath) {
       try {
         await fs.rm(this.journalPath, { force: true })
@@ -139,11 +146,11 @@ export class ProjectionJournal {
     if (!this.journalPath) return
     try {
       const content = await fs.readFile(this.journalPath, 'utf8')
-      const lines = content.split('\n')
-      // 尾部空行来自最后一个换行
-      const count = lines.at(-1) === '' ? lines.length - 1 : lines.length
-      if (count <= this.maxFileLines) return
-      const keep = lines.slice(-Math.floor(this.maxFileLines / 2))
+      // 先剔除 appendFile 产生的尾部空行，再取后半；若直接对 split
+      // 结果 slice，尾空行会占掉一个保留名额（max=8 实际只保留 3 行）。
+      const lines = content.split('\n').filter(line => line.length > 0)
+      if (lines.length <= this.maxFileLines) return
+      const keep = lines.slice(-Math.max(1, Math.floor(this.maxFileLines / 2)))
       await fs.writeFile(this.journalPath, keep.join('\n') + '\n', 'utf8')
     } catch {
       // 滚动失败保持现状
