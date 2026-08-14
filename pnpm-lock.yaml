@@ -20,6 +20,9 @@ importers:
 
   packages/bundle:
     dependencies:
+      '@graycode/dsh-client':
+        specifier: workspace:^
+        version: link:../client
       '@graycode/dsh-plugin':
         specifier: workspace:^
         version: link:../plugin
