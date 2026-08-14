@@ -177,10 +177,19 @@ if ($missing.Count -gt 0) {
 # 2. Per-tarball inspection
 # ---------------------------------------------------------------------------
 # Blacklist patterns, applied to normalized POSIX entry paths (case-insensitive).
+# The generic `*secret*` name rule was narrowed to key-material file shapes:
+# the client package ships legitimate source modules named secrets.ts /
+# SecretItemRow.tsx (settings contribution UI that renders credential refs
+# without plaintext) — matching any file whose NAME contains "secret" would
+# false-positive on them. The patterns below still catch every plausible
+# secret carrier: .env variants, private key extensions, secrets directories,
+# data files whose basename starts with "secret" / "secrets".
 $blacklist = @(
   '(^|/)\.env($|[.])',             # .env, .env.local, .env.production etc.
   '\.(pem|key|p12|pfx)$',          # private key material
-  '(^|/)[^/]*secret[^/]*$',        # anything with 'secret' in the file name
+  '(^|/)\.?secrets?($|/)',         # secrets/ or .secrets/ directories (and a bare secrets file)
+  '(^|/)[^/]*\.secret($|\.)',      # *.secret, *.secret.json etc.
+  '(^|/)[^/]*secrets?\.(json|txt|yaml|yml|toml|ini|cfg|conf|env|local|prod|dev|backup|old|tar|gz|zip)$',
   '(^|/)node_modules(/|$)',        # node_modules residue
   '(^|/)\.graycode(/|$)',          # .graycode runtime data
   '(^|/)\.npmrc$',                 # npmrc may carry registry tokens
