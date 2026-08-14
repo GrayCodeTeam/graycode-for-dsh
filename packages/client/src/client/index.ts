@@ -44,6 +44,11 @@ import {
   graycodeSettingsContributionDictionaries,
   graycodeSettingsContributionJaPlaceholder,
 } from './settingsContribution/locales.ts'
+import {
+  GRAYCODE_ACTIVITY_HEATMAP_NS,
+  graycodeActivityHeatmapDictionaries,
+  graycodeActivityHeatmapJaPlaceholder,
+} from './activityHeatmap/locales.ts'
 
 // Pluggable renderer surface for `kind: 'graycode.workflow'` chat nodes.
 // DSH rc.6 has no conversation-node renderer mount available to this package
@@ -73,6 +78,8 @@ export { StagedDiffBatchList } from './stagedDiffCard/StagedDiffBatchList.tsx'
 export type { StagedDiffBatchListProps } from './stagedDiffCard/StagedDiffBatchList.tsx'
 export { SettingsContributionPanel } from './settingsContribution/SettingsContributionPanel.tsx'
 export type { SettingsContributionPanelProps } from './settingsContribution/SettingsContributionPanel.tsx'
+export { ActivityHeatmapPanel } from './activityHeatmap/ActivityHeatmapPanel.tsx'
+export type { ActivityHeatmapPanelProps } from './activityHeatmap/ActivityHeatmapPanel.tsx'
 
 /** Required client services (cordis fiber inject). */
 export const inject = ['slots', 'locale', 'conversationEvents']
@@ -124,6 +131,8 @@ export function apply(ctx: ClientContext): void {
   ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, 'ja', graycodeStagedDiffCardJaPlaceholder)
   ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, graycodeSettingsContributionDictionaries)
   ctx.locale.register(GRAYCODE_SETTINGS_CONTRIBUTION_NS, 'ja', graycodeSettingsContributionJaPlaceholder)
+  ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, graycodeActivityHeatmapDictionaries)
+  ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
 
   ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
   ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
