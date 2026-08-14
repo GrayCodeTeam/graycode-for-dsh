@@ -7,6 +7,8 @@ import * as checkpoints from './checkpoints/index.ts'
 import * as branches from './branches/index.ts'
 import * as persona from './persona.ts'
 import * as prompt from './prompt/index.ts'
+import * as migration from './migration/index.ts'
+import * as stagedDiff from './stagedDiff/adapters/dsh/index.ts'
 
 export const name = 'graycode'
 
@@ -24,6 +26,10 @@ export interface Config {
   branches: branches.Config
   persona: persona.Config
   prompt: prompt.Config
+  /** Legacy data migration (Phase 5): scan/dry-run/apply of Gray 1.5.4 data dirs. */
+  migration: migration.Config
+  /** Staged file diff review (ADR-0003): deferred accept/reject of workspace writes. */
+  stagedDiff: stagedDiff.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -34,6 +40,8 @@ export const Config: z<Config> = z.object({
   branches: branches.Config,
   persona: persona.Config,
   prompt: prompt.Config,
+  migration: migration.Config,
+  stagedDiff: stagedDiff.Config,
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -44,4 +52,6 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(branches, { ...config.branches, dataRoot })
   ctx.plugin(persona, config.persona)
   ctx.plugin(prompt, { ...config.prompt, dataRoot })
+  ctx.plugin(migration, { ...config.migration, dataRoot })
+  ctx.plugin(stagedDiff, { ...config.stagedDiff, dataRoot })
 }
