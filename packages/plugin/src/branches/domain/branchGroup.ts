@@ -7,11 +7,13 @@
  */
 import {
     BRANCH_GROUP_STORE_VERSION,
+    BRANCH_RETENTION_MS,
     BranchCandidate,
     BranchCandidateKind,
     BranchError,
     BranchErrorCode,
     GrayBranchGroup,
+    MAX_CANDIDATES_PER_PARENT,
 } from './types.ts';
 
 /** 新建分支组：root 会话即第一个候选（kind='root'） */
@@ -68,6 +70,27 @@ export function assertRevision(
     }
 }
 
+/**
+ * TREE-02（决策 4）：同一父会话下非删除候选数量上限。
+ * 超限拒绝创建（不自动删除）；root 候选无 parentSessionId，不适用。
+ */
+export function assertCandidateLimit(
+    group: GrayBranchGroup,
+    parentSessionId: string | undefined
+): void {
+    if (parentSessionId === undefined) return;
+    const live = group.candidates.filter(
+        c => c.parentSessionId === parentSessionId && c.deletedAt === undefined
+    ).length;
+    if (live >= MAX_CANDIDATES_PER_PARENT) {
+        throw new BranchError(
+            `parent session "${parentSessionId}" already has ${MAX_CANDIDATES_PER_PARENT} live candidates; ` +
+                'delete some before forking again',
+            BranchErrorCode.CANDIDATE_LIMIT_EXCEEDED
+        );
+    }
+}
+
 /** 追加候选（kind 任意）。返回新组。 */
 export function addCandidate(
     group: GrayBranchGroup,
@@ -80,6 +103,8 @@ export function addCandidate(
         workspaceSnapshotId?: string;
         expectedRevision?: number;
         createdAt?: number;
+        /** 追加后立即激活新候选（reroll/edit_retry 的旧版 updateTail:true 语义；只切会话指针） */
+        activate?: boolean;
     }
 ): GrayBranchGroup {
     assertRevision(group, input.expectedRevision);
@@ -89,6 +114,7 @@ export function addCandidate(
             BranchErrorCode.SESSION_ALREADY_IN_GROUP
         );
     }
+    assertCandidateLimit(group, input.parentSessionId);
     const candidate: BranchCandidate = {
         sessionId: input.sessionId,
         parentSessionId: input.parentSessionId,
@@ -101,6 +127,7 @@ export function addCandidate(
     return {
         ...group,
         candidates: [...group.candidates, candidate],
+        activeSessionId: input.activate ? input.sessionId : group.activeSessionId,
         revision: group.revision + 1,
     };
 }
@@ -191,6 +218,31 @@ export function renameCandidate(
         candidates: group.candidates.map(c =>
             c.sessionId === sessionId ? { ...c, label } : c
         ),
+        revision: group.revision + 1,
+    };
+}
+
+/**
+ * TREE-09：惰性物理清理超过保留期的软删候选（tombstone 移除，dsh Session 本身保留）。
+ * root 候选与激活候选永不清理（防御；激活候选本就不可能处于已删状态）。
+ * 无过期项时返回原对象；否则 revision +1。
+ */
+export function purgeExpiredCandidates(
+    group: GrayBranchGroup,
+    now: number = Date.now()
+): GrayBranchGroup {
+    const cutoff = now - BRANCH_RETENTION_MS;
+    const kept = group.candidates.filter(c => {
+        if (c.deletedAt === undefined) return true;
+        if (c.kind === 'root') return true;
+        if (c.sessionId === group.activeSessionId) return true;
+        // deletedAt >= cutoff：仍在保留期内（未超过 30 天）
+        return c.deletedAt >= cutoff;
+    });
+    if (kept.length === group.candidates.length) return group;
+    return {
+        ...group,
+        candidates: kept,
         revision: group.revision + 1,
     };
 }

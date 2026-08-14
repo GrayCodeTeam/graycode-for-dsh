@@ -7,11 +7,21 @@
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { BranchCoordinatorService } from '../../src/branches/service.ts'
 import type { BranchSessionAdapter } from '../../src/branches/service.ts'
 import { BranchError, BranchErrorCode } from '../../src/branches/domain/types.ts'
 import type { BranchEventView } from '../../src/branches/domain/turnLocator.ts'
+
+// BUG-09 竞态用例需要可控的慢 readFile：默认委托真实实现，测试内用
+// mockImplementationOnce 让单次读取挂起/延迟。
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+  }
+})
 
 const ROOT_SESSION = 'root-session'
 const WS = 'ws-test'
@@ -160,6 +170,52 @@ describe('BranchCoordinatorService initialize', () => {
     await expectRejectCode(service.initialize(), BranchErrorCode.STORAGE_CORRUPT)
     service.dispose()
   })
+
+  it('a concurrent ensureGroup before initialize finishes is not lost to the stale load (BUG-09)', async () => {
+    // 让本次 initialize 的 readFile 挂起（模拟慢盘），放行后以 ENOENT 返回（文件尚不存在）
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const readFileSpy = fs.readFile as unknown as Mock<() => Promise<string>>
+    readFileSpy.mockImplementationOnce(() =>
+      gate.then(() => {
+        const error = new Error('ENOENT: no such file or directory') as NodeJS.ErrnoException
+        error.code = 'ENOENT'
+        throw error
+      }),
+    )
+    const adapter = new FakeBranchSessionAdapter()
+    adapter.addSession(ROOT_SESSION, twoClosedTurns())
+    const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, adapter)
+    try {
+      let initResolved = false
+      const initPromise = service.initialize().then(() => {
+        initResolved = true
+      })
+      let groupResolved = false
+      const groupPromise = service
+        .ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+        .then(group => {
+          groupResolved = true
+          return group
+        })
+      // 门控自验证：readFile 确实被挂起（mock 拦截了 service 的 fs/promises 读取）
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(initResolved).toBe(false)
+      // 初始化未完成前 ensureGroup 不得完成：否则会先落盘、再被 initialize 的旧快照覆盖
+      expect(groupResolved).toBe(false)
+      release()
+      await initPromise
+      const group = await groupPromise
+      expect(group.rootSessionId).toBe(ROOT_SESSION)
+      // 分组既在内存也在 sidecar，未被 initialize 覆盖
+      expect(service.listGroups()).toHaveLength(1)
+      expect(service.listGroups()[0]!.id).toBe(group.id)
+      const store = await sidecarStore(env.dataRoot)
+      expect((store.groups as Array<{ id: string }>).some(g => g.id === group.id)).toBe(true)
+    } finally {
+      service.dispose()
+    }
+  })
 })
 
 describe('BranchCoordinatorService ensureGroup', () => {
@@ -269,6 +325,15 @@ describe('BranchCoordinatorService createBranch', () => {
     // 失败后组未变化
     expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
   })
+
+  it('createBranch (manual fork) does not auto-activate the new candidate (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
+    // 只追加候选，不切激活指针
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(2)
+  })
 })
 
 describe('BranchCoordinatorService reroll', () => {
@@ -334,6 +399,38 @@ describe('BranchCoordinatorService reroll', () => {
     expect(candidate.kind).toBe('reroll')
     expect(env.adapter.sentMessages).toHaveLength(0)
   })
+
+  it('reroll auto-activates the new candidate in memory and in the sidecar (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.activeSessionId).toBe(result.sessionId)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(result.sessionId)
+    // 激活与 sidecar 提交在同一原子写：落盘内容同样指向新候选
+    const store = await sidecarStore(env.dataRoot)
+    const persisted = store.groups[0] as { activeSessionId: string }
+    expect(persisted.activeSessionId).toBe(result.sessionId)
+    // 追加 + 激活共一次 revision 递增（1 → 2）
+    expect(result.revision).toBe(2)
+  })
+
+  it('replays the correct user message when event seqs are not contiguous (S-01)', async () => {
+    // seq 不连续（1/5 缺失）：若按数组下标取事件会取到 undefined 或错误事件
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 2, { source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] }),
+      ev('turn/end', 3, { turn: 1 }),
+      ev('turn/start', 4, { turn: 2 }),
+      ev('user/message', 6, { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }),
+      ev('turn/end', 7, { turn: 2 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+
+    expect(result.messageSent).toBe(true)
+    expect(result.boundary).toBe(3)
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'hello' }])
+  })
 })
 
 describe('BranchCoordinatorService editRetry', () => {
@@ -347,6 +444,16 @@ describe('BranchCoordinatorService editRetry', () => {
     expect(env.adapter.sentMessages).toHaveLength(1)
     expect(env.adapter.sentMessages[0]!.sessionId).toBe(result.sessionId)
     expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'edited hello' }])
+  })
+
+  it('editRetry auto-activates the new candidate (D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const result = await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2, text: 'edited hello' })
+
+    expect(result.activeSessionId).toBe(result.sessionId)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(result.sessionId)
+    const store = await sidecarStore(env.dataRoot)
+    expect((store.groups[0] as { activeSessionId: string }).activeSessionId).toBe(result.sessionId)
   })
 })
 
@@ -471,5 +578,69 @@ describe('BranchCoordinatorService persistence', () => {
     expect(env.adapter.forkCalls).toHaveLength(1)
     expect(env.service.getGroup(group.id)!.candidates.some(c => c.sessionId === result.sessionId)).toBe(false)
     expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('a sidecar write failure during reroll keeps the previous active candidate (orphan, D-2)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    await fs.rm(path.join(env.dataRoot, 'branches', 'groups.json'), { force: true })
+    await fs.mkdir(path.join(env.dataRoot, 'branches', 'groups.json'))
+
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.orphan).toBe(true)
+    // 激活从未提交：activeSessionId 保持原值
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('initialize purges soft-deleted candidates older than the retention period (TREE-09)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    // 直接改写 sidecar：把 child 标记为 31 天前软删
+    const store = await sidecarStore(env.dataRoot)
+    const persistedGroup = store.groups[0] as { candidates: Array<{ sessionId: string; deletedAt?: number }> }
+    persistedGroup.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt =
+      Date.now() - 31 * 24 * 60 * 60 * 1000
+    await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), JSON.stringify(store), 'utf-8')
+
+    const reloaded = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    await reloaded.initialize()
+    try {
+      const groups = reloaded.listGroups()
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.candidates.some(c => c.sessionId === child.sessionId)).toBe(false)
+      expect(groups[0]!.candidates).toHaveLength(1)
+      // 清理结果同步落盘
+      const after = await sidecarStore(env.dataRoot)
+      expect(
+        (after.groups[0] as { candidates: Array<{ sessionId: string }> }).candidates.some(
+          c => c.sessionId === child.sessionId,
+        ),
+      ).toBe(false)
+    } finally {
+      reloaded.dispose()
+    }
+  })
+
+  it('initialize keeps soft-deleted candidates within the retention period', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    const store = await sidecarStore(env.dataRoot)
+    const persistedGroup = store.groups[0] as { candidates: Array<{ sessionId: string; deletedAt?: number }> }
+    persistedGroup.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt =
+      Date.now() - 2 * 24 * 60 * 60 * 1000
+    await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), JSON.stringify(store), 'utf-8')
+
+    const reloaded = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
+    await reloaded.initialize()
+    try {
+      const groups = reloaded.listGroups()
+      const candidate = groups[0]!.candidates.find(c => c.sessionId === child.sessionId)
+      expect(candidate?.deletedAt).toBeGreaterThan(0)
+    } finally {
+      reloaded.dispose()
+    }
   })
 })

@@ -231,4 +231,28 @@ describe('branch tools', () => {
     expect(result.success).toBe(false)
     expect(result.code).toBe('GRAY_BRANCH_GROUP_NOT_FOUND')
   })
+
+  // ── D-2 回归：reroll / edit_retry 成功后新候选自动激活（追加在文件末尾，
+  //    不干扰文件前部依赖初始共享状态的用例）──
+
+  it('branch_reroll auto-activates the forked session; branch_list reports it as active (D-2)', async () => {
+    const result = await execute('branch_reroll', { sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.success).toBe(true)
+    expect(result.activeSessionId).toBe(result.sessionId)
+
+    const listed = await execute('branch_list', { groupId })
+    const groups = listed.groups as Array<{ activeSessionId: string; candidates: Array<{ sessionId: string }> }>
+    expect(groups[0]!.activeSessionId).toBe(result.sessionId)
+    expect(groups[0]!.candidates.some(c => c.sessionId === result.sessionId)).toBe(true)
+  })
+
+  it('branch_edit_retry auto-activates the forked session (D-2)', async () => {
+    const result = await execute('branch_edit_retry', { sessionId: ROOT_SESSION, turn: 2, text: 'edited again' })
+    expect(result.success).toBe(true)
+    expect(result.activeSessionId).toBe(result.sessionId)
+
+    const listed = await execute('branch_list', { groupId })
+    const groups = listed.groups as Array<{ activeSessionId: string }>
+    expect(groups[0]!.activeSessionId).toBe(result.sessionId)
+  })
 })

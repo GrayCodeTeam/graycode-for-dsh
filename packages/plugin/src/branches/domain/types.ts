@@ -57,6 +57,15 @@ export const BRANCH_GROUP_STORE_VERSION = 1;
 /** sidecar 文件布局 */
 export const BRANCH_STORE_FILE = 'groups.json';
 
+/** TREE-02（决策 4）：同一父会话下非删除候选数量上限；超限拒绝创建，不自动删除 */
+export const MAX_CANDIDATES_PER_PARENT = 10;
+
+/** TREE-09：软删候选默认保留期（天）；超过保留期的 tombstone 惰性物理清理 */
+export const DEFAULT_BRANCH_RETENTION_DAYS = 30;
+
+/** 软删保留期（毫秒） */
+export const BRANCH_RETENTION_MS = DEFAULT_BRANCH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
 /** 稳定错误码（机器可读，UI 不解析错误文案） */
 export const BranchErrorCode = {
     GROUP_NOT_FOUND: 'GRAY_BRANCH_GROUP_NOT_FOUND',
@@ -68,6 +77,7 @@ export const BranchErrorCode = {
     TARGET_TURN_NOT_FOUND: 'GRAY_BRANCH_TARGET_TURN_NOT_FOUND',
     NO_PREVIOUS_TURN: 'GRAY_BRANCH_NO_PREVIOUS_TURN',
     NO_USER_MESSAGE: 'GRAY_BRANCH_NO_USER_MESSAGE',
+    CANDIDATE_LIMIT_EXCEEDED: 'GRAY_BRANCH_CANDIDATE_LIMIT_EXCEEDED',
     FORK_REJECTED: 'GRAY_BRANCH_FORK_REJECTED',
     STORAGE_CORRUPT: 'GRAY_STORAGE_CORRUPT',
     STORAGE_WRITE_FAILED: 'GRAY_BRANCH_STORAGE_WRITE_FAILED',

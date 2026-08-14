@@ -71,7 +71,9 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
         async sendUserMessage({ sessionId, content }) {
             const agent = ctx.agents.get(SessionId(sessionId))
             if (!agent) return
-            agent.followup(
+            // 必须 await：followup 是异步投递，失败要向上传播（sendAfterFork 据实报
+            // messageSent=false），不能浮空 promise 吞掉 rejection（BUG-04）
+            await agent.followup(
                 createUserMessage({
                     content: content as ContentBlock[],
                     source: { kind: 'user' },

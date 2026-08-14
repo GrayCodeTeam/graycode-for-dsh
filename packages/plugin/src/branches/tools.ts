@@ -9,6 +9,9 @@
  * - reroll / edit retry 通过 dsh agent factory fork 新会话（完整轮次前缀），
  *   并把目标轮次的原始（或编辑后的）用户消息重发到新会话；
  *   无 agent factory 时降级为仅建会话（agentAttached = false）。
+ * - reroll / edit_retry 成功后新候选自动激活（D-2，旧版 updateTail:true）：
+ *   sidecar 提交时 activeSessionId 即切到新候选，无需再调 branch_switch；
+ *   branch_create（手动分支）不自动激活。切换只改会话指针，不改任何会话日志。
  * - 所有变更支持 expectedRevision 乐观并发控制；冲突返回权威快照。
  * - 错误返回稳定机器码（BranchErrorCode），UI/模型不解析错误文案。
  */
@@ -215,7 +218,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
     defineTool({
       name: 'branch_create',
       description:
-        'Manually create a new candidate branch of an existing branch group: forks the parent session through its last complete turn boundary (or the given boundary) as a new session. Use expectedRevision (from branch_list) for optimistic concurrency; on conflict the authoritative group is returned in error.groupId data via a follow-up branch_list.',
+        'Manually create a new candidate branch of an existing branch group: forks the parent session through its last complete turn boundary (or the given boundary) as a new session. The active pointer is not changed by branch_create (use branch_switch to activate). Use expectedRevision (from branch_list) for optimistic concurrency; on conflict the authoritative group is returned in error.groupId data via a follow-up branch_list.',
       parameters: {
         sessionId: { type: 'string', description: 'Parent session id; defaults to the current session.' },
         groupId: { type: 'string', description: 'Optional branch group id; defaults to the group containing the parent session.' },
@@ -237,6 +240,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
             agentAttached: { type: 'boolean', description: 'False when the host has no agent-loop: the session was created without an agent to drive.' },
             orphan: { type: 'boolean', description: 'True when the fork session exists but could not be recorded in the branch group (sidecar write failure); it remains recoverable via the returned sessionId.' },
             revision: { type: 'integer' },
+            activeSessionId: { type: 'string', description: 'The active candidate after the commit (unchanged for branch_create).' },
             error: { type: 'string' },
             code: { type: 'string' },
           },
@@ -265,7 +269,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
     defineTool({
       name: 'branch_reroll',
       description:
-        'Reroll a conversation turn on a candidate session: fork a new session from the last complete turn before the given turn, and resend that turn\'s original user message to the new session (the model regenerates the response). The new session becomes a candidate of the same branch group. Get turn numbers from branch_list.',
+        'Reroll a conversation turn on a candidate session: fork a new session from the last complete turn before the given turn, and resend that turn\'s original user message to the new session (the model regenerates the response). The new session becomes a candidate of the same branch group and is activated immediately: the group\'s activeSessionId switches to it (no branch_switch needed). Get turn numbers from branch_list.',
       parameters: {
         sessionId: { type: 'string', description: 'Candidate session id to reroll from; defaults to the current session.' },
         groupId: { type: 'string', description: 'Optional branch group id; defaults to the group containing the session.' },
@@ -286,6 +290,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
             agentAttached: { type: 'boolean' },
             orphan: { type: 'boolean' },
             revision: { type: 'integer' },
+            activeSessionId: { type: 'string', description: 'The active candidate after the commit: the new forked session (auto-activated), or the previous active when orphan.' },
             error: { type: 'string' },
             code: { type: 'string' },
           },
@@ -313,7 +318,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
     defineTool({
       name: 'branch_edit_retry',
       description:
-        'Edit a conversation turn and retry: fork a new session from the last complete turn before the given turn, and send the edited user message to the new session. The new session becomes a candidate of the same branch group.',
+        'Edit a conversation turn and retry: fork a new session from the last complete turn before the given turn, and send the edited user message to the new session. The new session becomes a candidate of the same branch group and is activated immediately: the group\'s activeSessionId switches to it (no branch_switch needed).',
       parameters: {
         sessionId: { type: 'string', description: 'Candidate session id to retry from; defaults to the current session.' },
         groupId: { type: 'string', description: 'Optional branch group id; defaults to the group containing the session.' },
@@ -335,6 +340,7 @@ export function createBranchTools(service: BranchCoordinatorService): ToolDefini
             agentAttached: { type: 'boolean' },
             orphan: { type: 'boolean' },
             revision: { type: 'integer' },
+            activeSessionId: { type: 'string', description: 'The active candidate after the commit: the new forked session (auto-activated), or the previous active when orphan.' },
             error: { type: 'string' },
             code: { type: 'string' },
           },

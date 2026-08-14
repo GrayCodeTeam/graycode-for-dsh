@@ -12,6 +12,10 @@
  * sidecar 写失败时保留普通 dsh fork Session，但不加入 Gray 分支组，
  * 并向调用方报告可恢复的孤儿（orphan = true）。
  *
+ * D-2（旧版 updateTail:true 语义）：reroll / editRetry 在 sidecar 提交时自动把
+ * activeSessionId 切到新候选（同一原子写）；手动 createBranch 不切换。切换只改
+ * 会话指针，不重写任何会话日志（“切换不隐式改文件”不变量）。
+ *
  * 变更操作在同一进程内串行（promise 链互斥），跨实例仍靠 revision CAS 防护。
  */
 import * as crypto from 'crypto';
@@ -29,10 +33,12 @@ import {
 import {
     activateCandidate,
     addCandidate,
+    assertCandidateLimit,
     assertRevision,
     createBranchGroup,
     deleteCandidate,
     parseBranchGroupStore,
+    purgeExpiredCandidates,
     renameCandidate,
     restoreCandidate,
 } from './domain/branchGroup.ts';
@@ -90,6 +96,8 @@ export interface CreateBranchResult {
     agentAttached: boolean;
     orphan: boolean;
     revision: number;
+    /** sidecar 提交后的激活候选（reroll/edit_retry 自动激活后为新候选；孤儿路径为原值） */
+    activeSessionId: string;
 }
 
 /** reroll / editRetry 返回 */
@@ -102,6 +110,8 @@ export interface RetryBranchResult {
     agentAttached: boolean;
     orphan: boolean;
     revision: number;
+    /** sidecar 提交后的激活候选（reroll/edit_retry 自动激活新候选；孤儿路径保持原激活） */
+    activeSessionId: string;
 }
 
 /** switch / delete / restore / rename 返回 */
@@ -122,6 +132,8 @@ export class BranchCoordinatorService {
     private readonly storePath: string;
     private groups: GrayBranchGroup[] = [];
     private loaded = false;
+    /** 加载承诺：并发调用 initialize / 变更操作统一 await 同一份加载（ensureLoaded 模式） */
+    private loadPromise: Promise<void> | undefined;
     /** 进程内串行互斥：让 CAS 在单进程内有效 */
     private mutationChain: Promise<unknown> = Promise.resolve();
 
@@ -133,24 +145,45 @@ export class BranchCoordinatorService {
         this.storePath = path.join(this.rootDir, BRANCH_STORE_FILE);
     }
 
-    /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）响亮抛错。 */
-    async initialize(): Promise<void> {
-        try {
-            const raw = await fs.readFile(this.storePath, 'utf8');
-            this.groups = parseBranchGroupStore(raw);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-                this.groups = [];
-            } else {
-                throw error;
+    /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）响亮抛错。幂等：
+     *  并发调用共享同一份加载承诺；加载完成后顺手清理超过保留期的软删候选（TREE-09）。 */
+    initialize(): Promise<void> {
+        if (this.loadPromise) return this.loadPromise;
+        this.loadPromise = (async () => {
+            try {
+                const raw = await fs.readFile(this.storePath, 'utf8');
+                this.groups = parseBranchGroupStore(raw);
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                    this.groups = [];
+                } else {
+                    throw error;
+                }
             }
+            this.loaded = true;
+            await this.purgeExpiredGroups();
+        })();
+        return this.loadPromise;
+    }
+
+    /** 加载后惰性清理：超过保留期的软删候选移出 sidecar（失败不阻断启动，
+     *  内存清理结果会在下一次 persist 时自然落盘）。 */
+    private async purgeExpiredGroups(): Promise<void> {
+        const purged = this.groups.map(group => purgeExpiredCandidates(group));
+        const changed = purged.some((group, index) => group !== this.groups[index]);
+        if (!changed) return;
+        this.groups = purged;
+        try {
+            await this.persist(this.groups);
+        } catch {
+            // 清理是惰性维护：写失败时保留内存结果，后续任何 persist 都会带上清理结果
         }
-        this.loaded = true;
     }
 
     dispose(): void {
         this.groups = [];
         this.loaded = false;
+        this.loadPromise = undefined;
     }
 
     listGroups(): GrayBranchGroup[] {
@@ -259,7 +292,16 @@ export class BranchCoordinatorService {
                     BranchErrorCode.NO_USER_MESSAGE
                 );
             }
-            const content = (source.events[userMessageSeq] as unknown as { data: { content: readonly unknown[] } }).data.content;
+            // 按 seq 查找而非数组下标：事件流 seq 可能不连续（修剪/压缩/过滤），
+            // 直接 events[seq] 会取到 undefined 或错误事件（S-01 防御）
+            const userEvent = source.events.find(e => e.seq === userMessageSeq);
+            if (!userEvent) {
+                throw new BranchError(
+                    `user message event seq ${userMessageSeq} not found in session "${input.sessionId}"`,
+                    BranchErrorCode.NO_USER_MESSAGE
+                );
+            }
+            const content = (userEvent as unknown as { data: { content: readonly unknown[] } }).data.content;
             const created = await this.forkAndRecord({
                 group,
                 parent: source,
@@ -267,6 +309,7 @@ export class BranchCoordinatorService {
                 kind: 'reroll',
                 label: `reroll turn ${input.turn}`,
                 expectedRevision: input.expectedRevision,
+                activate: true,
             });
             const messageSent = await this.sendAfterFork(created.sessionId, content);
             return {
@@ -310,6 +353,7 @@ export class BranchCoordinatorService {
                 kind: 'edit',
                 label: `edit retry turn ${input.turn}`,
                 expectedRevision: input.expectedRevision,
+                activate: true,
             });
             const messageSent = await this.sendAfterFork(created.sessionId, [
                 { type: 'text', text: input.text },
@@ -440,7 +484,7 @@ export class BranchCoordinatorService {
         };
     }
 
-    /** fork + sidecar 记录的公共路径（步骤顺序：校验 CAS → fork 会话 → 写 sidecar → 发布） */
+    /** fork + sidecar 记录的公共路径（步骤顺序：校验 CAS/候选上限 → fork 会话 → 写 sidecar → 发布） */
     private async forkAndRecord(input: {
         group: GrayBranchGroup;
         parent: { id: string; events: readonly BranchEventView[]; cwd?: string; agentPreset?: string };
@@ -448,9 +492,13 @@ export class BranchCoordinatorService {
         kind: BranchCandidateKind;
         label?: string;
         expectedRevision?: number;
+        /** 提交 sidecar 时把 activeSessionId 切到新候选（reroll/edit_retry 的 D-2 语义） */
+        activate?: boolean;
     }): Promise<CreateBranchResult> {
         // CAS 先于 fork：陈旧 revision 直接拒绝，避免创建无用的孤儿 fork 会话
         assertRevision(input.group, input.expectedRevision);
+        // TREE-02：候选上限在 fork 前拒绝，同样避免创建无用的孤儿 fork 会话
+        assertCandidateLimit(input.group, input.parent.id);
         const childSessionId = `branch-${crypto.randomUUID()}`;
         let forkOutcome: { sessionId: string; agentAttached: boolean };
         try {
@@ -470,6 +518,7 @@ export class BranchCoordinatorService {
             );
         }
         try {
+            // 激活与候选追加在同一个领域调用里完成，persist 一次 → 与 sidecar 提交同一原子写
             const next = addCandidate(input.group, {
                 sessionId: forkOutcome.sessionId,
                 parentSessionId: input.parent.id,
@@ -477,6 +526,7 @@ export class BranchCoordinatorService {
                 kind: input.kind,
                 label: input.label,
                 expectedRevision: input.expectedRevision,
+                activate: input.activate,
             });
             await this.persistGroup(next);
             this.replaceGroup(next);
@@ -489,10 +539,12 @@ export class BranchCoordinatorService {
                 agentAttached: forkOutcome.agentAttached,
                 orphan: false,
                 revision: next.revision,
+                activeSessionId: next.activeSessionId,
             };
         } catch (error) {
             if (error instanceof BranchError && error.code === BranchErrorCode.STORAGE_WRITE_FAILED) {
-                // sidecar 写失败：保留 fork 会话，不入组，报告孤儿（§P3E）
+                // sidecar 写失败：保留 fork 会话，不入组，报告孤儿（§P3E）；
+                // activeSessionId 不变（激活从未提交）
                 return {
                     groupId: input.group.id,
                     sessionId: forkOutcome.sessionId,
@@ -502,6 +554,7 @@ export class BranchCoordinatorService {
                     agentAttached: forkOutcome.agentAttached,
                     orphan: true,
                     revision: input.group.revision,
+                    activeSessionId: input.group.activeSessionId,
                 };
             }
             throw error;
@@ -545,9 +598,20 @@ export class BranchCoordinatorService {
         await this.persist(this.groups.map(g => (g.id === next.id ? next : g)));
     }
 
-    /** 进程内串行互斥；mutation 抛错时链条继续 */
+    /** 进程内串行互斥；mutation 抛错时链条继续。
+     *  每个变更先 await 初始化完成（ensureLoaded 模式），消除 initialize 与首个
+     *  变更之间的启动竞态（BUG-09）：ensureGroup 不可能先于加载落盘再被旧快照覆盖。 */
     private mutate<T>(operation: () => Promise<T>): Promise<T> {
-        const run = this.mutationChain.then(operation, operation);
+        const run = this.mutationChain.then(
+            async () => {
+                await this.initialize();
+                return operation();
+            },
+            async () => {
+                await this.initialize();
+                return operation();
+            }
+        );
         this.mutationChain = run.catch(() => undefined);
         return run;
     }
