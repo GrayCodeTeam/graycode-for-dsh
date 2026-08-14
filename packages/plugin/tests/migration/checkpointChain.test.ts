@@ -29,7 +29,7 @@ import { createMemoryTargetWriter } from '../../src/migration/adapters/storage/m
 import { createCheckpointTargetWriter } from '../../src/migration/adapters/storage/checkpointTarget.ts'
 import { createSettingsTargetWriter } from '../../src/migration/adapters/storage/settingsTarget.ts'
 import { createConversationTargetWriter } from '../../src/migration/adapters/storage/conversationTarget.ts'
-import { createNoopWriter } from '../../src/migration/adapters/storage/noopTarget.ts'
+import { createSnapshotTargetWriter } from '../../src/migration/adapters/storage/snapshotTarget.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import type { CheckpointManifest } from '../../src/checkpoints/domain/types.ts'
 import {
@@ -169,7 +169,7 @@ function makeService(): { service: LegacyImportService; dataRoot: string; cleanu
     planner: new DefaultPlanner(),
     writers: {
       conversations: createConversationTargetWriter({ importsRoot }),
-      snapshots: createNoopWriter('snapshots'),
+      snapshots: createSnapshotTargetWriter({ importsRoot }),
       checkpoints: createCheckpointTargetWriter({ dataRoot }),
       memory: createMemoryTargetWriter(memoryService),
       settings: createSettingsTargetWriter({ importsRoot }),

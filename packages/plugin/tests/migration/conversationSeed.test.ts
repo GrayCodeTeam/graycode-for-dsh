@@ -29,7 +29,7 @@ import { FileRunStore } from '../../src/migration/adapters/storage/runStore.ts'
 import { createMemoryTargetWriter } from '../../src/migration/adapters/storage/memoryTarget.ts'
 import { createCheckpointTargetWriter } from '../../src/migration/adapters/storage/checkpointTarget.ts'
 import { createSettingsTargetWriter } from '../../src/migration/adapters/storage/settingsTarget.ts'
-import { createNoopWriter } from '../../src/migration/adapters/storage/noopTarget.ts'
+import { createSnapshotTargetWriter } from '../../src/migration/adapters/storage/snapshotTarget.ts'
 import {
   createConversationTargetWriter,
   type SessionPersistenceLike,
@@ -427,7 +427,7 @@ describe('完整流水线（scan → apply → rerun）', () => {
         planner: new DefaultPlanner(),
         writers: {
           conversations: createConversationTargetWriter({ importsRoot, sessions: store.ctx.sessions }),
-          snapshots: createNoopWriter('snapshots'),
+          snapshots: createSnapshotTargetWriter({ importsRoot, sessions: store.ctx.sessions }),
           checkpoints: createCheckpointTargetWriter({ dataRoot }),
           memory: createMemoryTargetWriter(memoryService),
           settings: createSettingsTargetWriter({ importsRoot }),
@@ -460,6 +460,43 @@ describe('完整流水线（scan → apply → rerun）', () => {
       const rerun = await service.apply(sourceDir, scan2.report.planToken)
       expect(rerun.report.counts['already-imported']).toBe(1)
       expect(store.ctx.sessions.list()).toHaveLength(1)
+    } finally {
+      await store.dispose()
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(sourceDir, { recursive: true, force: true })
+    }
+  })
+
+  test('源数据含快照：真实 snapshot writer 把快照导入为 DSH 会话（lineage header + 台账 session://）', async () => {
+    const store = await makeStore()
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-seed-target-'))
+    const sourceDir = makeConversationAndSnapshotRoot()
+    try {
+      const service = makePipelineService(store, dataRoot)
+
+      const scan = await service.scan(sourceDir)
+      const snapObj = scan.report.objects.find(o => o.objectType === 'snapshot')
+      expect(snapObj?.outcome).toBe('import')
+
+      const applied = await service.apply(sourceDir, scan.report.planToken)
+      expect(applied.run.status).toBe('complete')
+      expect(applied.run.steps.snapshots.status).toBe('complete')
+
+      // 快照会话真实创建：确定性 id + 谱系 header（parentSession = 所属会话的确定性 id）
+      const snapSession = store.ctx.sessions.get(
+        SessionId('migrated-snap-snap_conv_demo_1700000100000_xyz789'),
+      )
+      expect(snapSession).toBeDefined()
+      expect(snapSession!.header.parentSession).toBe(SessionId('migrated-conv_demo'))
+      expect(snapSession!.deriveMessages().map(m => m.role)).toEqual(['user', 'assistant'])
+
+      // 台账：conversation + snapshot 各一条；快照 targetRef 指向 session
+      const ledger = new FileLedgerStore(path.join(dataRoot, 'migration', 'ledger.json'))
+      const entries = await ledger.getAll()
+      expect(entries).toHaveLength(2)
+      expect(
+        entries.some(e => e.targetRef === 'session://migrated-snap-snap_conv_demo_1700000100000_xyz789'),
+      ).toBe(true)
     } finally {
       await store.dispose()
       fs.rmSync(dataRoot, { recursive: true, force: true })
@@ -520,4 +557,46 @@ function makeConversationRoot(): string {
     ]),
   )
   return dir
+}
+
+/** 构造一个含会话 + 快照的最小 legacy 数据根（快照历史与会话同构） */
+function makeConversationAndSnapshotRoot(): string {
+  const dir = makeConversationRoot()
+  writeText(
+    dir,
+    'snapshots/snap_conv_demo_1700000100000_xyz789.json',
+    JSON.stringify({
+      id: 'snap_conv_demo_1700000100000_xyz789',
+      conversationId: 'conv_demo',
+      name: 'demo 快照',
+      timestamp: FIXED_TS + 10000,
+      history: [
+        { role: 'user', parts: [{ type: 'text', text: 'hi' }], index: 0, id: 'msg_1', timestamp: FIXED_TS },
+        { role: 'model', parts: [{ type: 'text', text: 'hello' }], index: 1, id: 'msg_2', timestamp: FIXED_TS + 1000 },
+      ],
+    }),
+  )
+  return dir
+}
+
+/** 完整流水线服务：conversations/snapshots 均注入真实 SessionStore（与 snapshotSeed.test.ts 同构） */
+function makePipelineService(store: StoreFixture, dataRoot: string): LegacyImportService {
+  const migrationRoot = path.join(dataRoot, 'migration')
+  const importsRoot = path.join(migrationRoot, 'imports')
+  const memoryService = new MemoryService({ dataRoot })
+  return new LegacyImportService({
+    inventory: new DefaultInventoryReader(),
+    validator: new DefaultValidator(),
+    planner: new DefaultPlanner(),
+    writers: {
+      conversations: createConversationTargetWriter({ importsRoot, sessions: store.ctx.sessions }),
+      snapshots: createSnapshotTargetWriter({ importsRoot, sessions: store.ctx.sessions }),
+      checkpoints: createCheckpointTargetWriter({ dataRoot }),
+      memory: createMemoryTargetWriter(memoryService),
+      settings: createSettingsTargetWriter({ importsRoot }),
+    },
+    ledger: new FileLedgerStore(path.join(migrationRoot, 'ledger.json')),
+    runStore: new FileRunStore(path.join(migrationRoot, 'runs')),
+    targetProfile: 'test-profile',
+  })
 }
