@@ -9,21 +9,20 @@ tool, conversation, excluded count, content hash).
 
 | Question | Answer | Evidence |
 | --- | --- | --- |
-| Host `checkpoints/*` Remote endpoints? | **YES** — `checkpoints/list`, `checkpoints/verify`, `checkpoints/previewRestore`, `checkpoints/restore` | `packages/plugin/src/checkpoints/adapters/dsh/remote.ts` (`createCheckpointsRemoteHandlers`), registered in `packages/plugin/src/checkpoints/index.ts` (`ctx.grayRemote?.register(...)`); dispatch service assembled in `packages/plugin/src/index.ts` (`new GrayRemoteService(ctx, { journalPath })` → `ctx.grayRemote`) |
+| Host `checkpoints/*` Remote endpoints? | **YES** — list/create/verify/previewRestore/restore/delete/gc | `packages/plugin/src/checkpoints/adapters/dsh/remote.ts` (`createCheckpointsRemoteHandlers`), registered in `packages/plugin/src/checkpoints/index.ts` (`ctx.grayRemote?.register(...)`); dispatch service assembled in `packages/plugin/src/index.ts` (`new GrayRemoteService(ctx, { journalPath })` → `ctx.grayRemote`) |
 | Result envelope? | `GrayRemoteResult` — `{ ok: true, value } \| { ok: false, error: { code, message, details } }`; business errors **never reject**; unknown endpoint → `GRAY_ENDPOINT_NOT_FOUND` | `packages/plugin/src/remote/types.ts` / `service.ts` |
 | List item shape? | `GrayCheckpointItemView = CheckpointSummary & { verifyState: 'unknown' }` — id/conversationId/messageIndex/toolName/phase/timestamp/type/baseCheckpointId/contentHash/fileCount/backupBytes/excludedCount/manifestVersion | `packages/plugin/src/remote/types.ts` |
 | Verify state? | rc.6 does **not** persist verify results → list is always `'unknown'`; UI may call `checkpoints/verify` on demand (`CheckpointVerifyResult`: ok/issues/checkedFiles/chainLength/filesRevisionPaired) | `adapters/dsh/remote.ts` + `checkpoints/service.ts` |
 | Pagination? | `cursor` = id of the last listed item; `limit` clamped to 1..100 (default 20); `nextCursor` absent when no more pages | `remote/types.ts` (`GRAY_PAGE_LIMIT_*`) + `remote/validate.ts` (`normalizeLimit`/`slicePage`) |
 | Error codes? | Stable GRAY_* machine codes only (INVALID_INPUT/CONFLICT/APPROVAL_REQUIRED/CANCELLED/STORAGE_CORRUPT/NOT_FOUND/ENDPOINT_NOT_FOUND/INTERNAL) | `remote/types.ts` / `errors.ts` |
-| Client channel to `ctx.grayRemote`? | **NO (GAP)** — the browser half cannot reach the Node cordis service; no Typert remote client channel in rc.6 | probe (see workflowNode/README.md for the same rc.6 constraint pattern) |
+| Client channel to `ctx.grayRemote`? | **YES** — the trusted `/graycode` Connection bridge exposes `remote.invoke` | `settings/remote.ts` + host `settings/rpc.ts` |
 
-Because of the gap, this surface is **contract-driven**: it consumes the
-contract through the injected `CheckpointListDataSource` port
+This surface remains **contract-driven**: it consumes the contract through the
+injected `CheckpointListDataSource` port
 (`dataSource.ts`) with one method per host endpoint, and never imports the
 plugin package (bundle purity gate). All wire shapes are re-declared
 structurally and narrowed defensively (`read*` helpers in `types.ts`), so a
-future bridge (host projection replay / Typert remote client channel) can
-feed host payloads unchanged.
+the current `/graycode` bridge or a future Typert client can feed unchanged.
 
 ## Files
 

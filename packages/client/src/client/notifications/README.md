@@ -75,8 +75,8 @@ list) / `unsupported` (non-browser) / `failed`. Only `completed` intents present
 
 ## Known gaps
 
-- rc.6 has no generic host→client push channel and no browser→host channel, so
-  the surface ships as a contract-driven consumer + mountable components; the
+- rc.6 has no generic host→client push channel (browser→host queries use the
+  GrayCode Connection bridge), so the surface ships as a contract-driven consumer + mountable components; the
   main session wires the conversation-event bridge (see above). Once DSH ships a
   push channel, `createNotificationBus().push` becomes the host-side destination
   with no client changes.

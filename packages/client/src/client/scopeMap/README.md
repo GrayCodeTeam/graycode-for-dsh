@@ -73,8 +73,8 @@ relative are rejected (omitted from the export).
 
 The main session (`packages/client/src/client/index.ts`) registers the locale
 namespace and re-exports the panel; a mount recipe is not available in the rc.6
-host (no management-view slot, no browser→host remote channel — GAPs recorded
-per surface). Once a mount point exists:
+host (no management-view slot; browser calls can use the `/graycode` remote
+bridge). Once a mount point exists:
 
 ```ts
 // 1. Register the locale namespace (own ns) — done eagerly in index.ts.
@@ -82,7 +82,7 @@ ctx.locale.register(GRAYCODE_SCOPE_MAP_NS, graycodeScopeMapDictionaries)
 ctx.locale.register(GRAYCODE_SCOPE_MAP_NS, 'ja', graycodeScopeMapJaPlaceholder)
 
 // 2. Render the panel with t: ctx.locale.bind(GRAYCODE_SCOPE_MAP_NS).
-//    Live host (once the browser→host remote channel exists):
+//    Live host: adapt the `/graycode` remote invoker:
 <ScopeMapPanel t={t} dataSource="remote" sourceDir="/legacy/workspace" transport={(endpoint, args, signal) => /* ctx.grayRemote */} />
 //    Unwired host / development:
 <ScopeMapPanel t={t} dataSource="mock" />

@@ -47,8 +47,8 @@ standard codes.
 
 The main session (`packages/client/src/client/index.ts`) registers the locale
 namespace and re-exports the panel; a mount recipe is not available in the
-rc.6 host (no management-view slot, no browser→host remote channel — GAPs
-recorded per surface). Once a mount point exists:
+rc.6 host (no management-view slot; browser calls can use the `/graycode`
+remote bridge). Once a mount point exists:
 
 ```ts
 // 1. Register the locale namespace (own ns).
@@ -56,7 +56,7 @@ ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, graycodeActivityHeatmapDiction
 ctx.locale.register(GRAYCODE_ACTIVITY_HEATMAP_NS, 'ja', graycodeActivityHeatmapJaPlaceholder)
 
 // 2. Provide a data source where the panel is mounted.
-//    Live host: wire the transport (GAP-client-1) once the browser→host remote channel exists:
+//    Live host: adapt the `/graycode` remote invoker:
 //    const source = new RemoteActivityStatsDataSource((endpoint, args, signal) => ...)
 //    Unwired host / development:
 //    const source = new MockActivityStatsDataSource()
