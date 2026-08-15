@@ -4,12 +4,19 @@
  * Request-construction layer for true temp messages + typed reasoning
  * (docs/ADR-0002 §4b, docs/PROGRESS.md A1). Subscribes the `llm/stream`
  * waterfall and rewrites agent-loop requests with preset user/assistant
- * injections when enabled — fake thoughts become `{type:'reasoning'}` blocks
- * and preset entries become real messages instead of system-text paragraphs.
+ * injections — fake thoughts become `{type:'reasoning'}` blocks (typed-only,
+ * never a `[thinking]` text prefix) and preset entries become real messages
+ * instead of system-text paragraphs. `before` entries land at the head of the
+ * message list; `after` entries land before the current turn's user message
+ * (aligned with the original Gray semantics).
  *
- * NON-CONTRACT USAGE: the rewrite substitutes a NEW options object for the
- * documented read-only loop request (see ADR-0002 §4b). The switch is off by
- * default (fail-closed).
+ * ENABLED BY DEFAULT: `thoughts.enabled` and `sendHistoryThoughts` both
+ * default to true, so mounting the plugin injects preset entries as real
+ * messages (and fake thoughts as reasoning blocks) unless explicitly
+ * disabled. The rewrite substitutes a NEW options object for the documented
+ * read-only loop request (NON-CONTRACT usage, ADR-0002 §4b) and re-marks +
+ * deep-freezes it to keep the loop contract; any state/rewrite failure passes
+ * the original request through untouched (fail-closed).
  *
  * requestLayer hand-off (prompt): when `prompt.requestLayer` is enabled the
  * prompt injector skips user/assistant context paragraphs — the same preset
@@ -41,19 +48,24 @@ export interface PromptModesLike {
 }
 
 /**
- * Thoughts config. Defaults are OFF: mounting this plugin changes nothing
- * until `enabled` flips (fail-closed, ADR-0002 non-contract usage).
+ * Thoughts config. Enabled by default: mounting the plugin injects preset
+ * user/assistant entries as real messages and fake thoughts as reasoning
+ * blocks. Turn either switch off to opt out; fail-closed handling stays —
+ * any state/rewrite error passes the original request through untouched.
  */
 export interface Config {
-  /** Master switch: off (default) passes every llm/stream request untouched. */
+  /** Master switch (default true): off passes every llm/stream request untouched. */
   enabled: boolean
-  /** sendHistoryThoughts gate for reasoning blocks (same default as prompt). */
+  /**
+   * sendHistoryThoughts gate for reasoning blocks (default true; off = the
+   * thought field is simply not set — never a `[thinking]` text downgrade).
+   */
   sendHistoryThoughts: boolean
 }
 
 export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(false),
-  sendHistoryThoughts: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+  sendHistoryThoughts: z.boolean().default(true),
 })
 
 /**

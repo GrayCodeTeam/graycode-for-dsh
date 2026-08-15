@@ -3,7 +3,16 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import { markAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import {
+  CallId,
+  createAssistantMessage,
+  createToolResultMessage,
+  createUserMessage,
+  markAgentLoopRequest,
+  type GenerateOptions,
+  type Message,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import { createLlmStreamThoughtsAdapter, type ThoughtsAdapterState } from '../../src/thoughts/adapters/llmStream.ts'
 import type { PresetInjection } from '../../src/thoughts/domain/rewrite.ts'
 
@@ -15,6 +24,39 @@ function loopOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions 
       { id: 'm1' as never, role: 'user', content: [], source: { kind: 'user' } },
     ],
     ...overrides,
+  })
+}
+
+/** 用户主动输入（agent-loop inbox claim 后 append 的真实形状）。 */
+function userInput(text = 'user input'): Message {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  })
+}
+
+/** 插件快照（运行时上下文 / 记忆快照：role=user 但 source.kind==='plugin'）。 */
+function pluginSnapshot(text: string, plugin = 'graycode-memory'): Message {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin },
+  })
+}
+
+/** 工具结果（迭代 step 末尾的真实形状）。 */
+function toolResult(text = 'tool result'): Message {
+  return createToolResultMessage({
+    callId: CallId('call-1'),
+    content: [{ type: 'text', text }],
+    isError: false,
+  })
+}
+
+/** 模型 assistant 消息（迭代 step 中工具调用后的下一条消息）。 */
+function assistantText(text = 'assistant text'): Message {
+  return createAssistantMessage({
+    content: [{ type: 'text', text }],
+    source: { provider: 'deepseek', model: 'deepseek-chat' },
   })
 }
 
@@ -172,6 +214,70 @@ describe('createLlmStreamThoughtsAdapter', () => {
     const adapter = createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
     adapter.dispose()
     const options = loopOptions()
+    let nextCalled = false
+    await ctx.listeners[0]!(options, () => {
+      nextCalled = true
+      return fakeStream()
+    })[Symbol.asyncIterator]()!.next()
+    expect(nextCalled).toBe(true)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  // ─── B1：只在本回合第一个 step 注入 ───────────────────────────────
+
+  it('B1：末尾为工具结果（user/tool）→ 不注入（工具迭代 step）', async () => {
+    const ctx = makeCtx()
+    createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
+    const options = loopOptions({ messages: [userInput(), toolResult()] })
+    let nextCalled = false
+    await ctx.listeners[0]!(options, () => {
+      nextCalled = true
+      return fakeStream()
+    })[Symbol.asyncIterator]()!.next()
+    expect(nextCalled).toBe(true)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('B1：末尾为 assistant 消息（model）→ 不注入（工具迭代 step）', async () => {
+    const ctx = makeCtx()
+    createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
+    const options = loopOptions({ messages: [userInput(), assistantText()] })
+    let nextCalled = false
+    await ctx.listeners[0]!(options, () => {
+      nextCalled = true
+      return fakeStream()
+    })[Symbol.asyncIterator]()!.next()
+    expect(nextCalled).toBe(true)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('B1：末尾为 user 输入（user/user）→ 注入（回合首步）', async () => {
+    const ctx = makeCtx()
+    createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
+    const options = loopOptions({ messages: [userInput('hello')] })
+    await ctx.listeners[0]!(options, () => fakeStream())[Symbol.asyncIterator]()!.next()
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    const rewritten = ctx.llm.stream.mock.calls[0]![0] as GenerateOptions
+    expect(rewritten.messages[0]!.content).toEqual([{ type: 'text', text: 'preset-entry' }])
+  })
+
+  it('B1：用户输入后追加插件快照（运行时上下文/记忆）→ 仍注入（真实首步形状）', async () => {
+    const ctx = makeCtx()
+    createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
+    // agent-loop preStep 在 claim 之后追加 runtime-context 快照（source.kind==='plugin'）
+    const options = loopOptions({ messages: [userInput('hello'), pluginSnapshot('Current runtime context. …')] })
+    await ctx.listeners[0]!(options, () => fakeStream())[Symbol.asyncIterator]()!.next()
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    const rewritten = ctx.llm.stream.mock.calls[0]![0] as GenerateOptions
+    expect(rewritten.messages[0]!.content).toEqual([{ type: 'text', text: 'preset-entry' }])
+  })
+
+  it('B1：工具结果后追加记忆快照（plugin）→ 不注入（迭代循环中记忆变更）', async () => {
+    const ctx = makeCtx()
+    createLlmStreamThoughtsAdapter(ctx as never, () => stateOf())
+    // 迭代 step：memory 内容变更时 preStep 会在工具结果之后追加记忆快照，
+    // 末尾不再是 tool-result 而是 plugin——仅看末条消息会误判为首步。
+    const options = loopOptions({ messages: [userInput('hello'), toolResult(), pluginSnapshot('--- Workspace memory ---')] })
     let nextCalled = false
     await ctx.listeners[0]!(options, () => {
       nextCalled = true

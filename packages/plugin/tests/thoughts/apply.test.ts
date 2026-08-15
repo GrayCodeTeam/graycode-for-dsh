@@ -85,7 +85,7 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
     expect(ctx.llm.stream).not.toHaveBeenCalled()
   })
 
-  it('有服务 + enabled：mode 预设投影为注入消息（user 前插、assistant 带 reasoning 后追）', async () => {
+  it('有服务 + enabled：mode 预设投影为注入消息（user 前插、assistant 带 reasoning 插在当前轮 user 之前）', async () => {
     const ctx = makeCtx(
       modeWithEntries([
         entry({ id: 'u1', role: 'user', order: 1, content: 'U1' }),
@@ -102,14 +102,13 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
     expect(rewritten).not.toBe(options)
     // before-history：user 注入在最前
     expect(rewritten.messages[0]!.content).toEqual([{ type: 'text', text: 'U1' }])
-    // 原历史保序
-    expect(rewritten.messages[1]).toEqual(options.messages[0])
-    // after-history：assistant 注入在末尾，reasoning 前置
-    const last = rewritten.messages.at(-1)!
-    expect(last.content).toEqual([
+    // after-history：assistant 注入（reasoning 前置）插在当前轮 user 消息之前
+    expect(rewritten.messages[1]!.content).toEqual([
       { type: 'reasoning', text: 'think' },
       { type: 'text', text: 'A1' },
     ])
+    // 原历史（当前轮 user 消息）保持在最后，未被改动
+    expect(rewritten.messages[2]).toEqual(options.messages[0])
   })
 
   it('sendHistoryThoughts=false → assistant 注入不携带 reasoning 块', async () => {
@@ -122,8 +121,12 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
     await fire(ctx, loopOptions())[Symbol.asyncIterator]()!.next()
 
     const rewritten = ctx.llm.stream.mock.calls[0]![0] as GenerateOptions
-    const last = rewritten.messages.at(-1)!
-    expect(last.content).toEqual([{ type: 'text', text: 'A1' }])
+    // 无 chat_history marker → after-history：插在当前轮 user 消息之前（位置 0）
+    expect(rewritten.messages[0]!.content).toEqual([{ type: 'text', text: 'A1' }])
+    expect(rewritten.messages[0]!.content).not.toEqual([
+      { type: 'reasoning', text: 'think' },
+      { type: 'text', text: 'A1' },
+    ])
   })
 
   it('enabled=false → 透传原请求', async () => {

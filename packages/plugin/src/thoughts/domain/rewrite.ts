@@ -7,9 +7,9 @@
  * `{type:'reasoning'}` blocks), but loop-built requests arrive deep-frozen and
  * documented read-only — so every rewrite here constructs a NEW options object
  * and NEW messages array, never mutating the original (ADR-0002 records this
- * as a NON-CONTRACT usage; the switch is off by default and the plugin is not
- * mounted until a follow-up batch wires the prompt-injector requestLayer
- * hand-off).
+ * as a NON-CONTRACT usage; the plugin is enabled by default and the adapter
+ * re-marks + deep-freezes the substituted request so the loop contract holds,
+ * see adapters/llmStream.ts).
  *
  * This module is host-free: everything takes plain values and returns new
  * values. `createUserMessage` / `createAssistantMessage` are imported as pure
@@ -36,6 +36,11 @@ export interface PresetInjection {
   /**
    * Fake-thought text (trimmed) for role=assistant entries when
    * sendHistoryThoughts is on; maps to a `{type:'reasoning'}` block.
+   *
+   * TYPED-ONLY: this field is the ONLY carrier for fake thoughts. It is never
+   * rendered into a `[thinking]` text prefix — when the reasoning block cannot
+   * be carried the thought is dropped entirely (gate off), never downgraded
+   * to text (see {@link injectionMessage}).
    */
   thought?: string
 }
@@ -46,8 +51,11 @@ export interface PresetInjection {
  *
  * Mirrors the old Gray fake-thought rules: only role=assistant entries with a
  * non-empty (after trim) fakeThought are affected; pure-whitespace thoughts
- * count as absent. `sendHistoryThoughts` is the gate — off means no thought
- * block is emitted at all (same default as the D-11 = c injection gate).
+ * count as absent. `sendHistoryThoughts` is the gate — off means the `thought`
+ * field is simply not set: no chain-of-thought is injected at all. It is
+ * NEVER degraded to a `[thinking]` text prefix — the typed reasoning block
+ * ({@link injectionMessage}) is the only carrier; a channel that cannot carry
+ * it gets no thought, not a text stand-in.
  */
 export function presetEntriesToInjections(
   entries: readonly PromptEntry[],
@@ -107,6 +115,11 @@ export function placeInjections(
 /**
  * Build the message blocks for one injection: user → text block; assistant →
  * optional reasoning block first, then the text block. Pure: no mutation.
+ *
+ * TYPED-ONLY: the reasoning block (`{type:'reasoning'}`) is the sole carrier
+ * for fake thoughts — this function never emits a `[thinking]` text prefix.
+ * A thought present on the injection becomes the reasoning block; an absent
+ * thought (gate off / no fakeThought) yields a single text block.
  */
 export function injectionMessage(injection: PresetInjection, provider: string, model: string): Message {
   const content: Array<{ type: 'text' | 'reasoning'; text: string }> = []
@@ -144,8 +157,17 @@ export interface RewriteLoopRequestResult {
  *   array; the input object/messages are never touched (the loop request is
  *   deep-frozen and documented read-only).
  * - Injections placed `before-history` are prepended (the old Gray "preset
- *   entries before the real history" position); `after-history` are appended
- *   after the existing history.
+ *   entries before the real history" position).
+ * - Injections placed `after-history` are inserted BEFORE the current turn's
+ *   user message: the anchor is the LAST message with role==='user' AND
+ *   source.kind==='user', searched from the end (this is the current-turn
+ *   user input in an agent-loop request — deriveMessages appends it after the
+ *   inbox claim; tool results are user-role but source.kind==='tool' and do
+ *   not count). This aligns with the original Gray current-turn semantics
+ *   (findLastUserMessageGroupIndex / findCurrentTurnStartIndex, base.ts
+ *   L109-156): after entries land before the current turn's history instead
+ *   of being blindly appended at the end. When no user message exists the
+ *   anchor falls back to the end of the list.
  * - The original messages array is shared by reference where untouched
  *   (immutable sharing — no copy cost).
  */
@@ -166,10 +188,22 @@ export function rewriteLoopRequest(
       post.push(message)
     }
   }
+
+  // after anchor: last role==='user' AND source.kind==='user' message (the
+  // current turn's user input); fall back to the end when none exists.
+  let anchor = options.messages.length
+  for (let i = options.messages.length - 1; i >= 0; i--) {
+    const message = options.messages[i]!
+    if (message.role === 'user' && message.source.kind === 'user') {
+      anchor = i
+      break
+    }
+  }
+
   return {
     options: {
       ...options,
-      messages: [...pre, ...options.messages, ...post],
+      messages: [...pre, ...options.messages.slice(0, anchor), ...post, ...options.messages.slice(anchor)],
     },
     injectedCount: injections.length,
   }

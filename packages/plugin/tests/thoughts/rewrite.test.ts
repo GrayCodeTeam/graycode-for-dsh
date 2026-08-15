@@ -38,6 +38,23 @@ function loopOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptions 
   }
 }
 
+/**
+ * 更真实的 agent-loop 历史：旧 user/assistant、tool-result user、当前轮 user。
+ * 最后一个 role==='user' 且 source.kind==='user' 的消息是 'cur'（当前轮输入）。
+ */
+function richLoopOptions(): GenerateOptions {
+  return {
+    provider: 'deepseek',
+    model: 'deepseek-chat',
+    messages: [
+      { id: 'h1' as never, role: 'user', content: [], source: { kind: 'user' } },
+      { id: 'h2' as never, role: 'assistant', content: [], source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' } },
+      { id: 't1' as never, role: 'user', content: [], source: { kind: 'tool', callId: 'call-1' as never } },
+      { id: 'cur' as never, role: 'user', content: [], source: { kind: 'user' } },
+    ],
+  }
+}
+
 describe('presetEntriesToInjections', () => {
   it('只投影 enabled 的 user/assistant 条目，按 order 排序（id 决胜）', () => {
     const entries = [
@@ -154,8 +171,8 @@ describe('rewriteLoopRequest', () => {
     expect(result.injectedCount).toBe(0)
   })
 
-  it('构造新 options（非同一引用）+ 新 messages：before 前插、after 后追，原历史保序', () => {
-    const options = loopOptions()
+  it('构造新 options（非同一引用）+ 新 messages：before 前插、after 插在最后 user-source user 消息之前', () => {
+    const options = richLoopOptions()
     const injections: ReadonlyArray<{ injection: PresetInjection; placement: InjectionPlacement }> = [
       { injection: { role: 'user', text: 'pre' }, placement: 'before-history' },
       { injection: { role: 'assistant', text: 'post', thought: 't' }, placement: 'after-history' },
@@ -168,13 +185,41 @@ describe('rewriteLoopRequest', () => {
     // 前插消息在最前
     expect(result.options.messages[0]!.content).toEqual([{ type: 'text', text: 'pre' }])
     // 原历史原样保序（元素引用不变）
-    expect(result.options.messages.slice(1, 3)).toEqual(options.messages)
-    // 后追消息（reasoning 前置）在末尾
-    const last = result.options.messages.at(-1)!
-    expect(last.content).toEqual([
+    expect(result.options.messages.slice(1, 4).map(message => (message as { id: string }).id)).toEqual(['h1', 'h2', 't1'])
+    // after 消息（reasoning 前置）插在最后一个 user-source user 消息（cur）之前
+    expect(result.options.messages[4]!.content).toEqual([
       { type: 'reasoning', text: 't' },
       { type: 'text', text: 'post' },
     ])
+    expect((result.options.messages[5] as { id: string }).id).toBe('cur')
+  })
+
+  it('after 锚点 = 最后一个 role==="user" 且 source.kind==="user" 的消息（tool-result 不计数）', () => {
+    // 历史：user(h1) / assistant(h2) / tool-result user(t1) / 当前轮 user(cur)
+    const options = richLoopOptions()
+    const result = rewriteLoopRequest(options, [
+      { injection: { role: 'user', text: 'post' }, placement: 'after-history' },
+    ])
+    const postIndex = result.options.messages.findIndex(message =>
+      message.content.some(block => (block as { text?: string }).text === 'post'),
+    )
+    // post 落在 cur 之前（而不是 t1 之前、更不是末尾）
+    expect((result.options.messages[postIndex + 1] as { id: string }).id).toBe('cur')
+    expect(result.options.messages[postIndex + 2]).toBeUndefined()
+  })
+
+  it('无 user-source user 消息时 after 注入回退到末尾', () => {
+    const options = loopOptions({
+      messages: [
+        { id: 'a1' as never, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
+      ],
+    })
+    const result = rewriteLoopRequest(options, [
+      { injection: { role: 'assistant', text: 'post' }, placement: 'after-history' },
+    ])
+    expect(result.options.messages.at(-1)!.content).toEqual([{ type: 'text', text: 'post' }])
+    // 原 assistant 消息仍在（before 位置）
+    expect((result.options.messages[0] as { id: string }).id).toBe('a1')
   })
 
   it('绝不 mutate 输入：原 messages 数组与元素均未被改动', () => {
