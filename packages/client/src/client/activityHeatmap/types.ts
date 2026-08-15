@@ -109,7 +109,7 @@ export interface ActivityTokenDayLike extends ActivityTokenBucketsLike {
   readonly date: string
 }
 
-/** One session's token totals (date = the session's last-updated local day). */
+/** One session's token totals (date = the session's start local day). */
 export interface ActivityTokenSessionLike extends ActivityTokenBucketsLike {
   readonly sessionId: string
   readonly title: string

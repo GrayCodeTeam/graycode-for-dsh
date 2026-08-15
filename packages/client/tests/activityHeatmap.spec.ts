@@ -207,10 +207,14 @@ describe('activity wire readers', () => {
     expect(readActivityTokenBuckets({ uncachedInputTokens: 'x', outputTokens: 1 })).toBeNull()
   })
 
-  it('narrows a session summary item and drops items without usable projections', () => {
+  it('narrows a session summary item, buckets by the session start day and drops items without usable projections', () => {
+    // 本地时区构造：localDateKey 的结果在任何测试环境时区下都确定（修复 M1 时区依赖断言）
     const item = {
       sessionId: 'session-a',
-      updatedAt: Date.UTC(2026, 7, 14, 10, 0, 0),
+      // startedAt 落在开始日；updatedAt 已前滚到次日（resumed 会话）——
+      // 归集必须落在开始日，否则历史累计值随 updatedAt 前滚漂移（H-10）。
+      startedAt: new Date(2026, 7, 14, 10, 0, 0).getTime(),
+      updatedAt: new Date(2026, 7, 15, 10, 0, 0).getTime(),
       title: 'My session',
       projections: { values: { tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 } } },
     }
@@ -219,9 +223,11 @@ describe('activity wire readers', () => {
     expect(row!.title).toBe('My session')
     expect(row!.date).toBe('2026-08-14')
     expect(row!.totalTokens).toBe(10)
-    expect(readActivityTokenSessionSummary({ sessionId: 'x', updatedAt: 1 })).toBeNull()
+    // 缺失 startedAt/createdAt 的旧契约数据（只有 updatedAt）仍可用：兜底键 = updatedAt
+    expect(readActivityTokenSessionSummary({ ...item, startedAt: undefined })!.date).toBe('2026-08-15')
+    expect(readActivityTokenSessionSummary({ sessionId: 'x', startedAt: 1 })).toBeNull()
     expect(readActivityTokenSessionSummary({ ...item, projections: undefined })).toBeNull()
-    expect(readActivityTokenSessionSummary({ ...item, updatedAt: '1' })).toBeNull()
+    expect(readActivityTokenSessionSummary({ ...item, startedAt: '1', updatedAt: '1' })).toBeNull()
     expect(readActivityTokenSessionSummary(null)).toBeNull()
   })
 
@@ -532,11 +538,12 @@ describe('remote activity data source', () => {
 const SESSION_LIST_ITEMS = [
   {
     sessionId: 'session-a',
-    updatedAt: Date.UTC(2026, 7, 14, 10, 0, 0),
+    startedAt: new Date(2026, 7, 14, 10, 0, 0).getTime(),
+    updatedAt: new Date(2026, 7, 15, 10, 0, 0).getTime(),
     title: 'Alpha',
     projections: { values: { tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } },
   },
-  { sessionId: 'session-blank', updatedAt: 1, title: '' },
+  { sessionId: 'session-blank', startedAt: 1, title: '' },
 ]
 
 describe('connection token data source', () => {
@@ -546,7 +553,8 @@ describe('connection token data source', () => {
     const result = await source.tokens({ range: 'all' })
     expect(list).toHaveBeenCalledTimes(1)
     expect(result.sessions).toHaveLength(1)
-    expect(result.sessions[0]).toMatchObject({ sessionId: 'session-a', title: 'Alpha', totalTokens: 300 })
+    // 按会话开始日归集（updatedAt 已前滚到次日，date 仍为开始日）
+    expect(result.sessions[0]).toMatchObject({ sessionId: 'session-a', title: 'Alpha', totalTokens: 300, date: '2026-08-14' })
     expect(result.totals.totalTokens).toBe(300)
   })
 

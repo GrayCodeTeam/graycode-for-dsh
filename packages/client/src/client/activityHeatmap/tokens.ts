@@ -6,7 +6,7 @@
  * projection cache — cold sessions included). This module turns the narrowed
  * session rows into the render-ready result:
  *
- * - range filter: sessions are kept by their `updatedAt` day vs. the range's
+ * - range filter: sessions are kept by their start day vs. the range's
  *   local-day start (same vocabulary as the activity ranges);
  * - byDay: bucket sums grouped by local day, newest day first;
  * - sessions: sorted by total tokens descending (the top slice happens in the

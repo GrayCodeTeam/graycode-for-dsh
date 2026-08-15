@@ -234,20 +234,30 @@ export function localDateKey(ms: number): string {
 
 /**
  * Narrow one `session.list` item into a token session row: the `sessionId`,
- * `updatedAt` and `title` fields plus the `projections.values.tokenUsage`
+ * session start time and `title` fields plus the `projections.values.tokenUsage`
  * buckets. Items without a usable token projection are dropped (null) — a
  * session with no provider-reported usage has nothing to show.
+ *
+ * The row is bucketed by the session's **start** local day, not its last-update
+ * day: a resumed session's cumulative token usage must stay on the day the work
+ * began, otherwise historical totals leak into short ranges and the byDay
+ * histogram drifts forward as `updatedAt` rolls. `startedAt` wins, `createdAt`
+ * falls back, and `updatedAt` is the last-resort key (a never-resumed session's
+ * update day equals its start day).
  */
 export function readActivityTokenSessionSummary(value: unknown): ActivityTokenSessionLike | null {
   if (!isRecord(value)) return null
   const sessionId = readString(value.sessionId)
-  const updatedAt = readInt(value.updatedAt)
-  if (sessionId === undefined || updatedAt === undefined) return null
+  if (sessionId === undefined) return null
   const projections = isRecord(value.projections) ? value.projections : null
   const values = projections !== null && isRecord(projections.values) ? projections.values : null
   const usage = values === null ? null : readActivityTokenBuckets(values.tokenUsage)
   if (usage === null) return null
-  return { sessionId, title: readString(value.title) ?? '', date: localDateKey(updatedAt), ...usage }
+  // 归集键：会话开始时间 → 归属日（与 store.ts 的事件日语义一致）。
+  // updatedAt 只作最后兜底，resumed 会话的历史累计值不随最后更新日前滚混入短窗口。
+  const startMs = readInt(value.startedAt) ?? readInt(value.createdAt) ?? readInt(value.updatedAt)
+  if (startMs === undefined) return null
+  return { sessionId, title: readString(value.title) ?? '', date: localDateKey(startMs), ...usage }
 }
 
 /**
