@@ -306,6 +306,11 @@
   超预算从旧轮裁、6 段 system prompt + {history} 模板、MIN_SUMMARY_LENGTH=50 质量
   校验）；客户端 `graycode.summarize` 命名空间 + `conversation.session.header.actions`
   槽「总结」按钮（order 30）+ 结果弹层（复制/关闭）；installSummarize 独立安装函数。
+- **本地开发调试链路（dev loop）**：`scripts/watch.mjs` + 根脚本 `dev:watch`（并行 tsc -w × 2 + tsdown -w）；
+  `scripts/setup-dev-profile.ps1` 把 web profile 切为目录链接开发模式（profile 内 `_dev-link`
+  junction → 仓库根，`@graycode/dsh*` 依赖改为 `link:./_dev-link/...`，绕过 pnpm Windows 盘符
+  拼接 bug）；client 改动重建后经 DSH `dsh-client-hmr`（500ms 轮询 + SSE）刷新网页即生效，
+  host 改动需重启 dsh web。流程文档：`docs/DEV_LOOP.md`。
 
 ### Changed（变更）
 
