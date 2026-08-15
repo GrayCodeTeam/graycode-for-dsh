@@ -22,11 +22,13 @@ import z from '@deepseek-ai/schemastery'
 import { installSubagentsGuards, type SubagentsGuard } from './adapters/dsh/guard.ts'
 import { countRunningChildrenViaList } from './adapters/dsh/counting.ts'
 import type { SubagentsSeamLike } from './adapters/dsh/seamTypes.ts'
+import { installCustomAgentRuntimes, type CustomAgentSeamLike, type CustomAgentToolsLike } from './customAgents/adapters/dsh/install.ts'
+import type { CustomAgentConfig } from './customAgents/domain/plan.ts'
 
 export const name = 'graycode-subagents'
 
-/** 依赖 `agents`（G2 判断主会话）与 `subagents`（seam，base 层挂载）。 */
-export const inject = ['agents', 'subagents'] as const
+/** 依赖 `agents`（G2 判断主会话）、`subagents`（seam，base 层挂载）与 `tools`（自定义子代理工具）。 */
+export const inject = ['agents', 'subagents', 'tools'] as const
 
 export interface Config {
   /**
@@ -39,11 +41,26 @@ export interface Config {
    * 默认 2）。超限拒绝新委派并说明。0 = 不限。
    */
   maxConcurrent: number
+  /**
+   * S2 自定义子代理：每个 enabled 条目注册一个委托给宿主 `spawn` 的 provider
+   * 与一个模型可见工具（`subagent_<name>`，身份 = 名称/描述/systemPrompt）。
+   * 热更新：配置变更 → 域 fiber 重启 → 旧注册随 effect disposer 清理后按新配置重挂。
+   */
+  customAgents: CustomAgentConfig[]
 }
+
+const customAgentSchema = z.object({
+  id: z.string().required(),
+  name: z.string().required(),
+  description: z.string().default(''),
+  systemPrompt: z.string().default(''),
+  enabled: z.boolean().default(true),
+})
 
 export const Config: z<Config> = z.object({
   maxHopDepth: z.number().step(1).min(0).default(5),
   maxConcurrent: z.number().step(1).min(0).default(2),
+  customAgents: z.array(customAgentSchema).default([]),
 })
 
 /** 跨域服务名：G2/G1/G3 守卫句柄（Gray 侧代码经 ctx.get 取用，可选）。 */
@@ -77,8 +94,14 @@ export function apply(ctx: Context, config: Config): void {
   // 跨域共享（可选增强）：守卫句柄供 Gray 侧工作流做「子→父任意寻址 fail-closed」
   // 与受守卫的消息投递。fiber 卸载时随 provide 与 effect 一并注销。
   const disposeProvide = ctx.provide(SUBAGENTS_GUARD_SERVICE_KEY, guard)
+  const disposeCustomAgents = installCustomAgentRuntimes(
+    runtime as unknown as CustomAgentSeamLike,
+    ctx.tools as unknown as CustomAgentToolsLike,
+    config.customAgents,
+  )
   ctx.effect(() => () => {
     disposeProvide()
     guard.dispose()
+    disposeCustomAgents()
   })
 }
