@@ -24,6 +24,7 @@ import {
   type RestorePreviewWire,
   type RestoreRemoteEnvelope,
   type RestoreResultWire,
+  type RestoreStep,
 } from '../src/client/restorePreview/types.ts'
 import {
   classifyPreviewFiles,
@@ -324,6 +325,52 @@ describe('restore confirmation state machine', () => {
     expect(step.phase).toBe('confirm')
     expect(step.session!.acknowledgedUntracked).toBe(true)
     step = restoreMachineStep(step, { type: 'RESTORE_STARTED', previewId: 'tok-1', at: 5 })
+    expect(step.phase).toBe('running')
+  })
+
+  it('keeps the untracked ack mandatory for restore when the preview needs it (H-6 guard intact)', () => {
+    let step = createRestoreMachine()
+    step = restoreMachineStep(step, { type: 'PREVIEW_STARTED', checkpointId: 'cp_1', deleteUntrackedFiles: true, at: 1 })
+    step = restoreMachineStep(step, { type: 'PREVIEW_OK', outcome: outcome(), at: 2 })
+    step = restoreMachineStep(step, { type: 'CONFIRM', acknowledgeUntracked: true, at: 3 })
+    expect(step.phase).toBe('confirm')
+    expect(canRestoreWith(step, 'tok-1')).toBe(true)
+    // Same armed state without the ack: restore stays blocked.
+    const noAck: RestoreStep = { ...step, session: { ...step.session!, acknowledgedUntracked: false } }
+    expect(canRestoreWith(noAck, 'tok-1')).toBe(false)
+    expect(restoreMachineStep(noAck, { type: 'RESTORE_STARTED', previewId: 'tok-1', at: 4 })).toBe(noAck)
+  })
+
+  it('does not deadlock when untracked deletion is on but the preview lists no untracked paths (H-6)', () => {
+    let step = createRestoreMachine()
+    step = restoreMachineStep(step, { type: 'PREVIEW_STARTED', checkpointId: 'cp_1', deleteUntrackedFiles: true, at: 1 })
+    step = restoreMachineStep(step, {
+      type: 'PREVIEW_OK',
+      outcome: outcome({ preview: previewWire({ untrackedPaths: [] }) }),
+      at: 2,
+    })
+    expect(confirmRequiresUntrackedAck(step)).toBe(false)
+    // Preview confirmation alone arms the step (nothing to acknowledge).
+    step = restoreMachineStep(step, { type: 'CONFIRM', acknowledgeUntracked: false, at: 3 })
+    expect(step.phase).toBe('confirm')
+    expect(canRestoreWith(step, 'tok-1')).toBe(true)
+    step = restoreMachineStep(step, { type: 'RESTORE_STARTED', previewId: 'tok-1', at: 4 })
+    expect(step.phase).toBe('running')
+  })
+
+  it('gives the paste-token path a restore exit even with untracked deletion on (H-6)', () => {
+    let step = createRestoreMachine()
+    step = restoreMachineStep(step, {
+      type: 'CONFIRM_WITH_TOKEN',
+      token: 'external-token',
+      checkpointId: 'cp_2',
+      deleteUntrackedFiles: true,
+      at: 1,
+    })
+    expect(step.phase).toBe('confirm')
+    expect(step.preview).toBeNull() // no local preview in paste-token mode
+    expect(canRestoreWith(step, 'external-token')).toBe(true)
+    step = restoreMachineStep(step, { type: 'RESTORE_STARTED', previewId: 'external-token', at: 2 })
     expect(step.phase).toBe('running')
   })
 

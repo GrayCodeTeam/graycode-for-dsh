@@ -14,7 +14,10 @@
  *   `previewId` (= the approval token). A mismatched id is a no-op.
  * - UNTRACKED DELETION ACK: when `deleteUntrackedFiles` is on and the preview
  *   lists untracked paths, `CONFIRM` additionally requires
- *   `acknowledgeUntracked: true` and the session records it.
+ *   `acknowledgeUntracked: true` and the session records it; `RESTORE_STARTED`
+ *   demands the recorded ack only in that same case — with no untracked paths
+ *   (or no local preview in paste-token mode) the preview confirmation alone
+ *   authorises the restore, so the step can never deadlock.
  * - NO CACHE-AS-SUCCESS: progress only ever merges host-reported counters;
  *   a `RESTORE_OK` with `success:false` lands on `failed` and keeps the
  *   result so per-item failures stay visible.
@@ -102,12 +105,23 @@ export function canConfirm(state: RestoreStep): boolean {
 /**
  * Whether a restore may run with the given previewId (the binding guard).
  * Accepted from `confirm`, or from `failed` as a retry of the same session
- * when the step is retryable.
+ * when the step is retryable. The untracked-deletion ack is demanded only
+ * when the loaded preview actually requires it (untracked deletion on AND
+ * untracked paths present); otherwise the preview confirmation is the sole
+ * gate — `deleteUntrackedFiles` on with no untracked paths, or paste-token
+ * mode with no local preview, must not block restore on an ack that can
+ * never be produced (H-6 deadlock).
  */
 export function canRestoreWith(state: RestoreStep, previewId: string): boolean {
   if (state.session === null || previewId !== state.session.previewId) return false
   if (state.phase !== 'confirm' && !(state.phase === 'failed' && state.retryable)) return false
-  if (state.session.deleteUntrackedFiles && !state.session.acknowledgedUntracked) return false
+  if (
+    state.preview !== null
+    && previewDeletionRequiresAck(state.preview, { deleteUntrackedFiles: state.session.deleteUntrackedFiles })
+    && !state.session.acknowledgedUntracked
+  ) {
+    return false
+  }
   return true
 }
 

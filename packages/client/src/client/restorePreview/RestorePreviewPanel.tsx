@@ -322,9 +322,7 @@ export function RestorePreviewPanel({
 
       {(step.phase === 'preview' || step.phase === 'confirm') && (
         <div style={bodyStyle}>
-          {step.preview === null ? (
-            <div style={hintStyle}>{t('previewing')}</div>
-          ) : (
+          {step.preview !== null && (
             <>
               {classification !== null && (
                 <RestorePreviewList t={t} classification={classification} legacy={step.preview.legacy === true} />
@@ -376,25 +374,31 @@ export function RestorePreviewPanel({
                   </button>
                 </div>
               )}
-
-              {step.phase === 'confirm' && (
-                <div style={approvalStyle} data-graycode-restorepreview="armed">
-                  <div style={warnStyle}>{t('confirmWarning')}</div>
-                  <button
-                    type="button"
-                    data-graycode-restorepreview="restore"
-                    style={onRestore === undefined || step.session === null ? disabledButtonStyle : buttonStyle}
-                    disabled={onRestore === undefined || step.session === null}
-                    title={onRestore === undefined ? t('replayOnly') : undefined}
-                    onClick={() => {
-                      if (onRestore !== undefined && step.session !== null) onRestore(step.session)
-                    }}
-                  >
-                    {t('restoreButton')}
-                  </button>
-                </div>
-              )}
             </>
+          )}
+
+          {step.preview === null && step.phase === 'preview' && (
+            <div style={hintStyle}>{t('previewing')}</div>
+          )}
+
+          {/* Paste-token mode: confirm phase with no local preview must still
+              render the armed restore entry so the flow has an exit (H-6). */}
+          {step.phase === 'confirm' && (
+            <div style={approvalStyle} data-graycode-restorepreview="armed">
+              <div style={warnStyle}>{t('confirmWarning')}</div>
+              <button
+                type="button"
+                data-graycode-restorepreview="restore"
+                style={onRestore === undefined || step.session === null ? disabledButtonStyle : buttonStyle}
+                disabled={onRestore === undefined || step.session === null}
+                title={onRestore === undefined ? t('replayOnly') : undefined}
+                onClick={() => {
+                  if (onRestore !== undefined && step.session !== null) onRestore(step.session)
+                }}
+              >
+                {t('restoreButton')}
+              </button>
+            </div>
           )}
         </div>
       )}
