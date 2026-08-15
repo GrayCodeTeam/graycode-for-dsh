@@ -1,10 +1,13 @@
+import { useMemo } from 'react'
 import type { ReactNode } from 'react'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   IconArchiveOutline20,
   IconChecklistOutline14,
   IconCodeOutline16,
   IconDataOutline16,
   IconEnhanceOutline16,
+  IconGraphLineOutline16,
   IconSettingsOutline16,
 } from './icons.tsx'
 import { AGENT_SCOPES } from './defaults.ts'
@@ -12,6 +15,10 @@ import { CheckpointManager } from './CheckpointManager.tsx'
 import { FieldSection, type FieldSpec, type GcTranslate } from './fields.tsx'
 import { buttonDangerStyle, noteStyle } from './styles.ts'
 import type { GrayCodeConfig, GrayRemoteInvoke } from './types.ts'
+import { ActivityHeatmapPanel } from '../activityHeatmap/ActivityHeatmapPanel.tsx'
+import { RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
+import { MemoryManagePanel } from '../memoryManage/MemoryManagePanel.tsx'
+import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
 
 export interface GrayCodePageProps {
   t: GcTranslate
@@ -20,6 +27,10 @@ export interface GrayCodePageProps {
   onReset: () => void
   remote: GrayRemoteInvoke
   defaultWorkspace?: string
+  /** Translate seat for the `graycode.activityHeatmap` namespace. */
+  activityT: TranslateNS<'graycode.activityHeatmap'>
+  /** Translate seat for the `graycode.memoryManage` namespace. */
+  memoryT: TranslateNS<'graycode.memoryManage'>
 }
 
 export type GrayCodePage = (props: GrayCodePageProps) => ReactNode
@@ -75,16 +86,49 @@ const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWor
   </div>
 )
 
-const MemoryPage: GrayCodePage = ({ t, config, onChange }) => (
+const MemoryPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, memoryT }) => {
+  // Adapt the section's `/graycode` remote invoker into the memory transport
+  // (same pattern as the activity panel); memoized so the panel stays stable.
+  const memoryTransport = useMemo(
+    () => createRemoteMemoryTransport((namespace, method, args, signal) => remote(namespace, method, args, signal)),
+    [remote],
+  )
+  return (
+    <div>
+      <FieldSection
+        title={t('pages.memory.title')}
+        description={t('pages.memory.description')}
+        fields={[
+          scope('memory', t),
+          { kind: 'number', path: ['memory', 'wakeLines'], labelKey: 'fields.wakeLines', min: 1, max: 10_000, step: 1 },
+          { kind: 'number', path: ['memory', 'entryChars'], labelKey: 'fields.entryChars', min: 1, max: 1000, step: 1 },
+          { kind: 'number', path: ['memory', 'partChars'], labelKey: 'fields.partChars', min: 1, max: 1_000_000, step: 1 },
+          { kind: 'number', path: ['memory', 'partLines'], labelKey: 'fields.partLines', min: 1, max: 100_000, step: 1 },
+        ]}
+        config={config}
+        onChange={onChange}
+        t={t}
+      />
+      <MemoryManagePanel
+        t={memoryT}
+        transport={memoryTransport}
+        workspace={defaultWorkspace}
+        entryChars={config.memory.entryChars}
+      />
+    </div>
+  )
+}
+
+const WorkflowsPage: GrayCodePage = ({ t, config, onChange }) => (
   <FieldSection
-    title={t('pages.memory.title')}
-    description={t('pages.memory.description')}
+    title={t('pages.workflows.title')}
+    description={t('pages.workflows.description')}
     fields={[
-      scope('memory', t),
-      { kind: 'number', path: ['memory', 'wakeLines'], labelKey: 'fields.wakeLines', min: 1, max: 10_000, step: 1 },
-      { kind: 'number', path: ['memory', 'entryChars'], labelKey: 'fields.entryChars', min: 1, max: 1000, step: 1 },
-      { kind: 'number', path: ['memory', 'partChars'], labelKey: 'fields.partChars', min: 1, max: 1_000_000, step: 1 },
-      { kind: 'number', path: ['memory', 'partLines'], labelKey: 'fields.partLines', min: 1, max: 100_000, step: 1 },
+      scope('workflows', t),
+      { kind: 'text', path: ['workflows', 'documentRoot'], labelKey: 'fields.documentRoot', monospace: true },
+      scope('branches', t),
+      { kind: 'boolean', path: ['stagedDiff', 'enabled'], labelKey: 'fields.stagedDiffEnabled' },
+      scope('stagedDiff', t),
     ]}
     config={config}
     onChange={onChange}
@@ -92,35 +136,37 @@ const MemoryPage: GrayCodePage = ({ t, config, onChange }) => (
   />
 )
 
-const WorkflowsPage: GrayCodePage = ({ t, config, onChange }) => (
-  <div>
-    <FieldSection
-      title={t('pages.workflows.title')}
-      description={t('pages.workflows.description')}
-      fields={[
-        scope('workflows', t),
-        { kind: 'text', path: ['workflows', 'documentRoot'], labelKey: 'fields.documentRoot', monospace: true },
-        scope('branches', t),
-        { kind: 'boolean', path: ['stagedDiff', 'enabled'], labelKey: 'fields.stagedDiffEnabled' },
-        scope('stagedDiff', t),
-      ]}
-      config={config}
-      onChange={onChange}
-      t={t}
-    />
-    <FieldSection
-      title={t('pages.activity.title')}
-      fields={[
-        { kind: 'boolean', path: ['activity', 'enabled'], labelKey: 'fields.activityEnabled' },
-        scope('activity', t),
-        { kind: 'number', path: ['activity', 'sampleIntervalMs'], labelKey: 'fields.sampleIntervalSeconds', min: 1, max: 3600, step: 1, transform: secondsTransform },
-      ]}
-      config={config}
-      onChange={onChange}
-      t={t}
-    />
-  </div>
-)
+const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT }) => {
+  // The transport adapts the surface's `activity/stats` endpoint onto the
+  // host remote dispatcher (`<namespace>/<method>`); memoized so the panel
+  // source stays stable across renders (no refetch loops).
+  const source = useMemo(
+    () => new RemoteActivityStatsDataSource((endpoint, args, signal) => {
+      const slash = endpoint.indexOf('/')
+      const namespace = slash === -1 ? endpoint : endpoint.slice(0, slash)
+      const method = slash === -1 ? '' : endpoint.slice(slash + 1)
+      return remote(namespace, method, args, signal)
+    }),
+    [remote],
+  )
+  return (
+    <div>
+      <FieldSection
+        title={t('pages.activity.title')}
+        description={t('pages.activity.description')}
+        fields={[
+          { kind: 'boolean', path: ['activity', 'enabled'], labelKey: 'fields.activityEnabled' },
+          scope('activity', t),
+          { kind: 'number', path: ['activity', 'sampleIntervalMs'], labelKey: 'fields.sampleIntervalSeconds', min: 1, max: 3600, step: 1, transform: secondsTransform },
+        ]}
+        config={config}
+        onChange={onChange}
+        t={t}
+      />
+      <ActivityHeatmapPanel t={activityT} source={source} />
+    </div>
+  )
+}
 
 const PromptPage: GrayCodePage = ({ t, config, onChange }) => (
   <div>
@@ -210,6 +256,7 @@ export const CATEGORIES: readonly GrayCodeCategory[] = [
   { id: 'checkpoints', labelKey: 'tabs.checkpoints', icon: <IconArchiveOutline20 size={16} />, page: CheckpointsPage },
   { id: 'memory', labelKey: 'tabs.memory', icon: <IconDataOutline16 size={16} />, page: MemoryPage },
   { id: 'workflows', labelKey: 'tabs.workflows', icon: <IconChecklistOutline14 size={16} />, page: WorkflowsPage },
+  { id: 'activity', labelKey: 'tabs.activity', icon: <IconGraphLineOutline16 size={16} />, page: ActivityPage },
   { id: 'prompt', labelKey: 'tabs.prompt', icon: <IconEnhanceOutline16 size={16} />, page: PromptPage },
   { id: 'tools', labelKey: 'tabs.tools', icon: <IconCodeOutline16 size={16} />, page: ToolsPage },
   { id: 'advanced', labelKey: 'tabs.advanced', icon: <IconSettingsOutline16 size={16} />, page: AdvancedPage },

@@ -237,6 +237,8 @@ export function apply(ctx: ClientContext): void {
   void store.refresh()
   const localeFace = ctx.locale as unknown as GrayCodeSettingsSectionInjected['locale']
   const t = ctx.locale.bind(GRAYCODE_SETTINGS_NS) as GrayCodeSettingsSectionInjected['t']
+  const activityT = ctx.locale.bind(GRAYCODE_ACTIVITY_HEATMAP_NS) as GrayCodeSettingsSectionInjected['activityT']
+  const memoryT = ctx.locale.bind(GRAYCODE_MEMORY_MANAGE_NS) as GrayCodeSettingsSectionInjected['memoryT']
   // The host config document may change outside the panel (settings file
   // edits, another tab); the connection reset is the only lifecycle the panel
   // subscribes to — the panel also refreshes on every open-render anyway.
@@ -256,6 +258,8 @@ export function apply(ctx: ClientContext): void {
           locale: localeFace,
           remote,
           defaultWorkspace: connection.hostDescription.getSnapshot()?.cwd,
+          activityT,
+          memoryT,
         }),
       },
       GrayCodeSettingsSection,

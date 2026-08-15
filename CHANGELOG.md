@@ -165,9 +165,22 @@
   预留（migration scopeOverrides 回填等后续消费方）；读路径 fail-open、写路径歧义
   fail-closed（不猜测、不覆盖数据）；memory_wake/note/recall 新增 `scope` 参数
   （`global` / `workspace` 单 scope 读取与写入，对齐 PLAN_V2 L894-896 检索契约）；
-  migration memoryTarget 目录名计算复用 `stableIdOfScopeKey`（消除重复哈希实现）；
-  新增 registry 单测与集成测试（漂移找回 / 幂等登记 / 损坏降级 / 歧义 fail-closed /
-  写失败 fail-open）。
+   migration memoryTarget 目录名计算复用 `stableIdOfScopeKey`（消除重复哈希实现）；
+   新增 registry 单测与集成测试（漂移找回 / 幂等登记 / 损坏降级 / 歧义 fail-closed /
+   写失败 fail-open）。
+- **活动统计面板（C6 接线，独立设置页签）**：设置分区新增「活动统计」分类——活动采样
+   配置（enabled / agentScope / sampleIntervalMs）从「工作流」页签迁出；面板挂载
+   `ActivityHeatmapPanel`（作息热力图 / 每日时长 / 月度汇总 / 范围切换与显隐开关），
+   数据经 `/graycode` 通道走 `activity/stats` Remote 端点；总览复刻原项目活动卡片
+   （今日已用 / 当前连续工作 / 范围内合计 + 生成时间戳），新增时长与时间戳格式化
+   纯函数（`formatActivityDuration` / `formatGeneratedAt`）及配套用例。
+- **记忆管理面板（P4-03 接线，设置页「记忆」分区挂载）**：设置分区「记忆」页签在配置
+   字段下方挂载 `MemoryManagePanel`——人类可直接查看 / 搜索 / 编辑 / 删除记忆
+   （原项目 web 记忆管理区功能移植；新增「手动新增」输入框：UTF-8 字节计数对照
+   `entryChars`、Ctrl/Cmd+Enter 提交、成功后重载列表）。数据经 `/graycode` 通道走
+   `memory/*` Remote 端点；配套新增 host 侧 `memory/note` 端点（等价 memory_note
+   工具写入路径，写路径创建缺失的 workspace 存储），客户端传输新增 `add`（remote
+   与 mock 双实现 + 契约测试）。
 
 ### Changed（变更）
 

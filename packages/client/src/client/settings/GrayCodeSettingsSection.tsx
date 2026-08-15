@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
+import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CATEGORIES } from './pages.tsx'
 import type { GcTranslate } from './fields.tsx'
 import { useGrayCodeStore, type GrayCodeStore } from './store.ts'
@@ -39,6 +40,10 @@ export interface GrayCodeSettingsSectionInjected {
   locale: GrayCodeLocaleFace
   remote: GrayRemoteInvoke
   defaultWorkspace?: string
+  /** Translate seat for the `graycode.activityHeatmap` namespace. */
+  activityT: TranslateNS<'graycode.activityHeatmap'>
+  /** Translate seat for the `graycode.memoryManage` namespace. */
+  memoryT: TranslateNS<'graycode.memoryManage'>
 }
 
 /** 宿主 owner props（设置外壳）+ 注入面。 */
@@ -47,7 +52,7 @@ export interface GrayCodeSettingsSectionProps extends GrayCodeSettingsSectionInj
   close?: () => void
 }
 
-export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorkspace }: GrayCodeSettingsSectionProps): ReactNode {
+export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorkspace, activityT, memoryT }: GrayCodeSettingsSectionProps): ReactNode {
   const state = useGrayCodeStore(store)
   useEffect(() => {
     void store.refresh()
@@ -119,6 +124,8 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorks
           onReset: handleReset,
           remote,
           defaultWorkspace,
+          activityT,
+          memoryT,
         })}
       </div>
     </div>

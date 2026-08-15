@@ -46,9 +46,14 @@ standard codes.
 ## Wiring
 
 The main session (`packages/client/src/client/index.ts`) registers the locale
-namespace and re-exports the panel; a mount recipe is not available in the
-rc.6 host (no management-view slot; browser calls can use the `/graycode`
-remote bridge). Once a mount point exists:
+namespace and re-exports the panel. The native settings section now mounts it
+as the dedicated「活动统计 / Activity statistics」category
+(`packages/client/src/client/settings/pages.tsx` → `ActivityPage`): the page
+adapts the section's `/graycode` remote invoker into an
+`ActivityRemoteTransport` (`activity/stats` → `remote('activity', 'stats', …)`)
+and renders `<ActivityHeatmapPanel t={activityT} source={source} />` with a
+memoized `RemoteActivityStatsDataSource`. The panel remains a mountable export
+for other hosts:
 
 ```ts
 // 1. Register the locale namespace (own ns).

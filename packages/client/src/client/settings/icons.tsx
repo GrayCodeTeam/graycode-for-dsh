@@ -212,3 +212,14 @@ export function IconChecklistOutline14({ size = 14 }: IconProps): ReactNode {
     </>
   ))
 }
+
+/** 活动统计（趋势折线）。 */
+export function IconGraphLineOutline16({ size = 16 }: IconProps): ReactNode {
+  return svg(size, '0 0 24 24', (
+    <>
+      <path d="M3 3v18h18" />
+      <path d="m5 16 4.5-5.5 3.5 3 6-8" />
+      <circle cx="13" cy="13.5" r="1" />
+    </>
+  ))
+}
