@@ -245,14 +245,39 @@ export class Harness {
   }
 }
 
+/** 可容忍的枚举失败：不可读目录（EACCES/EPERM）、并发清理（ENOENT/ENOTDIR）、悬空链接（ELOOP）。 */
+const SKIP_FS_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'ELOOP'])
+
+function isSkippableFsError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    SKIP_FS_CODES.has((error as { code: string }).code)
+  )
+}
+
 /** Recursively collect every file path under a root. */
 export async function listFilesRecursive(root: string): Promise<string[]> {
   const { readdir, stat } = await import('node:fs/promises')
   const out: string[] = []
   const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir)) {
+    // 4.19-L2：不可读/已消失的目录跳过而非中断整个列举（test-only 枚举工具，
+    // 无法访问的分支不应让其余可读目录的收集一起失败）。
+    const entries = await readdir(dir).catch((error: unknown) => {
+      if (!isSkippableFsError(error)) throw error
+      return undefined
+    })
+    if (entries === undefined) return
+    for (const entry of entries) {
       const full = `${dir}/${entry}`
-      const info = await stat(full)
+      // 条目在 walk 中途消失（含悬空 symlink）：跳过而非中断。
+      const info = await stat(full).catch((error: unknown) => {
+        if (!isSkippableFsError(error)) throw error
+        return undefined
+      })
+      if (info === undefined) continue
       if (info.isDirectory()) await walk(full)
       else out.push(full)
     }

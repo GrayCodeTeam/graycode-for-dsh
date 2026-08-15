@@ -17,7 +17,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import { Harness, listFilesRecursive, type HarnessOptions } from './harness.ts'
 
 const TEMP_DIRS: string[] = []
@@ -89,6 +89,29 @@ async function waitForEvent(
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error(`timed out after ${timeoutMs}ms waiting for ${label}`)
+}
+
+/** S5 驱动进入 running 的等待窗口：慢 CI 上首块文本可能晚于 5s 到达（3.19-M3），放宽到 30s。 */
+const S5_DRIVE_TIMEOUT_MS = 30_000
+/** S5 cancel 后回到 idle 的超时兜底：名义上应瞬时完成，15s 覆盖慢 CI 余量（3.19-M3）。 */
+const S5_IDLE_TIMEOUT_MS = 15_000
+
+/**
+ * `agent.whenIdle()` 的超时兜底（3.19-M3）：取消未被 honor 或 loop 异常时，
+ * 把无限挂起转为带诊断信息的失败，而非让测试超时挂死。
+ */
+async function whenIdleWithin(agent: Agent, label: string, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      agent.whenIdle(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms waiting for ${label}`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 describe('mock-LLM loop E2E', () => {
@@ -194,13 +217,18 @@ describe('mock-LLM loop E2E', () => {
 
     // 重建 Context（同一 workspace/dataRoot，记忆仍在磁盘上），
     // 以原会话完整事件为 seed 重放。
+    // 显式守卫（3.19-M4）：前序阶段失败时给出可诊断错误，而非 `harness!` 的晦涩 TypeError。
+    if (!harness) {
+      throw new Error('S4 前置失败：首个 harness 未创建成功（上一 try 内应已抛出原始异常）')
+    }
     let replay: Harness | undefined
     try {
-      replay = await Harness.create({ workspace: harness!.workspace, dataRoot: harness!.dataRoot, script: [] })
+      const { workspace, dataRoot } = harness
+      replay = await Harness.create({ workspace, dataRoot, script: [] })
       const options: CreateAgentOptions = {
         sessionId: SessionId('s4-replay'),
         seed: originalEvents,
-        meta: { cwd: harness!.workspace },
+        meta: { cwd: workspace },
         agentOptions: { provider: 'echo', model: 'echo-model' },
       }
       const handle = await replay.ctx.agents.create(options)
@@ -253,6 +281,7 @@ describe('mock-LLM loop E2E', () => {
           source: { kind: 'user' },
         }),
       )
+      // M3：慢 CI 上首块文本可能晚于 5s 到达（waitForEvent 默认硬超时），显式放宽到 30s。
       await waitForEvent(
         () => harness!.eventsOf(agent),
         event =>
@@ -260,9 +289,11 @@ describe('mock-LLM loop E2E', () => {
           event.data.chunk.type === 'text-delta' &&
           event.data.chunk.text === 'part one',
         "assistant/chunk 'part one'（驱动进入 running）",
+        S5_DRIVE_TIMEOUT_MS,
       )
       agent.cancel({ kind: 'user' })
-      await agent.whenIdle()
+      // M3：whenIdle 无超时兜底，取消未被 honor / loop 异常时可能永久挂起。
+      await whenIdleWithin(agent, 'S5 cancel 后 agent 回到 idle', S5_IDLE_TIMEOUT_MS)
 
       const events = harness.eventsOf(agent)
       const turnEnd = [...events].reverse().find(event => event.type === 'turn/end')
