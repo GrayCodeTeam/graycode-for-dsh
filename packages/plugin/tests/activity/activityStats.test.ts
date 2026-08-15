@@ -81,6 +81,19 @@ describe('hourlyHeatmap', () => {
     expect(hours[23]).toBe(5)
     expect(hours[0]).toBe(5)
   })
+
+  test('任意秒偏移时热力分钟总和与 session.minutes 完全一致', () => {
+    const start = at(2026, 6, 1, 12, 0, 30)
+    const end = at(2026, 6, 1, 12, 1, 30)
+    const sessions = buildSessions([start, end])
+    const hours = hourlyHeatmap(sessions)
+
+    expect(sessions[0]!.minutes).toBe(1)
+    expect(hours[12]).toBe(1)
+    expect(hours.reduce((sum, value) => sum + value, 0)).toBe(
+      sessions.reduce((sum, session) => sum + session.minutes, 0),
+    )
+  })
 })
 
 describe('dayStats', () => {

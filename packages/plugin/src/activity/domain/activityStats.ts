@@ -65,26 +65,21 @@ function makeSession(start: number, end: number, minuteMs: number): ActivitySess
 export function hourlyHeatmap(sessions: ActivitySession[]): number[] {
   const hours = new Array<number>(24).fill(0)
   for (const session of sessions) {
-    // 会话起点所在整分钟开始，按「本地时区」小时边界切块累加（每块最多 60 分钟），
-    // 替代逐分钟展开：长会话从 O(分钟数) 降到 O(小时数)
-    const startMinute = Math.floor(session.start / 60_000) * 60_000
-    // 会话 [start, end] 覆盖的最后一分钟：end 恰在整分钟时该分钟不覆盖
-    // （与 buildSessions 的 ceil((end-start)/60000) 口径一致）。
-    // 单采样会话（start === end）恰落在整分钟上时 floor((end-1)/60000) 会退回
-    // 上一分钟（endMinute < startMinute），while 循环整体跳过 → 热力 0 分钟而
-    // totalMinutes=1。以 startMinute 作兜底下限：单采样整分钟会话至少计 1 分钟。
-    const endMinute = Math.max(startMinute, Math.floor((session.end - 1) / 60_000) * 60_000)
-    let m = startMinute
-    while (m <= endMinute) {
-      // 本地时区小时起点（setMinutes(0,0,0)），而非 UTC 整点边界
-      const hourStart = new Date(m).setMinutes(0, 0, 0)
-      const hourEnd = hourStart + 3_600_000
-      // +1 分钟：endMinute 本身那一分钟也计入（与逐分钟展开语义一致）
-      const blockEnd = Math.min(hourEnd, endMinute + 60_000)
-      const minutes = Math.round((blockEnd - m) / 60_000)
+    // buildSessions 已把持续时间量化为整数分钟。热力图必须精确分配同样数量
+    // 的分钟；若重新按 start/end 所在的墙钟分钟取整，任意秒偏移（例如
+    // 12:00:30 → 12:01:30）会错误覆盖两个格子而 daily 只有 1 分钟。
+    let m = Math.floor(session.start / 60_000) * 60_000
+    let remaining = session.minutes
+    while (remaining > 0) {
+      // 使用本地时区的下一小时边界，并按块累计，保持 O(小时数)。
+      const nextHour = new Date(m)
+      nextHour.setMinutes(60, 0, 0)
+      const capacity = Math.max(1, Math.round((nextHour.getTime() - m) / 60_000))
+      const minutes = Math.min(remaining, capacity)
       const h = new Date(m).getHours()
       hours[h] = (hours[h] ?? 0) + minutes
-      m = hourEnd
+      remaining -= minutes
+      m += minutes * 60_000
     }
   }
   return hours
