@@ -155,6 +155,19 @@
   规避 api-proxy 设置传输 namespace 白名单对第三方命名空间的 `settings-not-exposed` 限制；
   支持渠道 / MCP 服务器 / 子代理列表编辑、配置导出导入（JSON）与一键重置；zh/en 双语 +
   ja 占位。
+- **工作区绑定记忆（ADR-0004 注册表实施，memory 域接入）**：`WorkspaceRegistry`
+  （`src/memory/registry.ts`）——`<dataRoot>/workspaces/registry.json`（version 1，原子
+  tmp+rename 写）持久化 cwd → 稳定 workspaceId 权威映射；stableId 与记忆目录哈希同算法
+  （零目录迁移），`MemoryService.getWorkspace` 先经 `resolve(cwd)`（direct/alias/none
+  三态）再寻址，别名/旧路径形态自动重定向到权威存储（项目移动/改名后仍取回原记忆），
+  实例缓存按权威键键控（别名与权威形态共享同一实例）；写路径 `register(cwd)` 登记 +
+  realpath 变体自动别名（统一符号链接 / `..` / 大小写形态）；手动别名 `registerAlias`
+  预留（migration scopeOverrides 回填等后续消费方）；读路径 fail-open、写路径歧义
+  fail-closed（不猜测、不覆盖数据）；memory_wake/note/recall 新增 `scope` 参数
+  （`global` / `workspace` 单 scope 读取与写入，对齐 PLAN_V2 L894-896 检索契约）；
+  migration memoryTarget 目录名计算复用 `stableIdOfScopeKey`（消除重复哈希实现）；
+  新增 registry 单测与集成测试（漂移找回 / 幂等登记 / 损坏降级 / 歧义 fail-closed /
+  写失败 fail-open）。
 
 ### Changed（变更）
 

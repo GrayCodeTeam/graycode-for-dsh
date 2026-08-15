@@ -362,6 +362,15 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 - **D-6 注册表立项（✅ ADR-0004）**：稳定 workspaceId 注册表（cwd → stableId 权威
   映射，stableId 与现有目录哈希同算法 → 零目录迁移），跨 memory/checkpoints/
   migration/stagedWrite 四域；本期只落手动脉冲（scopeOverrides），实施另立计划。
+- **D-6 注册表实施（✅ memory 域接入）**：`WorkspaceRegistry`（`src/memory/registry.ts`，
+  `<dataRoot>/workspaces/registry.json`，原子 tmp+rename 写，version 1）——
+  `MemoryService.getWorkspace` 先经 `resolve(cwd)`（direct/alias/none 三态）再寻址，
+  实例缓存按解析后的权威键键控；写路径 `register(cwd)` 登记 + realpath 变体自动
+  别名；手动别名 `registerAlias` 预留（migration scopeOverrides 回填等后续消费方）；
+  读路径 fail-open / 写路径歧义 fail-closed；memory_wake/note/recall 新增 `scope`
+  参数（单 scope 读取/写入，对齐 PLAN_V2 L894-896 契约）；migration memoryTarget
+  目录名计算改为复用 `stableIdOfScopeKey`（消除重复哈希实现）。checkpoints /
+  stagedWrite 两域接入点待后续计划。
 - host 侧新增 `migration/scopeMap` Remote 端点（POST `{sourceDir}` → `{entries}`，
   dry-run scan 消费；仅 allowLegacyReaders=true 时注册，遵守安全门）。
 

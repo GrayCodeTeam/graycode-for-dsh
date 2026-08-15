@@ -175,3 +175,44 @@ JSONL 三个文件，绝不触碰 `LOG.txt`/`TREE/`。
 - 测试：`tests/memory/importLegacy.spec.ts`（320/1024/损坏隔离/TREE/幂等）、
   `tests/memory/memoryFormat.spec.ts`（编解码/升级）、`tests/memory/logFormat.spec.ts`
   （旧解析器 + 320 导入）、既有 42 用例语义等价保留。
+
+## 9. 工作区注册表（ADR-0004 稳定 workspaceId）
+
+> 状态：已实现（memory 域接入；checkpoints/migration/stagedWrite 三域接入点
+> 待后续计划）。
+
+- **位置**：`<dataRoot>/workspaces/registry.json`（与 migration ledger 同级，
+  独立文件域；原子 tmp+rename 写，同 ledger 惯例）。实现：
+  `src/memory/registry.ts`（`WorkspaceRegistry`）。
+- **形状**（`version: 1`）：
+
+  ```jsonc
+  {
+    "version": 1,
+    "entries": {
+      "<stableId>": {
+        "cwd": "/abs/current/path",   // 权威路径（首次登记的原始形态，仅展示用）
+        "aliases": ["/old/path/a"],   // 归一化 scope key（含 realpath 变体与手动别名）
+        "firstSeenAt": "…",
+        "updatedAt": "…"
+      }
+    }
+  }
+  ```
+
+- **stableId** = `sha256(normalizeWorkspaceKey(cwd))` 前 16 hex——与工作区记忆
+  目录名（`memory-workspaces/<hash16>/`）同算法，注册表上线零目录迁移。
+- **解析语义**：`MemoryService.getWorkspace` 在按 cwd 寻址前先经
+  `registry.resolve(cwd)`：直接命中（direct）→ 权威键；命中某条记录的 aliases
+  或旧 cwd（alias）→ 解析为该条记录的权威键（路径漂移后仍取回原记忆）；
+  未命中（none）→ 按现行为（cwd 直接哈希寻址）。实例缓存均按**解析后的权威键**
+  键控，别名形态与权威形态共享同一 MemoryManager，不会并发触碰同一目录。
+- **写路径登记**：创建工作区存储后 `registry.register(cwd)`——刷新/补别名；
+  登记时 best-effort 记录 realpath 归一化变体为别名（自动统一符号链接 / `..` /
+  大小写规范的路径形态）；新路径形态只补别名、不新建条目（不允许隐式合并
+  两个 stableId 的记忆）。手动别名经 `registerAlias(stableId, aliasPath)` 接入
+  （migration scopeOverrides 回填等后续消费方）。
+- **降级**：读路径 fail-open（注册表损坏/缺失 → 按 cwd 直接哈希寻址，仅告警）；
+  写路径遇歧义（同路径命中多个条目）fail-closed（不猜测、不覆盖数据，按现行为）。
+- **边界**：注册表明文存储绝对路径（同 scope.json 现状），本地用户数据，
+  不随任何报告/artifact 导出；不改变记忆目录命名算法。
