@@ -222,7 +222,7 @@ describe('rewriteLoopRequest', () => {
     // 历史：user(h1) / assistant(h2) / tool-result user(t1) / 当前轮 user(cur)
     const options = richLoopOptions()
     const result = rewriteLoopRequest(options, [
-      { injection: { role: 'user', text: 'post' }, placement: 'after-history' },
+      { injection: { role: 'user', text: 'post', entryOrder: 2 }, placement: 'after-history' },
     ])
     const postIndex = result.options.messages.findIndex(message =>
       message.content.some(block => (block as { text?: string }).text === 'post'),
@@ -239,7 +239,7 @@ describe('rewriteLoopRequest', () => {
       ],
     })
     const result = rewriteLoopRequest(options, [
-      { injection: { role: 'assistant', text: 'post' }, placement: 'after-history' },
+      { injection: { role: 'assistant', text: 'post', entryOrder: 0 }, placement: 'after-history' },
     ])
     expect(result.options.messages.at(-1)!.content).toEqual([{ type: 'text', text: 'post' }])
     // 原 assistant 消息仍在（before 位置）
