@@ -24,6 +24,7 @@ import {
   dismissForget,
   findMatchRanges,
   IDLE_FORGET_STATE,
+  INITIAL_MEMORY_SEARCH_SETTLE,
   MemoryAddInFlightGate,
   isCurrentMemoryConfigResponse,
   isStaleMemoryCursorFailure,
@@ -38,6 +39,7 @@ import {
   rejectForget,
   requestForget,
   resolveForget,
+  settleMemorySearch,
   startMemoryAddRequest,
   toMemoryFailure,
 } from '../src/client/memoryManage/logic.ts'
@@ -116,6 +118,25 @@ describe('memory request context identity', () => {
       .not.toBe(memoryRequestContextKey({ text: 'q', scope: 'workspace', workspace: 'D:\\repo' }))
     expect(memoryRequestContextKey({ text: 'q', scope: 'global', workspace: 'C:\\repo' }))
       .toBe(memoryRequestContextKey({ text: 'q', scope: 'global', workspace: 'D:\\repo' }))
+  })
+})
+
+describe('settleMemorySearch (H-7a regression)', () => {
+  it('advances the fetch generation on every settle, even for an unchanged applied query', () => {
+    const first = settleMemorySearch(INITIAL_MEMORY_SEARCH_SETTLE, 'ab')
+    expect(first.appliedQuery).toBe('ab')
+    expect(first.fetchGeneration).toBe(1)
+    // Typing "ab" → "abc" → "ab" settles back on the SAME applied query; the
+    // generation must still advance so the panel's fetch effect cannot bail
+    // out on an unchanged appliedQuery and leave the panel stuck in 'loading'.
+    const second = settleMemorySearch(first, 'ab')
+    expect(second.appliedQuery).toBe('ab')
+    expect(second.fetchGeneration).toBe(2)
+  })
+
+  it('starts frozen with an empty applied query', () => {
+    expect(INITIAL_MEMORY_SEARCH_SETTLE).toEqual({ appliedQuery: '', fetchGeneration: 0 })
+    expect(Object.isFrozen(INITIAL_MEMORY_SEARCH_SETTLE)).toBe(true)
   })
 })
 
@@ -375,6 +396,14 @@ describe('forget confirmation state machine', () => {
     expect(cancelForget(IDLE_FORGET_STATE)).toBe(IDLE_FORGET_STATE)
     const errored = rejectForget(confirmForget(armed), failure(CODES.INTERNAL))
     expect(cancelForget(errored).phase).toBe('idle')
+  })
+
+  it('cancel resets a submitting forget so a superseded flow can never get stuck (H-7b)', () => {
+    const submitting = confirmForget(requestForget(IDLE_FORGET_STATE, target, preview))
+    expect(submitting.phase).toBe('submitting')
+    const reset = cancelForget(submitting)
+    expect(reset).toEqual(IDLE_FORGET_STATE)
+    expect(reset.phase).toBe('idle')
   })
 
   it('confirm is the only path to submitting (double-submit guarded)', () => {
@@ -841,6 +870,30 @@ describe('createMockMemoryTransport', () => {
 // ---------------------------------------------------------------------------
 // Remote transport adapter
 // ---------------------------------------------------------------------------
+
+describe('memory transport timeout (3.4-M3 regression)', () => {
+  const hangingInvoker: GrayRemoteInvoker = () => new Promise<never>(() => {})
+
+  it('fails a hung host call as GRAY_INTERNAL instead of hanging forever', async () => {
+    const hanging = createRemoteMemoryTransport(hangingInvoker, { timeoutMs: 5 })
+    const result = await hanging.list({})
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.code).toBe(CODES.INTERNAL)
+  })
+
+  it('releases the add-gate lease once a hung host call times out', async () => {
+    const hanging = createRemoteMemoryTransport(hangingInvoker, { timeoutMs: 5 })
+    const gate = new MemoryAddInFlightGate()
+    const request = startMemoryAddRequest(gate, () => hanging.add({ text: 'x' }))
+    expect(request.started).toBe(true)
+    expect(gate.isInFlight()).toBe(true)
+    if (!request.started) return
+    const result = await request.completion
+    expect(result.ok).toBe(false)
+    expect(gate.isInFlight()).toBe(false)
+  })
+})
 
 describe('createRemoteMemoryTransport', () => {
   function recordInvoker(calls: Array<{ namespace: string; method: string; args: unknown }>): GrayRemoteInvoker {

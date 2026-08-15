@@ -52,6 +52,32 @@ export function memoryRequestContextKey(state: Pick<MemoryQueryState, 'text' | '
 }
 
 /**
+ * H-7a: the debounced search settle the panel applies and then fetches.
+ *
+ * `fetchGeneration` advances on EVERY settle — even when the applied query is
+ * identical to the previous one — because every keystroke already invalidated
+ * the in-flight fetch (the panel bumps its request seq refs on input). The
+ * panel includes the generation in its fetch-effect dependencies, so an
+ * unchanged `appliedQuery` cannot bail the effect out and leave the panel
+ * stuck in 'loading' forever (H-7a).
+ */
+export interface MemorySearchSettle {
+  readonly appliedQuery: string
+  readonly fetchGeneration: number
+}
+
+/** Initial settle (empty query, no fetch yet). Frozen so callers cannot mutate it. */
+export const INITIAL_MEMORY_SEARCH_SETTLE: MemorySearchSettle = Object.freeze({
+  appliedQuery: '',
+  fetchGeneration: 0,
+})
+
+/** Apply one debounced search settle; always advances the fetch generation. */
+export function settleMemorySearch(prev: MemorySearchSettle, queryText: string): MemorySearchSettle {
+  return { appliedQuery: queryText, fetchGeneration: prev.fetchGeneration + 1 }
+}
+
+/**
  * Normalize a page size to the host contract: missing/≤0 → default (20),
  * above the cap → cap (100). Non-finite values fall back to the default.
  */
@@ -386,9 +412,15 @@ export function requestForget(state: ForgetState, target: ForgetTarget, preview:
   return { phase: 'confirming', target, preview, outcome: null, error: null }
 }
 
-/** Abandon: confirming|error → idle. No-op otherwise. */
+/**
+ * Abandon: confirming|submitting|error → idle. Submitting is included so a
+ * cancel (or a superseded flow) can never leave the machine stuck: the host
+ * write itself is not cancellable, but the caller bumps the flow sequence
+ * before resetting, so the in-flight response is dropped by the panel guard
+ * (H-7b).
+ */
 export function cancelForget(state: ForgetState): ForgetState {
-  if (state.phase !== 'confirming' && state.phase !== 'error') return state
+  if (state.phase !== 'confirming' && state.phase !== 'submitting' && state.phase !== 'error') return state
   return IDLE_FORGET_STATE
 }
 

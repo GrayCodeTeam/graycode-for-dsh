@@ -15,7 +15,12 @@
 import { useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import { diffMemoryText, type MemoryEntryViewModel, type MemoryDiffSegmentType } from './logic.ts'
+import {
+  diffMemoryText,
+  type MemoryEntryViewModel,
+  type MemoryErrorView,
+  type MemoryDiffSegmentType,
+} from './logic.ts'
 
 /** Composed props for the edit overlay. */
 export interface MemoryEditOverlayProps {
@@ -24,6 +29,10 @@ export interface MemoryEditOverlayProps {
   entry: MemoryEntryViewModel
   /** True while the panel awaits `memory/edit`. */
   saving: boolean
+  /** Effective host `entryChars` byte limit (undefined → limit unknown). */
+  entryChars?: number
+  /** Save failure to surface inside the overlay (the panel banner is hidden behind the scrim). */
+  error?: MemoryErrorView | null
   /** Declarative save (called with the reviewed new text). */
   onSave: (text: string) => void
   /** Declarative cancel. */
@@ -157,6 +166,36 @@ const buttonDisabledStyle: CSSProperties = {
   cursor: 'not-allowed',
 }
 
+const byteRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '0.5rem',
+}
+
+const byteCounterStyle: CSSProperties = {
+  fontSize: '10px',
+  opacity: 0.7,
+}
+
+const byteOverflowStyle: CSSProperties = {
+  ...byteCounterStyle,
+  color: '#f85149',
+  opacity: 1,
+  fontWeight: 600,
+}
+
+const errorStyle: CSSProperties = {
+  color: '#f85149',
+  fontSize: '11px',
+}
+
+/** UTF-8 byte length of a string (TextEncoder in browsers; fallback for node). */
+function utf8Bytes(text: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length
+  return text.length
+}
+
 const SEGMENT_STYLE: Record<MemoryDiffSegmentType, CSSProperties> = {
   same: {},
   added: { color: '#3fb950' },
@@ -166,11 +205,21 @@ const SEGMENT_STYLE: Record<MemoryDiffSegmentType, CSSProperties> = {
 /**
  * Modal edit overlay with live diff preview.
  */
-export function MemoryEditOverlay({ t, entry, saving, onSave, onCancel }: MemoryEditOverlayProps): ReactNode {
+export function MemoryEditOverlay({
+  t,
+  entry,
+  saving,
+  entryChars,
+  error,
+  onSave,
+  onCancel,
+}: MemoryEditOverlayProps): ReactNode {
   const [text, setText] = useState(entry.text)
   const diff = useMemo(() => diffMemoryText(entry.text, text), [entry.text, text])
   const empty = text.trim().length === 0
-  const canSave = diff.changed && !empty && !saving
+  const bytes = utf8Bytes(text)
+  const overLimit = entryChars !== undefined && bytes > entryChars
+  const canSave = diff.changed && !empty && !saving && !overLimit
 
   return (
     <div data-graycode-memory="edit-overlay" style={scrimStyle}>
@@ -199,6 +248,20 @@ export function MemoryEditOverlay({ t, entry, saving, onSave, onCancel }: Memory
           style={textareaStyle}
           onChange={event => setText(event.target.value)}
         />
+        <div style={byteRowStyle}>
+          <span
+            data-graycode-memory="edit-bytes"
+            style={overLimit ? byteOverflowStyle : byteCounterStyle}
+          >
+            {bytes}
+            {entryChars !== undefined ? `/${entryChars}` : ''}
+          </span>
+          {overLimit && (
+            <span data-graycode-memory="edit-overflow" style={errorStyle}>
+              {t('edit.tooLong')}
+            </span>
+          )}
+        </div>
         {empty && (
           <div data-graycode-memory="edit-required" style={warnStyle}>
             {t('edit.required')}
@@ -232,6 +295,11 @@ export function MemoryEditOverlay({ t, entry, saving, onSave, onCancel }: Memory
             <span data-graycode-memory="diff-unchanged">{t('edit.unchanged')}</span>
           )}
         </div>
+        {error != null && (
+          <div data-graycode-memory="edit-error" data-code={error.code} style={errorStyle}>
+            {t('error.title')}: {t(error.localeKey)}
+          </div>
+        )}
         <div style={footerStyle}>
           <span style={saveHintStyle}>{t('edit.saveHint')}</span>
           <button type="button" data-graycode-memory="edit-cancel" style={buttonStyle} disabled={saving} onClick={onCancel}>

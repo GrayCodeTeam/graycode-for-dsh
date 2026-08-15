@@ -23,6 +23,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MemoryManageTransport } from './api.ts'
 import {
   IDLE_FORGET_STATE,
+  INITIAL_MEMORY_SEARCH_SETTLE,
   MemoryAddInFlightGate,
   appendMemoryListPage,
   buildMemoryEntryView,
@@ -44,6 +45,7 @@ import {
   rejectForget,
   requestForget,
   resolveForget,
+  settleMemorySearch,
   startMemoryAddRequest,
   toMemoryFailure,
   type ForgetState,
@@ -52,6 +54,7 @@ import {
   type MemoryErrorTone,
   type MemoryListViewModel,
   type MemoryQueryState,
+  type MemorySearchSettle,
 } from './logic.ts'
 import { GRAY_MEMORY_SCOPES, GRAY_REMOTE_ERROR_CODES, type GrayMemoryScope } from './types.ts'
 import { MemoryEntryList } from './MemoryEntryList.tsx'
@@ -311,7 +314,7 @@ export function MemoryManagePanel({
 }: MemoryManagePanelProps): ReactNode {
   const pageLimit = normalizeMemoryLimit(pageSize)
   const [queryText, setQueryText] = useState('')
-  const [appliedQuery, setAppliedQuery] = useState('')
+  const [searchSettle, setSearchSettle] = useState<MemorySearchSettle>(INITIAL_MEMORY_SEARCH_SETTLE)
   const [scope, setScope] = useState<GrayMemoryScope>(initialScope)
   const [list, setList] = useState<MemoryListViewModel | null>(null)
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -319,6 +322,7 @@ export function MemoryManagePanel({
   const [loadingMore, setLoadingMore] = useState(false)
   const [editTarget, setEditTarget] = useState<MemoryEntryViewModel | null>(null)
   const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState<MemoryErrorView | null>(null)
   const [forget, setForget] = useState<ForgetState>(IDLE_FORGET_STATE)
   const [addText, setAddText] = useState('')
   const [adding, setAdding] = useState(false)
@@ -344,8 +348,8 @@ export function MemoryManagePanel({
   /** Latest rendered context; updated during render to close the pre-effect race window. */
   const currentContextKeyRef = useRef(viewContextKey)
   currentContextKeyRef.current = viewContextKey
-  const currentAppliedQueryRef = useRef(appliedQuery)
-  currentAppliedQueryRef.current = appliedQuery
+  const currentAppliedQueryRef = useRef(searchSettle.appliedQuery)
+  currentAppliedQueryRef.current = searchSettle.appliedQuery
   /** Stale-response guard: only the latest request may commit state. */
   const seqRef = useRef(0)
   const loadMoreSeqRef = useRef(0)
@@ -428,8 +432,18 @@ export function MemoryManagePanel({
   }, [fetchEffectiveConfig, scope, workspaceRoot, fallbackEntryChars])
 
   // Debounce the search box into the applied query (pure UI timing).
+  //
+  // Every keystroke invalidates the in-flight list request synchronously (the
+  // search input's onChange bumps the seq refs), so each debounced settle must
+  // re-trigger a fetch even when the applied query ends up equal to the last
+  // one. `settleMemorySearch` advances the fetch generation on every settle —
+  // without it, an unchanged appliedQuery would let React bail out of the
+  // fetch effect below and leave the panel stuck in 'loading' (H-7a).
   useEffect(() => {
-    const handle = setTimeout(() => setAppliedQuery(queryText), SEARCH_DEBOUNCE_MS)
+    const handle = setTimeout(
+      () => setSearchSettle(prev => settleMemorySearch(prev, queryText)),
+      SEARCH_DEBOUNCE_MS,
+    )
     return () => clearTimeout(handle)
   }, [queryText])
 
@@ -511,14 +525,15 @@ export function MemoryManagePanel({
     setLoadingMore(false)
     setEditSaving(false)
     setEditTarget(null)
+    setEditError(null)
     setForget(IDLE_FORGET_STATE)
     setAddError(null)
     setAddNote(null)
   }, [viewContextKey])
 
   useEffect(() => {
-    void fetchFirstPage(appliedQuery, scope)
-  }, [appliedQuery, scope, fetchFirstPage])
+    void fetchFirstPage(searchSettle.appliedQuery, scope)
+  }, [searchSettle, scope, fetchFirstPage])
 
   const loadMore = useCallback(async () => {
     if (transport === undefined || list === null || list.nextCursor === undefined || loadingMore) return
@@ -527,7 +542,7 @@ export function MemoryManagePanel({
     // old pages never append into a newer list.
     const seq = seqRef.current
     const requestId = ++loadMoreSeqRef.current
-    const targetQuery = appliedQuery
+    const targetQuery = searchSettle.appliedQuery
     const targetScope = scope
     const targetWorkspace = workspaceRoot
     const contextKey = currentContextKeyRef.current
@@ -572,7 +587,7 @@ export function MemoryManagePanel({
       // Keep the accumulated list; surface the failure as a banner.
       setError(mapMemoryFailure(result.error))
     }
-  }, [transport, list, loadingMore, appliedQuery, scope, workspaceRoot, fetchFirstPage]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, list, loadingMore, searchSettle, scope, workspaceRoot, fetchFirstPage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onScopeChange = (next: GrayMemoryScope) => {
     if (next === scope) return
@@ -593,6 +608,7 @@ export function MemoryManagePanel({
     setLoadingMore(false)
     setEditSaving(false)
     setEditTarget(null)
+    setEditError(null)
     setForget(IDLE_FORGET_STATE)
     setAddError(null)
     setAddNote(null)
@@ -662,7 +678,7 @@ export function MemoryManagePanel({
     // after a scope/search change must not write into the newer list.
     const requestId = ++editSeqRef.current
     const contextKey = currentContextKeyRef.current
-    const targetQuery = appliedQuery
+    const targetQuery = searchSettle.appliedQuery
     setEditSaving(true)
     const target = editTarget
     let result
@@ -691,11 +707,13 @@ export function MemoryManagePanel({
           : { ...prev, items: prev.items.map(item => (item.id === updated.id ? updated : item)) },
       )
       setEditTarget(null)
+      setEditError(null)
       await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
     } else {
       const mapped = mapMemoryFailure(result.error)
       if (isStaleMemoryRevisionFailure(result.error)) {
         setEditTarget(null)
+        setEditError(null)
         await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
         if (
           mountedRef.current
@@ -703,15 +721,22 @@ export function MemoryManagePanel({
           && contextKey === currentContextKeyRef.current
         ) setError(mapped)
       } else {
-        setError(mapped)
+        // Surface the save failure inside the overlay — the panel banner is
+        // hidden behind the modal scrim while the overlay is open (3.4-M1).
+        setEditError(mapped)
       }
     }
-  }, [transport, editTarget, appliedQuery, fetchFirstPage])
+  }, [transport, editTarget, searchSettle, fetchFirstPage])
 
   const onForgetRequest = (entry: MemoryEntryViewModel) => {
     forgetSeqRef.current += 1
     setAddNote(null)
-    const current = forget.phase === 'done' ? IDLE_FORGET_STATE : forget
+    // Abandon a forget whose host response is still pending: the seq bump
+    // above supersedes it, and the panel's response guard would drop its
+    // resolution — leaving the machine stuck in 'submitting' forever (H-7b).
+    const current = forget.phase === 'submitting' || forget.phase === 'done'
+      ? IDLE_FORGET_STATE
+      : forget
     setForget(requestForget(current, {
       id: entry.id,
       revision: entry.revision,
@@ -835,7 +860,7 @@ export function MemoryManagePanel({
       </div>
 
       {error !== null && (
-        <MemoryErrorBanner t={t} error={error} onRetry={() => void fetchFirstPage(appliedQuery, scope)} />
+        <MemoryErrorBanner t={t} error={error} onRetry={() => void fetchFirstPage(searchSettle.appliedQuery, scope)} />
       )}
 
       {wired && (
@@ -906,6 +931,7 @@ export function MemoryManagePanel({
           onEdit={entry => {
             setAddNote(null)
             setForget(current => current.phase === 'done' ? IDLE_FORGET_STATE : current)
+            setEditError(null)
             setEditTarget(entry)
           }}
           onForgetRequest={onForgetRequest}
@@ -945,8 +971,13 @@ export function MemoryManagePanel({
           t={t}
           entry={editTarget}
           saving={editSaving}
+          entryChars={effectiveEntryChars}
+          error={editError}
           onSave={(text: string) => void saveEdit(text)}
-          onCancel={() => setEditTarget(null)}
+          onCancel={() => {
+            setEditTarget(null)
+            setEditError(null)
+          }}
         />
       )}
     </div>

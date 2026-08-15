@@ -48,6 +48,15 @@ export const MEMORY_ENDPOINTS = {
 
 export type MemoryEndpoint = (typeof MEMORY_ENDPOINTS)[keyof typeof MEMORY_ENDPOINTS]
 
+/** Host call timeout: a hung host must settle as a failure instead of wedging the panel. */
+export const MEMORY_TRANSPORT_TIMEOUT_MS = 30_000
+
+/** Options for the remote transport (currently just the host-call timeout). */
+export interface RemoteMemoryTransportOptions {
+  /** Max time a host call may take before it fails as GRAY_INTERNAL (default 30s). */
+  readonly timeoutMs?: number
+}
+
 /**
  * Typed transport the panel talks to (declarative; the component itself never
  * performs I/O). Business errors arrive as `ok:false` envelopes — never as
@@ -81,19 +90,23 @@ export type GrayRemoteInvoker = (
  * the three memory endpoints. Defensive: unknown/non-envelope results and
  * thrown invoker errors become `GRAY_INTERNAL` envelopes (never reject).
  */
-export function createRemoteMemoryTransport(invoker: GrayRemoteInvoker): MemoryManageTransport {
+export function createRemoteMemoryTransport(
+  invoker: GrayRemoteInvoker,
+  options: RemoteMemoryTransportOptions = {},
+): MemoryManageTransport {
+  const timeoutMs = options.timeoutMs ?? MEMORY_TRANSPORT_TIMEOUT_MS
   return {
     wired: true,
     list: (params, signal) =>
-      callMemoryEndpoint(invoker, 'memory', 'list', params, signal, readMemoryListResult),
+      callMemoryEndpoint(invoker, 'memory', 'list', params, signal, readMemoryListResult, timeoutMs),
     add: (params, signal) =>
-      callMemoryEndpoint(invoker, 'memory', 'note', params, signal, readMemoryEntryView),
+      callMemoryEndpoint(invoker, 'memory', 'note', params, signal, readMemoryEntryView, timeoutMs),
     edit: (params, signal) =>
-      callMemoryEndpoint(invoker, 'memory', 'edit', params, signal, readMemoryEntryView),
+      callMemoryEndpoint(invoker, 'memory', 'edit', params, signal, readMemoryEntryView, timeoutMs),
     forget: (params, signal) =>
-      callMemoryEndpoint(invoker, 'memory', 'forget', params, signal, readMemoryForgetResult),
+      callMemoryEndpoint(invoker, 'memory', 'forget', params, signal, readMemoryForgetResult, timeoutMs),
     configGet: (params, signal) =>
-      callMemoryEndpoint(invoker, 'memory', 'configGet', params, signal, readMemoryConfig),
+      callMemoryEndpoint(invoker, 'memory', 'configGet', params, signal, readMemoryConfig, timeoutMs),
   }
 }
 
@@ -104,10 +117,11 @@ async function callMemoryEndpoint<T>(
   args: object,
   signal: AbortSignal | undefined,
   readValue: (value: unknown) => T | null,
+  timeoutMs: number,
 ): Promise<GrayRemoteResult<T>> {
   let raw: unknown
   try {
-    raw = await invoker(namespace, method, args as GrayRemoteArgs, signal)
+    raw = await withMemoryTimeout(invoker(namespace, method, args as GrayRemoteArgs, signal), timeoutMs)
   } catch (err) {
     return { ok: false, error: toMemoryFailure(err, signal) }
   }
@@ -120,6 +134,26 @@ async function callMemoryEndpoint<T>(
     return { ok: false, error: makeInternalFailure(`malformed ${namespace}/${method} value`) }
   }
   return { ok: true, value }
+}
+
+/**
+ * Race a host call against a deadline. A hung host must settle (as a
+ * GRAY_INTERNAL failure) rather than wedge the panel or hold the `memory/note`
+ * gate lease forever (3.4-M3). The caller may abort via its own signal; the
+ * underlying invoker promise is left running (best-effort — the host channel
+ * is not cancellable at this layer).
+ */
+function withMemoryTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise
+  return new Promise<T>((resolve, reject) => {
+    const handle = setTimeout(() => {
+      reject(makeInternalFailure(`memory transport timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+    promise.then(
+      value => { clearTimeout(handle); resolve(value) },
+      err => { clearTimeout(handle); reject(err) },
+    )
+  })
 }
 
 // ==================== Mock transport (demo / unwired host) ====================
