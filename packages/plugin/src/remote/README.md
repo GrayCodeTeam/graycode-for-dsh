@@ -57,8 +57,11 @@ reject——只有未注册端点才返回 `GRAY_ENDPOINT_NOT_FOUND` 信封。
 | `prompt/modes.export` | 导出模式 | §prompt |
 | `branches/list` | 会话分支组列表 | §branches |
 | `branches/rename` | 重命名分支组 | §branches |
+| `branches/reroll` | 重新生成：fork 目标轮次前前缀 + 重发用户消息 | §branches |
+| `branches/editRetry` | 编辑并重试：fork 目标轮次前前缀 + 重发编辑后文本 | §branches |
 | `activity/stats` | 使用时长统计 | §activity |
 | `migration/scopeMap` | 旧数据迁移作用域映射 | §migration |
+| `summary/generate` | 手动上下文总结（生成文本返回客户端展示） | §summary |
 
 ## §memory（P4-03 memory 管理）
 
@@ -139,7 +142,28 @@ duplicate/import/export）。
 
 ## §branches（分支组管理）
 
-`branches/list` 会话分支组列表；`branches/rename` 重命名。
+`branches/list` 会话分支组列表；`branches/rename` 重命名（expectedRevision CAS）。
+
+### `branches/reroll` / `branches/editRetry`（重新生成 / 编辑并重试）
+
+- 入参：`{ sessionId, turn, text?, expectedRevision? }`。`reroll` 重发目标轮次的
+  原始用户消息；`editRetry` 额外要求 `text`（重发编辑后的文本）。`turn` 为非负整数，
+  `expectedRevision` 接受数字或数字字符串（`branches/list` 的 revision 可原样回传）。
+- 自动建组：会话未归组时端点层先自动建组（`resolveGroupId`——以该会话为 root，
+  workspaceId 由会话 cwd 派生；无 cwd 时为 undefined），单会话直接可用，无需先调
+  `branches/list`。
+- 返回：`{ branchSessionId }`（新候选会话 id）。
+- D-2 自动激活：fork 成功后激活指针指向新候选；**3.15-M2 送达回退**——重发的用户
+  消息未送达时激活指针退回原候选（新候选保留在组内，`revision` 随回退递增）。
+- 错误码（域码经 BRANCH_CODE_MAP 映射，`details.causeCode` 携带域码）：
+
+| 场景 | 稳定码 | details.causeCode |
+| --- | --- | --- |
+| 目标轮次为首轮（无前缀可 fork） | `GRAY_INVALID_INPUT` | `GRAY_BRANCH_NO_PREVIOUS_TURN` |
+| 目标轮次不存在 | `GRAY_NOT_FOUND` | `GRAY_BRANCH_TARGET_TURN_NOT_FOUND` |
+| 轮次无直接用户消息 | `GRAY_INVALID_INPUT` | `GRAY_BRANCH_NO_USER_MESSAGE` |
+| revision 冲突 | `GRAY_CONFLICT` | `GRAY_BRANCH_REVISION_CONFLICT` |
+| 分组/候选不存在 | `GRAY_NOT_FOUND` | 对应 `GRAY_BRANCH_*` 域码 |
 
 ## §activity（使用统计）
 
@@ -148,3 +172,18 @@ duplicate/import/export）。
 ## §migration（旧数据迁移）
 
 `migration/scopeMap` 返回旧 Gray 数据目录 → 新工作区作用域的映射。
+
+## §summary（手动上下文总结）
+
+`summary/generate` 入参：`{ sessionId }`。返回 `{ ok: true, text }`——总结文本，
+不截断历史、不插入消息，仅生成文本返回客户端弹层展示。失败时错误信封的
+`details.code` 携带域码（`SESSION_NOT_FOUND` / `EMPTY_INPUT` 等），客户端据此
+展示本地化文案。
+
+错误码映射（域码 → 稳定码，见 summary/index.ts 的 mapSummaryCode）：
+
+| 域码 | 稳定码 |
+| --- | --- |
+| `SESSION_NOT_FOUND` | `GRAY_NOT_FOUND` |
+| `EMPTY_INPUT` | `GRAY_INVALID_INPUT` |
+| 其余（会话服务不可用 / 无模型路由 / LLM 失败 / 空或低质摘要 / 中止等） | `GRAY_INTERNAL` |

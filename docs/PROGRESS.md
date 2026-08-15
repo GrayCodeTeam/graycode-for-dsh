@@ -91,7 +91,7 @@
 
 - [x] pnpm workspace + bundle/plugin/client 三包
 - [x] `@graycode/dsh` bundle + `cordis.patch.yml` 增量层（含 client 条目）
-- [x] `@graycode/dsh-plugin` composition root + 15 个子插件（含后续新增 activity/media/file/todo/subagents/notifications/thoughts）
+- [x] `@graycode/dsh-plugin` composition root + 17 个子插件（含后续新增 activity/media/file/todo/subagents/notifications/thoughts/images/summary）
 - [x] Schemastery Config（dataRoot、agentScope 等）
 - [x] 目录安装进 profile + `--dump-config` + headless 真实启动验证
 - [x] CI：`.github/workflows/ci.yml`（Linux 全量 + Windows/macOS smoke、pack + tarball 校验 +
@@ -255,8 +255,8 @@ create_review 会话门闸入锁、milestone id 大小写不敏感、slugify Win
 
 - `src/agentScope.ts`：`agent/created` 时 scoped 注册工具（shadow 全局），`agent/disposed` 清理，
   apply 时 backfill，dispose 走 fiber effect；`agentScope = roots | all | disabled`（默认 roots）
-- composition root 当前挂载 15 个子插件（workflows/memory/checkpoints/branches/persona/prompt/
-  migration/stagedDiff/activity/media/file/todo/subagents/notifications/thoughts）；其中带工具的域经
+- composition root 当前挂载 17 个子插件（workflows/memory/checkpoints/branches/persona/prompt/
+  migration/stagedDiff/activity/media/file/todo/subagents/notifications/thoughts/images/summary）；其中带工具的域经
   registrar 按 agentScope 注册，migration/stagedDiff 复用同模式。
 - 验证：headless 真实启动中模型可列出全部工具（roots 模式）
 
