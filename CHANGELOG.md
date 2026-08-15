@@ -190,6 +190,15 @@
 - **作息热力图布局修正（C6）**：方块改为长方形并横向铺满轨道（flex:1，不再残留
    正方形间隙），行距收紧到 2px；新增与数据行同构的刻度轴行（0/6/12/18/23 与
    列精确对齐，日期列定宽 34px 右对齐），删除不再使用的 `heatmap.hourLabels` 键。
+- **返回主会话按钮（S1）**：子代理视图页头新增「返回主会话」操作——经
+   `conversation.session.header.actions` 槽注册（`ctx.get('sessions')` 守卫，缺失时
+   跳过注册），仅子代理会话渲染，点击经 sessions 服务跳回其父主会话；独立 locale
+   命名空间 `graycode.subagentBack`（zh/en + ja 占位），注册与 disposer 均 fiber-tied。
+- **自定义子代理（S2）**：设置页新增「子代理」页签——`subagents.customAgents` 列表
+   管理（添加/编辑/删除/启用开关 + `subagent_<name>` 工具名预览，id/slug/校验纯函数
+   与插件端同源契约）；每个启用的子代理注册为委托宿主 `spawn` 的 provider
+   （`graycode-custom-<id>`）与模型可见工具（身份 = 名称/描述，系统提示词经 persona
+   注入），热更新随域 fiber 重启（effect disposer 清理后按新配置重挂）。
 
 ### Changed（变更）
 
