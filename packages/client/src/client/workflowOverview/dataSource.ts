@@ -57,6 +57,14 @@ function toWorkflowError(code: string, message: string): WorkflowOverviewError {
   return { code, message, details: {} }
 }
 
+function requireWorkflowWorkspace(workspace: string | undefined): string {
+  const normalized = typeof workspace === 'string' ? workspace.trim() : ''
+  if (normalized.length === 0) {
+    throw toWorkflowError('GRAY_INVALID_INPUT', 'workspace is required')
+  }
+  return normalized
+}
+
 /**
  * Contract-driven consumer of the host `workflows/*` endpoints.
  *
@@ -70,8 +78,8 @@ export class RemoteWorkflowOverviewDataSource implements WorkflowOverviewDataSou
   constructor(private readonly transport: WorkflowRemoteTransport) {}
 
   async list(params: WorkflowOverviewWireListParams, signal?: AbortSignal): Promise<WorkflowOverviewListResult> {
-    const args: Record<string, unknown> = { limit: normalizeWorkflowPageLimit(params.limit) }
-    if (params.workspace !== undefined) args.workspace = params.workspace
+    const workspace = requireWorkflowWorkspace(params.workspace)
+    const args: Record<string, unknown> = { workspace, limit: normalizeWorkflowPageLimit(params.limit) }
     if (params.cursor !== undefined) args.cursor = params.cursor
     const envelope = readWorkflowEnvelope(await this.transport('workflows/list', args, signal))
     if (!envelope.ok) throw envelope.error
@@ -81,8 +89,8 @@ export class RemoteWorkflowOverviewDataSource implements WorkflowOverviewDataSou
   }
 
   async get(params: WorkflowOverviewWireGetParams, signal?: AbortSignal): Promise<WorkflowRunDetailLike | null> {
-    const args: Record<string, unknown> = { id: params.id }
-    if (params.workspace !== undefined) args.workspace = params.workspace
+    const workspace = requireWorkflowWorkspace(params.workspace)
+    const args: Record<string, unknown> = { id: params.id, workspace }
     const envelope = readWorkflowEnvelope(await this.transport('workflows/get', args, signal))
     if (!envelope.ok) {
       if (envelope.error.code === 'GRAY_NOT_FOUND') return null
@@ -126,9 +134,9 @@ export function createMockWorkflowRuns(): WorkflowRunSummaryLike[] {
 /**
  * Deterministic in-memory data source. Implements the same cursor semantics
  * as the host's `slicePage` (cursor = item id, page starts after it, next
- * cursor = last item of the page while more remain; an unknown cursor falls
- * back to the first page). Filtering is exact-match on the absolute workspace
- * root — same as the host.
+ * cursor = last item of the page while more remain; an unknown/deleted cursor
+ * is exhausted rather than restarting at page 1). Filtering is exact-match
+ * on the absolute workspace root — same as the host.
  */
 export class MockWorkflowOverviewDataSource implements WorkflowOverviewDataSource {
   private readonly runs: readonly WorkflowRunSummaryLike[]
@@ -143,16 +151,15 @@ export class MockWorkflowOverviewDataSource implements WorkflowOverviewDataSourc
     if (this.failures.list !== undefined) {
       throw toWorkflowError(this.failures.list, `mock workflows/list failure: ${this.failures.list}`)
     }
-    const workspace = params.workspace
-    const filtered = workspace === undefined || workspace.trim().length === 0
-      ? this.runs
-      : this.runs.filter((run) => run.workspace === workspace)
+    const workspace = requireWorkflowWorkspace(params.workspace)
+    const filtered = this.runs.filter((run) => run.workspace === workspace)
     const limit = normalizeWorkflowPageLimit(params.limit)
 
     let start = 0
     if (params.cursor !== undefined && params.cursor !== null) {
       const index = filtered.findIndex((run) => run.id === params.cursor)
-      if (index >= 0) start = index + 1
+      if (index < 0) return { items: [], total: filtered.length }
+      start = index + 1
     }
     const page = filtered.slice(start, start + limit)
     const nextCursor = start + limit < filtered.length && page.length > 0
@@ -167,9 +174,10 @@ export class MockWorkflowOverviewDataSource implements WorkflowOverviewDataSourc
     if (this.failures.get !== undefined) {
       throw toWorkflowError(this.failures.get, `mock workflows/get failure: ${this.failures.get}`)
     }
+    const workspace = requireWorkflowWorkspace(params.workspace)
     const run = this.runs.find(
       (candidate) => candidate.id === params.id
-        && (params.workspace === undefined || candidate.workspace === params.workspace),
+        && candidate.workspace === workspace,
     )
     if (run === undefined) return null
     return { ...run, content: `# ${run.id}\n\nmock detail body` }

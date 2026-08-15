@@ -57,6 +57,9 @@ message (PLAN_V2 §5.6).
   The panel fetches only in live mode with an explicit `source`; mounted
   without one (replay, unwired host) it renders a hint state and never
   initiates a request.
+- **Explicit workspace:** every live list/get request carries an absolute
+  workspace root; a missing/blank workspace becomes `GRAY_INVALID_INPUT`
+  locally and never falls back to the DSH host process directory.
 - **Paged, never a full pull:** every list request carries `limit`
   (normalized to the host default/max) plus an optional cursor; "load more"
   appends one page at a time; `paging.ts` refuses concurrent requests and

@@ -24,13 +24,13 @@ interface Env {
   invoke: (ns: string, method: string, args?: Record<string, unknown>) => Promise<GrayRemoteResult<unknown>>
 }
 
-async function makeEnv(): Promise<Env> {
+async function makeEnv(documentRoot = '.graycode'): Promise<Env> {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-remote-wf-'))
   tempDirs.push(workspace)
   const ctx = new Context()
   const lfs = new LocalFileSystem(ctx, { cwd: workspace, diffBasisMaxBytes: 10 * 1024 * 1024 })
   const remote = new GrayRemoteService(ctx)
-  remote.register(createWorkflowsRemoteHandlers({ fs: lfs, documentRoot: '.graycode' }))
+  remote.register(createWorkflowsRemoteHandlers({ fs: lfs, documentRoot }))
   return { workspace, invoke: (ns, method, args) => remote.invoke(ns, method, args) }
 }
 
@@ -67,6 +67,28 @@ function expectFailure(result: GrayRemoteResult<unknown>, code: string): void {
 }
 
 describe('workflows/list', () => {
+  it('不安全 documentRoot 不能枚举或读取 workspace 外文件', async () => {
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-remote-wf-outside-'))
+    tempDirs.push(outside)
+    await write(outside, 'progress.md', progressDocument())
+    const relativeEscape = `../${path.basename(outside)}`
+
+    for (const documentRoot of [relativeEscape, outside]) {
+      const env = await makeEnv(documentRoot)
+      expectFailure(
+        await env.invoke('workflows', 'list', { workspace: env.workspace }),
+        GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+      )
+      expectFailure(
+        await env.invoke('workflows', 'get', {
+          workspace: env.workspace,
+          id: `${documentRoot.replace(/\\/g, '/')}/progress.md`,
+        }),
+        GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+      )
+    }
+  })
+
   it('列出 workspace 全部 run（progress 优先 + design/plans/review）', async () => {
     const env = await makeEnv()
     await write(env.workspace, '.graycode/progress.md', progressDocument())
@@ -130,6 +152,12 @@ describe('workflows/list', () => {
     const env = await makeEnv()
     expectFailure(await env.invoke('workflows', 'list', { workspace: 'relative/path' }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
   })
+
+  it('workspace 缺失或空白 → GRAY_INVALID_INPUT（不得回退宿主 cwd）', async () => {
+    const env = await makeEnv()
+    expectFailure(await env.invoke('workflows', 'list', {}), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+    expectFailure(await env.invoke('workflows', 'list', { workspace: '   ' }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
 })
 
 describe('workflows/get', () => {
@@ -178,5 +206,17 @@ describe('workflows/get', () => {
   it('缺 id → GRAY_INVALID_INPUT', async () => {
     const env = await makeEnv()
     expectFailure(await env.invoke('workflows', 'get', { workspace: env.workspace }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
+
+  it('workspace 缺失或空白 → GRAY_INVALID_INPUT（不得回退宿主 cwd）', async () => {
+    const env = await makeEnv()
+    expectFailure(
+      await env.invoke('workflows', 'get', { id: '.graycode/progress.md' }),
+      GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+    )
+    expectFailure(
+      await env.invoke('workflows', 'get', { workspace: '', id: '.graycode/progress.md' }),
+      GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+    )
   })
 })

@@ -130,15 +130,16 @@ export interface GrayWorkflowRunSummary {
 
 /** workflows/list 入参：按 workspace 过滤 + 分页。 */
 export interface GrayWorkflowListParams {
-  /** workspace 根（绝对路径）；缺省 = process.cwd()。 */
-  readonly workspace?: string
+  /** workspace 根（绝对路径）；Browser Remote 无会话 cwd，必须显式提供。 */
+  readonly workspace: string
   readonly cursor?: string
   readonly limit?: number
 }
 
 /** workflows/get 入参。 */
 export interface GrayWorkflowGetParams {
-  readonly workspace?: string
+  /** workspace 根（绝对路径）；必须显式提供。 */
+  readonly workspace: string
   /** run id（workspace 相对路径，必须落在 .graycode 白名单 scope 内）。 */
   readonly id: string
 }

@@ -23,7 +23,7 @@
 
 /** Normalized client query for the overview list (filter intent, no cursor). */
 export interface WorkflowOverviewQuery {
-  /** Workspace root (absolute path); null = host default workspace. */
+  /** Workspace root (absolute path); null = no request may be issued. */
   readonly workspace: string | null
   /** Session id; null = all sessions. Not forwarded on rc.6 (GAP-remote-1). */
   readonly sessionId: string | null
@@ -71,7 +71,7 @@ export function withWorkflowSession(query: WorkflowOverviewQuery, sessionId: str
 
 /** Wire args of the host `workflows/list` endpoint (mirror of `GrayWorkflowListParams`). */
 export interface WorkflowListWireRequest {
-  readonly workspace?: string
+  readonly workspace: string
   readonly cursor?: string
   readonly limit: number
 }
@@ -90,11 +90,10 @@ export interface WorkflowListWireRequest {
 export function buildWorkflowListRequest(
   query: WorkflowOverviewQuery,
   cursor: string | null = null,
-): WorkflowListWireRequest {
-  let request: WorkflowListWireRequest = { limit: query.limit }
-  if (query.workspace !== null && query.workspace.trim().length > 0) {
-    request = { ...request, workspace: query.workspace.trim() }
-  }
+): WorkflowListWireRequest | null {
+  const workspace = query.workspace?.trim() ?? ''
+  if (workspace.length === 0) return null
+  let request: WorkflowListWireRequest = { workspace, limit: query.limit }
   if (cursor !== null && cursor.length > 0) {
     request = { ...request, cursor }
   }

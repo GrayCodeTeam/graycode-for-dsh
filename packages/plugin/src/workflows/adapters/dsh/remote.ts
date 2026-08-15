@@ -27,8 +27,8 @@ import {
 import { GrayRemoteError } from '../../../remote/errors.ts'
 import {
   normalizeLimit,
-  optionalWorkspace,
   requireString,
+  requireWorkspace,
   slicePage,
 } from '../../../remote/validate.ts'
 import type {
@@ -70,18 +70,33 @@ const RUN_KIND_SPECS: readonly RunKindSpec[] = [
   { kind: 'review', rel: 'review', isFile: false, validator: isReviewPathAllowed },
 ]
 
-function normalizeDocumentRoot(documentRoot: string): string {
-  const trimmed = documentRoot.replace(/^\.\//, '').replace(/\/+$/, '')
-  return trimmed || '.graycode'
+export function normalizeDocumentRoot(documentRoot: string): string {
+  const normalized = documentRoot.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  const isAbsolute = normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized)
+  const segments = normalized.split('/')
+  if (
+    normalized.length === 0
+    || normalized.includes('\0')
+    || isAbsolute
+    || segments.some(segment => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw GrayRemoteError.invalidInput(
+      'documentRoot must be a non-empty workspace-relative path without dot segments',
+      { field: 'documentRoot' },
+    )
+  }
+  return normalized
 }
 
 /** 相对路径是否落在文档根白名单内（documentRoot 非默认时退化为前缀判定）。 */
 function isAllowedRelPath(documentRoot: string, rel: string): boolean {
+  const segments = rel.split('/')
+  if (segments.some(segment => segment === '' || segment === '.' || segment === '..')) return false
   if (documentRoot === '.graycode') {
     return RUN_KIND_SPECS.some(spec => spec.validator(rel))
   }
   const prefix = `${documentRoot}/`
-  return rel.startsWith(prefix) && rel.endsWith('.md') && !rel.includes('..')
+  return rel.startsWith(prefix) && rel.endsWith('.md')
 }
 
 function kindOfRel(documentRoot: string, rel: string): GrayWorkflowRunKind | undefined {
@@ -186,11 +201,12 @@ async function statRun(
 
 /** 创建 workflows Remote 端点处理器（由 workflows 域 apply() 注册）。 */
 export function createWorkflowsRemoteHandlers(deps: WorkflowsRemoteDeps): GrayRemoteHandlers {
-  const documentRoot = normalizeDocumentRoot(deps.documentRoot)
-
   return {
     'workflows/list': async (args: GrayRemoteArgs) => {
-      const workspace = optionalWorkspace(args) ?? process.cwd()
+      const workspace = requireWorkspace(args)
+      // Validate before the first fs call: a misconfigured root must never
+      // become an escape hatch for browser-driven workspace enumeration.
+      normalizeDocumentRoot(deps.documentRoot)
       const cursor = args.cursor === undefined || args.cursor === null ? undefined : requireString(args, 'cursor')
       const limit = normalizeLimit(args.limit)
       const runs = await collectRuns(deps, workspace)
@@ -199,7 +215,8 @@ export function createWorkflowsRemoteHandlers(deps: WorkflowsRemoteDeps): GrayRe
     },
 
     'workflows/get': async (args: GrayRemoteArgs) => {
-      const workspace = optionalWorkspace(args) ?? process.cwd()
+      const workspace = requireWorkspace(args)
+      const documentRoot = normalizeDocumentRoot(deps.documentRoot)
       const id = requireString(args, 'id')
       const rel = id.replace(/\\/g, '/')
       if (!isAllowedRelPath(documentRoot, rel)) {

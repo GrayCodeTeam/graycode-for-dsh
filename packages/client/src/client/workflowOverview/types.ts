@@ -62,15 +62,16 @@ export interface WorkflowOverviewListResult {
 
 /** Wire-style list params — mirror of `GrayWorkflowListParams`. */
 export interface WorkflowOverviewWireListParams {
-  /** Workspace root (absolute path); absent = host default (`process.cwd()`). */
-  readonly workspace?: string
+  /** Explicit workspace root (absolute path); the host has no browser-session fallback. */
+  readonly workspace: string
   readonly cursor?: string
   readonly limit?: number
 }
 
 /** Wire-style get params — mirror of `GrayWorkflowGetParams`. */
 export interface WorkflowOverviewWireGetParams {
-  readonly workspace?: string
+  /** Explicit workspace root (absolute path). */
+  readonly workspace: string
   /** Run id (workspace-relative path, whitelisted scope). */
   readonly id: string
 }

@@ -9,7 +9,7 @@
  * - 损坏文件被隔离（.corrupt-* 备份）并重建空库，不崩溃；
  * - dataRoot 为空（未配置）时退化为纯内存（不落盘）。
  */
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -129,6 +129,25 @@ describe('损坏隔离与边界', () => {
     expect(loadReviewSessionState('session-g')).toBeNull()
   })
 
+  it('dataRoot 从非空切为空：隔离旧库，后续纯内存保存不再写旧根', async () => {
+    initReviewSessionStore(dataRoot)
+    saveReviewSessionState('session-disk', STATE)
+    await flushReviewSessionStore()
+    const storeFile = path.join(dataRoot, 'workflows', 'review-sessions.json')
+    const beforeSwitch = await readFile(storeFile, 'utf8')
+
+    initReviewSessionStore('')
+    expect(loadReviewSessionState('session-disk')).toBeNull()
+    saveReviewSessionState('session-memory', {
+      ...STATE,
+      reviewPath: '.graycode/review/memory-only.md',
+    })
+    await flushReviewSessionStore()
+
+    expect(loadReviewSessionState('session-memory')?.reviewPath).toBe('.graycode/review/memory-only.md')
+    expect(await readFile(storeFile, 'utf8')).toBe(beforeSwitch)
+  })
+
   it('dataRoot 切换：旧库状态不残留（按 dataRoot 隔离），新库独立读写', async () => {
     const otherRoot = await mkdtemp(path.join(os.tmpdir(), 'graycode-session-state-b-'))
     try {
@@ -151,5 +170,36 @@ describe('损坏隔离与边界', () => {
     } finally {
       await rm(otherRoot, { recursive: true, force: true })
     }
+  })
+
+  it('写入排队后立即切换 dataRoot：旧库仍落盘切换前的冻结快照', async () => {
+    const otherRoot = await mkdtemp(path.join(os.tmpdir(), 'graycode-session-state-switch-'))
+    try {
+      initReviewSessionStore(dataRoot)
+      saveReviewSessionState('session-switch', STATE)
+
+      // 不先 flush：复现旧实现中 queued writer 执行时读取已被 clear 的全局 Map。
+      initReviewSessionStore(otherRoot)
+      await flushReviewSessionStore()
+
+      resetReviewSessionStatesForTest()
+      initReviewSessionStore(dataRoot)
+      expect(loadReviewSessionState('session-switch')).toEqual(STATE)
+    } finally {
+      await flushReviewSessionStore()
+      await rm(otherRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('disposer 返回可等待的 flush Promise', async () => {
+    const dispose = initReviewSessionStore(dataRoot)
+    saveReviewSessionState('session-dispose', STATE)
+    const flush = dispose()
+    expect(flush).toBeInstanceOf(Promise)
+    await flush
+
+    resetReviewSessionStatesForTest()
+    initReviewSessionStore(dataRoot)
+    expect(loadReviewSessionState('session-dispose')).toEqual(STATE)
   })
 })

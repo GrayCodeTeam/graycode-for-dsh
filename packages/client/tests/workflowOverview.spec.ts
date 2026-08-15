@@ -138,13 +138,14 @@ describe('workflow overview query model', () => {
     const query = createWorkflowOverviewQuery({ sessionId: 'session-42', workspace: 'C:\\a' })
     const request = buildWorkflowListRequest(query)
     expect(request).toEqual({ workspace: 'C:\\a', limit: WORKFLOW_PAGE_LIMIT_DEFAULT })
-    expect('sessionId' in request).toBe(false)
-    expect('session' in request).toBe(false)
+    expect(request).not.toBeNull()
+    expect('sessionId' in request!).toBe(false)
+    expect('session' in request!).toBe(false)
   })
 
-  it('omits the workspace when empty and carries only the default limit', () => {
+  it('refuses to build a request without an explicit workspace', () => {
     const request = buildWorkflowListRequest(createWorkflowOverviewQuery())
-    expect(request).toEqual({ limit: WORKFLOW_PAGE_LIMIT_DEFAULT })
+    expect(request).toBeNull()
   })
 })
 
@@ -504,14 +505,15 @@ describe('workflow overview paging', () => {
 // ---------------------------------------------------------------------------
 
 describe('mock workflow overview data source', () => {
-  it('serves the full deterministic fixture with host-identical cursor paging', async () => {
+  it('serves one explicit workspace with host-identical cursor paging', async () => {
     const source = new MockWorkflowOverviewDataSource()
-    const first = await source.list({ limit: 2 })
-    expect(first.total).toBe(createMockWorkflowRuns().length)
+    const workspace = 'C:\\dev\\alpha'
+    const first = await source.list({ workspace, limit: 2 })
+    expect(first.total).toBe(createMockWorkflowRuns().filter(run => run.workspace === workspace).length)
     expect(first.items).toHaveLength(2)
     expect(first.nextCursor).toBe(first.items[1]!.id)
 
-    const second = await source.list({ limit: 2, cursor: first.nextCursor })
+    const second = await source.list({ workspace, limit: 2, cursor: first.nextCursor })
     expect(second.items[0]!.id).not.toBe(first.items[1]!.id)
     expect(second.nextCursor).toBe(second.items[1]!.id)
   })
@@ -535,6 +537,14 @@ describe('mock workflow overview data source', () => {
     expect(new Set(seen).size).toBe(runs.length)
   })
 
+  it('treats an unknown or deleted cursor as exhausted like the host', async () => {
+    const source = new MockWorkflowOverviewDataSource()
+    const workspace = 'C:\\dev\\alpha'
+    const result = await source.list({ workspace, limit: 2, cursor: '.graycode/deleted.md' })
+    expect(result).toEqual({ items: [], total: 5 })
+    expect(result.nextCursor).toBeUndefined()
+  })
+
   it('filters by exact workspace root like the host', async () => {
     const source = new MockWorkflowOverviewDataSource()
     const alpha = await source.list({ workspace: 'C:\\dev\\alpha' })
@@ -548,8 +558,9 @@ describe('mock workflow overview data source', () => {
 
   it('clamps the limit to the host max', async () => {
     const source = new MockWorkflowOverviewDataSource()
-    const all = await source.list({ limit: 10_000 })
-    expect(all.items).toHaveLength(createMockWorkflowRuns().length)
+    const workspace = 'C:\\dev\\alpha'
+    const all = await source.list({ workspace, limit: 10_000 })
+    expect(all.items).toHaveLength(createMockWorkflowRuns().filter(run => run.workspace === workspace).length)
     expect(all.nextCursor).toBeUndefined()
   })
 
@@ -559,14 +570,14 @@ describe('mock workflow overview data source', () => {
     expect(detail).not.toBeNull()
     expect(detail!.content).toContain('# .graycode/progress.md')
     expect(detail!.status).toBe('active')
-    expect(await source.get({ id: '.graycode/nope.md' })).toBeNull()
+    expect(await source.get({ id: '.graycode/nope.md', workspace: 'C:\\dev\\alpha' })).toBeNull()
     expect(await source.get({ id: '.graycode/progress.md', workspace: '/home/dev/beta' })).not.toBeNull()
   })
 
   it('injects stable failures for tests', async () => {
     const source = new MockWorkflowOverviewDataSource({ failures: { list: 'GRAY_INTERNAL', get: 'GRAY_NOT_FOUND' } })
-    await expect(source.list({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
-    await expect(source.get({ id: 'x' })).rejects.toMatchObject({ code: 'GRAY_NOT_FOUND' })
+    await expect(source.list({ workspace: 'C:\\dev\\alpha' })).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
+    await expect(source.get({ id: 'x', workspace: 'C:\\dev\\alpha' })).rejects.toMatchObject({ code: 'GRAY_NOT_FOUND' })
   })
 })
 
@@ -598,8 +609,8 @@ describe('remote workflow overview data source', () => {
       value: { items: [summary()], total: 9, nextCursor: 'x' },
     }))
     const source = new RemoteWorkflowOverviewDataSource(transport)
-    await source.list({ cursor: 'prev', limit: 5 }, signal)
-    expect(transport).toHaveBeenCalledWith('workflows/list', { cursor: 'prev', limit: 5 }, signal)
+    await source.list({ workspace: 'C:\\dev\\alpha', cursor: 'prev', limit: 5 }, signal)
+    expect(transport).toHaveBeenCalledWith('workflows/list', { workspace: 'C:\\dev\\alpha', cursor: 'prev', limit: 5 }, signal)
   })
 
   it('throws the envelope failure as a stable error', async () => {
@@ -608,13 +619,13 @@ describe('remote workflow overview data source', () => {
       error: { code: 'GRAY_ENDPOINT_NOT_FOUND', message: 'remote endpoint not found: workflows/list', details: {} },
     }))
     const source = new RemoteWorkflowOverviewDataSource(transport)
-    await expect(source.list({})).rejects.toMatchObject({ code: 'GRAY_ENDPOINT_NOT_FOUND' })
+    await expect(source.list({ workspace: 'C:\\dev\\alpha' })).rejects.toMatchObject({ code: 'GRAY_ENDPOINT_NOT_FOUND' })
   })
 
   it('degrades malformed payloads to GRAY_INTERNAL', async () => {
     const transport = vi.fn<WorkflowRemoteTransport>(async () => ({ ok: true, value: { nope: true } }))
     const source = new RemoteWorkflowOverviewDataSource(transport)
-    await expect(source.list({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
+    await expect(source.list({ workspace: 'C:\\dev\\alpha' })).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
   })
 
   it('get resolves null on GRAY_NOT_FOUND and details otherwise', async () => {
@@ -622,14 +633,22 @@ describe('remote workflow overview data source', () => {
       ok: false,
       error: { code: 'GRAY_NOT_FOUND', message: 'workflow run not found', details: {} },
     }))
-    expect(await notFound.get({ id: '.graycode/progress.md' })).toBeNull()
+    expect(await notFound.get({ id: '.graycode/progress.md', workspace: 'C:\\dev\\alpha' })).toBeNull()
 
     const found = new RemoteWorkflowOverviewDataSource(async () => ({
       ok: true,
       value: { ...summary(), content: '# body' },
     }))
-    const detail = await found.get({ id: '.graycode/progress.md' })
+    const detail = await found.get({ id: '.graycode/progress.md', workspace: 'C:\\dev\\alpha' })
     expect(detail?.content).toBe('# body')
+  })
+
+  it('does not invoke the transport for a blank workspace', async () => {
+    const transport = vi.fn<WorkflowRemoteTransport>()
+    const source = new RemoteWorkflowOverviewDataSource(transport)
+    await expect(source.list({ workspace: '   ' })).rejects.toMatchObject({ code: 'GRAY_INVALID_INPUT' })
+    await expect(source.get({ id: 'x', workspace: '' })).rejects.toMatchObject({ code: 'GRAY_INVALID_INPUT' })
+    expect(transport).not.toHaveBeenCalled()
   })
 })
 
@@ -663,7 +682,7 @@ describe('mock source through the paging state machine', () => {
     let state = createWorkflowOverviewPageState()
     state = applyWorkflowPageLoading(state)
     try {
-      await source.list({})
+      await source.list({ workspace: 'C:\\dev\\alpha' })
     } catch (error) {
       state = applyWorkflowPageError(state, error as { code: string; message: string; details: object })
     }

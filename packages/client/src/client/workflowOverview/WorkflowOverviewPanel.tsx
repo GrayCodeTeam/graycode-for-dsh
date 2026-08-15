@@ -87,6 +87,12 @@ const hintStyle: CSSProperties = {
   opacity: 0.8,
 }
 
+const WORKSPACE_REQUIRED_ERROR: WorkflowOverviewError = {
+  code: 'GRAY_INVALID_INPUT',
+  message: 'workspace is required',
+  details: { field: 'workspace' },
+}
+
 /**
  * Workflow overview panel. Mount it wherever the host renders management
  * views (see workflowOverview/README.md for wiring).
@@ -119,7 +125,12 @@ export function WorkflowOverviewPanel({
     if (source === undefined) return
     const controller = new AbortController()
     setPage(applyWorkflowPageLoading(createWorkflowOverviewPageState()))
-    source.list(buildWorkflowListRequest(query), controller.signal)
+    const request = buildWorkflowListRequest(query)
+    if (request === null) {
+      setPage(applyWorkflowPageError(createWorkflowOverviewPageState(), WORKSPACE_REQUIRED_ERROR))
+      return () => controller.abort()
+    }
+    source.list(request, controller.signal)
       .then((result) => {
         if (disposed.current || controller.signal.aborted) return
         setPage((current) => applyWorkflowPageLoaded(current, result, 'replace'))
@@ -141,9 +152,11 @@ export function WorkflowOverviewPanel({
     setPage((current) => {
       const request = nextWorkflowPageRequest(current)
       if (request === null) return current
+      const wireRequest = buildWorkflowListRequest(query, request.cursor)
+      if (wireRequest === null) return applyWorkflowPageError(current, WORKSPACE_REQUIRED_ERROR)
       const loading = applyWorkflowPageLoading(current)
       const issuedRevision = loading.revision
-      source.list(buildWorkflowListRequest(query, request.cursor))
+      source.list(wireRequest)
         .then((result) => {
           if (disposed.current) return
           setPage((latest) =>
@@ -176,9 +189,10 @@ export function WorkflowOverviewPanel({
   }
 
   const resetFilters = (): void => {
-    setWorkspaceInput('')
+    const workspace = initialWorkspace?.trim() ?? ''
+    setWorkspaceInput(workspace)
     setSessionInput('')
-    setQuery(createWorkflowOverviewQuery())
+    setQuery(createWorkflowOverviewQuery({ workspace: workspace.length > 0 ? workspace : null }))
   }
 
   if (source === undefined) {

@@ -87,10 +87,16 @@ export function resetReviewSessionStatesForTest(): void {
  *
  * 返回 disposer：插件卸载时 flush 在途写入（best-effort）。
  */
-export function initReviewSessionStore(dataRoot: string): () => void {
+export function initReviewSessionStore(dataRoot: string): () => Promise<void> {
   if (!dataRoot) {
-    // 无私有数据根：退化为纯内存（与原进程内实现一致）
-    return () => undefined
+    // 非空 dataRoot → 纯内存切换时必须断开旧库并清掉旧库视图；否则后续
+    // save 仍会沿用旧 storePath，把“纯内存”状态写回旧磁盘根。
+    if (storePath !== undefined) sessionStates.clear()
+    storeDir = undefined
+    storePath = undefined
+    hydrated = true
+    // 同为纯内存的 HMR 不清 Map，保持原有进程内会话语义。
+    return () => Promise.resolve()
   }
   const nextStoreDir = path.join(dataRoot, 'workflows')
   const nextStorePath = path.join(nextStoreDir, REVIEW_SESSIONS_STORE_FILE)
@@ -105,11 +111,10 @@ export function initReviewSessionStore(dataRoot: string): () => void {
   // 异步预取（可选优化）；首次同步访问（load/save）也会兜底 hydration，两者幂等
   persistChain = persistChain
     .catch(() => undefined)
-    .then(() => hydrateFromDisk())
+    .then(() => hydrateFromDisk(nextStorePath))
     .catch(() => undefined)
-  return () => {
-    void flushReviewSessionStore()
-  }
+  // Cordis disposer 会 await 返回值，保证 fiber 卸载/配置切换前写队列落稳。
+  return () => flushReviewSessionStore()
 }
 
 /** 等待在途持久化写入完成（测试与卸载 flush 用；无持久化配置时立即返回） */
@@ -206,20 +211,23 @@ function ensureHydratedSync(): void {
 }
 
 /** 异步 hydration（init 预取；已 hydration 时为空操作，避免与同步兜底互相覆盖） */
-async function hydrateFromDisk(): Promise<void> {
-  if (hydrated || !storePath) return
+async function hydrateFromDisk(expectedStorePath: string): Promise<void> {
+  if (hydrated || storePath !== expectedStorePath) return
   try {
-    const raw = await fsp.readFile(storePath, 'utf8')
+    const raw = await fsp.readFile(expectedStorePath, 'utf8')
     const parsed = parseStore(JSON.parse(raw))
+    // dataRoot 可能在 await 期间切换；旧库绝不能回填到新库的内存视图。
+    if (storePath !== expectedStorePath || hydrated) return
     for (const [id, state] of Object.entries(parsed.sessions)) {
       sessionStates.set(id, state)
     }
   } catch (error) {
+    if (storePath !== expectedStorePath) return
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      await quarantineCorruptAsync()
+      await quarantineCorruptAsync(expectedStorePath)
     }
   }
-  hydrated = true
+  if (storePath === expectedStorePath) hydrated = true
 }
 
 /** 把整库异步序列化写盘（tmp + rename；失败静默，进程内状态仍有效，下次保存重试） */
@@ -227,12 +235,15 @@ function queuePersist(): void {
   if (!storePath || !storeDir) return
   const targetPath = storePath
   const targetDir = storeDir
+  // 在排队当下冻结当前库快照。若 dataRoot 在任务真正执行前切换并清空 Map，
+  // 旧任务仍写旧库的正确内容，而不是把新库/空库序列化到旧路径。
+  const snapshot = serializeStore()
   persistChain = persistChain
     .catch(() => undefined)
     .then(async () => {
       await fsp.mkdir(targetDir, { recursive: true })
       const tmpPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.tmp`
-      await fsp.writeFile(tmpPath, JSON.stringify(serializeStore(), null, 2), 'utf8')
+      await fsp.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf8')
       await renameStoreOverwrite(tmpPath, targetPath)
     })
     .catch(() => undefined)
@@ -293,11 +304,10 @@ function quarantineCorruptSync(): void {
 }
 
 /** 备份损坏文件（异步；best-effort，失败不阻塞恢复） */
-async function quarantineCorruptAsync(): Promise<void> {
-  if (!storePath) return
+async function quarantineCorruptAsync(targetPath: string): Promise<void> {
   try {
-    const backupPath = `${storePath}.corrupt-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
-    await fsp.rename(storePath, backupPath)
+    const backupPath = `${targetPath}.corrupt-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
+    await fsp.rename(targetPath, backupPath)
   } catch {
     // best-effort
   }

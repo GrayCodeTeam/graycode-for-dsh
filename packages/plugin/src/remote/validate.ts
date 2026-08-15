@@ -97,6 +97,15 @@ export function optionalWorkspace(args: GrayRemoteArgs, field = 'workspace'): st
   return value
 }
 
+/** 必填 workspace 参数：浏览器 Remote 没有会话 cwd，禁止回退宿主 process.cwd()。 */
+export function requireWorkspace(args: GrayRemoteArgs, field = 'workspace'): string {
+  const value = requireString(args, field).trim()
+  if (!isAbsolutePath(value)) {
+    throw invalid(field, 'an absolute path')
+  }
+  return value
+}
+
 /** 跨平台绝对路径判定（Windows 盘符 / UNC / POSIX 根）。 */
 export function isAbsolutePath(value: string): boolean {
   if (value.startsWith('/')) return true
@@ -112,7 +121,10 @@ export function slicePage<T extends { readonly id: string | number }>(
   let start = 0
   if (cursor !== undefined && cursor !== null) {
     const index = items.findIndex(item => item.id === cursor)
-    if (index >= 0) start = index + 1
+    // 列表可能在两页之间发生删除。游标已消失时把本次分页视为 exhausted，
+    // 不能静默从第一页重启，否则客户端 append 会产生重复项乃至无限循环。
+    if (index < 0) return { page: [] }
+    start = index + 1
   }
   const page = items.slice(start, start + limit)
   const nextCursor =
