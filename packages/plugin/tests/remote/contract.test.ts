@@ -9,6 +9,10 @@ import { createWorkflowsRemoteHandlers } from '../../src/workflows/adapters/dsh/
 import { createMemoryRemoteHandlers } from '../../src/memory/adapters/dsh/remote.ts'
 import { createCheckpointsRemoteHandlers } from '../../src/checkpoints/adapters/dsh/remote.ts'
 import { createStagedDiffRemoteHandlers } from '../../src/stagedDiff/adapters/dsh/remote.ts'
+import { createPromptRemoteHandlers } from '../../src/prompt/remote.ts'
+import { createBranchesRemoteHandlers } from '../../src/branches/adapters/dsh/remote.ts'
+import { createActivityRemoteHandlers } from '../../src/activity/adapters/dsh/remote.ts'
+import { createMigrationRemoteHandlers } from '../../src/migration/adapters/dsh/remote.ts'
 import { GRAY_REMOTE_ERROR_CODES } from '../../src/remote/types.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import { CheckpointService } from '../../src/checkpoints/service.ts'
@@ -36,6 +40,19 @@ const CONTRACT_ENDPOINTS: readonly string[] = [
   'stagedDiff/preview',
   'stagedDiff/accept',
   'stagedDiff/reject',
+  'prompt/modes.list',
+  'prompt/modes.get',
+  'prompt/modes.setCurrent',
+  'prompt/modes.create',
+  'prompt/modes.update',
+  'prompt/modes.delete',
+  'prompt/modes.duplicate',
+  'prompt/modes.import',
+  'prompt/modes.export',
+  'branches/list',
+  'branches/rename',
+  'activity/stats',
+  'migration/scopeMap',
 ]
 
 describe('Remote 契约表', () => {
@@ -45,6 +62,10 @@ describe('Remote 契约表', () => {
     remote.register(createMemoryRemoteHandlers(new MemoryService({ dataRoot: '__unused__' })))
     remote.register(createCheckpointsRemoteHandlers(new CheckpointService({ dataRoot: '__unused__', maxCheckpoints: -1, excludeProfiles: {}, excludePatterns: [], maxFileSizeBytes: 1, blobGracePeriodDays: 7 })))
     remote.register(createStagedDiffRemoteHandlers(new StagedDiffService(new EntrySidecarStore({ dataRoot: '__unused__' }), undefined as never)))
+    remote.register(createPromptRemoteHandlers(undefined as never))
+    remote.register(createBranchesRemoteHandlers(undefined as never))
+    remote.register(createActivityRemoteHandlers(undefined as never))
+    remote.register(createMigrationRemoteHandlers(undefined as never))
 
     const registered = remote.listEndpoints()
     for (const endpoint of CONTRACT_ENDPOINTS) {

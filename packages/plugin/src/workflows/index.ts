@@ -24,6 +24,7 @@ import {
 } from './tools/review.ts'
 import { createCreatePlanTool, createUpdatePlanTool } from './tools/plan.ts'
 import { createWorkflowsRemoteHandlers } from './adapters/dsh/remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 
 export const name = 'graycode-workflows'
 
@@ -88,16 +89,20 @@ export function apply(ctx: Context, config: Config): void {
     createCreatePlanTool(ctx.fs),
     createUpdatePlanTool(ctx.fs),
   ])
-  // Phase 4 host 侧 Remote 查询层（workflow 总览）：向根装配的 ctx.grayRemote 注册端点；
-  // 独立挂载（无 grayRemote）时静默跳过（可选链），工具行为不受影响。注销函数挂进
-  // 本 fiber：HMR 重载时旧端点先注销，新实例同 key 可重新注册。
-  const disposeRemote = ctx.grayRemote?.register(
-    createWorkflowsRemoteHandlers({ fs: ctx.fs, documentRoot: config.documentRoot })
-  )
+  // Phase 4 host 侧 Remote 查询层（workflow 总览）：向根装配的 ctx.grayRemote 注册端点。
+  // 用 ctx.inject 声明可选依赖：grayRemote 未 ACTIVE 时回调挂起、可用后自动补注册，
+  // 避免组合根 LOADING 期间属性访问/一次性 get 造成端点缺失（GRAY_ENDPOINT_NOT_FOUND）。
+  // 注销随 inject 纤维自动回收（HMR 重载后同 key 可重新注册）。
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(
+      createWorkflowsRemoteHandlers({ fs: ctx.fs, documentRoot: config.documentRoot })
+    )
+    child.effect(() => () => disposeRemote?.())
+  })
   // The registrar binds its own teardown to this fiber; this effect keeps the
   // HMR contract explicit and idempotent.
   ctx.effect(() => () => {
-    disposeRemote?.()
     registrar.dispose()
   })
 }

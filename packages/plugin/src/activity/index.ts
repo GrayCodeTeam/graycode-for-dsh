@@ -19,6 +19,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ActivityService } from './service.ts'
 import { createActivityTools } from './tools.ts'
 import { createActivityRemoteHandlers } from './adapters/dsh/remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 import { ACTIVITY_HEARTBEAT_MS } from './domain/types.ts'
 
@@ -74,9 +75,14 @@ export function apply(ctx: Context, config: Config): void {
   registrar.register(createActivityTools(service))
 
   // C6：向根装配的 ctx.grayRemote 注册 activity/stats 端点（前端面板数据源）；
-  // 独立挂载（无 grayRemote）时静默跳过。注销函数挂进本 fiber：HMR 重载时
-  // 旧端点先注销，新实例同 key 可重新注册。
-  const disposeRemote = ctx.grayRemote?.register(createActivityRemoteHandlers(service))
+  // grayRemote 是可选依赖——用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后
+  // 自动补注册（修复组合根 LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。
+  // 注销随 inject 纤维自动回收（HMR 重载后同 key 可重新注册）。
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(createActivityRemoteHandlers(service))
+    child.effect(() => () => disposeRemote?.())
+  })
 
   const logger = ctx.logger
   const warn = (error: unknown): void => {
@@ -105,7 +111,6 @@ export function apply(ctx: Context, config: Config): void {
 
   // 订阅随本 fiber dispose 卸载；停用时立即落盘尽量不丢数据。
   ctx.effect(() => async () => {
-    disposeRemote?.()
     registrar.dispose()
     detachInbox()
     detachPreStep()

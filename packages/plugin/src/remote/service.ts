@@ -112,6 +112,9 @@ export class GrayRemoteService extends Service {
     const endpoint = `${namespace}/${method}`
     const handler = this.handlers.get(endpoint)
     if (!handler) {
+      // 可观测性：端点缺失通常是「域未注册/未装配/重载窗口」的装配问题，记录日志
+      // 便于定位（客户端只会收到 GRAY_ENDPOINT_NOT_FOUND 信封）。
+      this.ctx.logger.warn(`[grayRemote] endpoint not found: ${endpoint}`)
       return {
         ok: false,
         error: {

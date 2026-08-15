@@ -20,6 +20,7 @@ import {
 import { PromptSettingsService } from './service.ts'
 import { createPromptInjector } from './promptInjector.ts'
 import { createPromptRemoteHandlers } from './remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 import { createPromptTools } from './tools.ts'
 
 export const name = 'graycode-prompt'
@@ -156,16 +157,19 @@ export function apply(ctx: Context, config: Config): () => void {
   ))
 
   // Phase 4 host 侧 Remote 层（浏览器设置 UI 经 /graycode Connection RPC 通道操作
-  // prompt 模式）：向根装配的 ctx.grayRemote 注册 prompt/modes.* 端点；独立挂载
-  // （无 grayRemote）时静默跳过。注意 cordis 的 Context 代理对未提供（未 inject）的
-  // 服务属性访问会直接抛错（`?.` 无法拦截），因此必须经 ctx.get() 读取——与
-  // settings/rpc.ts 及 workflows/tests/stagedWrite.test.ts 的装配注释一致。
-  // 注销函数挂进本 fiber 的 disposer：HMR 重载时旧端点先注销，新实例同 key 可重新注册。
-  const grayRemote = ctx.get('grayRemote')
-  const disposeRemote = grayRemote?.register(createPromptRemoteHandlers(service))
+  // prompt 模式）：向根装配的 ctx.grayRemote 注册 prompt/modes.* 端点。
+  // 用 ctx.inject 声明可选依赖（而非顶层 inject / 一次性 ctx.get）：组合根装配时
+  // grayRemote 服务可能尚未 ACTIVE（strict ctx.get 返回 undefined），若此时静默跳过
+  // 端点注册，浏览器面板会收到 GRAY_ENDPOINT_NOT_FOUND（remote endpoint not found:
+  // prompt/modes.list）。inject 等依赖 ACTIVE 后自动补注册，服务卸载/重装时随
+  // inject 纤维自动注销/重注册（HMR 安全，同 key 不重复注册）。
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(createPromptRemoteHandlers(service))
+    child.effect(() => () => disposeRemote?.())
+  })
 
   return () => {
-    disposeRemote?.()
     unsubscribe()
     registrar.dispose()
     injector.dispose()

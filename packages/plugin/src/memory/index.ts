@@ -4,6 +4,7 @@ import { MemoryService } from './service.ts'
 import { createMemoryTools } from './tools.ts'
 import { createMemoryPreStepListener } from './autoInject.ts'
 import { createMemoryRemoteHandlers } from './adapters/dsh/remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 
 export const name = 'graycode-memory'
@@ -83,10 +84,15 @@ export function apply(ctx: Context, config: Config): void {
   // unloads the registrations on dispose (service keeps no timers/handles).
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createMemoryTools(service))
-  // Phase 4 host 侧 Remote 查询/命令层（memory 管理）：注册端点；
-  // 独立挂载（无 grayRemote）时静默跳过，工具行为不受影响。注销函数随本 fiber
-  // 卸载（HMR：旧端点先注销，新实例同 key 可重新注册）。
-  const disposeRemote = ctx.grayRemote?.register(createMemoryRemoteHandlers(service))
+  // Phase 4 host 侧 Remote 查询/命令层（memory 管理）：注册端点；grayRemote 是可选
+  // 依赖——用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后自动补注册（修复
+  // 组合根 LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。注销随 inject
+  // 纤维自动回收（HMR 重载后同 key 可重新注册）。
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(createMemoryRemoteHandlers(service))
+    child.effect(() => () => disposeRemote?.())
+  })
   // Auto-injection is independent of the tool install scope: on the first
   // qualified pre-step of each agent (and again only when memory content
   // changes) a bounded snapshot enters the request; failures degrade to no
@@ -102,7 +108,6 @@ export function apply(ctx: Context, config: Config): void {
   } satisfies MemoryPromptService)
   ctx.effect(() => () => {
     disposeProvide()
-    disposeRemote?.()
     registrar.dispose()
     detachInjector()
   })

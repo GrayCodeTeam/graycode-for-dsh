@@ -16,6 +16,7 @@ import { createScopedToolRegistrar } from '../agentScope.ts'
 import { createMigrationService } from './adapters/compose.ts'
 import { createMigrationTools } from './tools.ts'
 import { createMigrationRemoteHandlers } from './adapters/dsh/remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 
 export const name = 'graycode-migration'
 
@@ -45,12 +46,18 @@ export function apply(ctx: Context, config: Config): () => void {
   const service = createMigrationService({ dataRoot: config.dataRoot, ctx })
   const registrar = createScopedToolRegistrar(ctx, 'roots')
   registrar.register(createMigrationTools(service, { allowLegacyReaders: config.allowLegacyReaders }))
-  // D-2 可视化：scope 映射 Remote 端点（仅安全门开启时暴露；client ScopeMapPanel 消费）
-  const disposeRemote = config.allowLegacyReaders
-    ? ctx.grayRemote?.register(createMigrationRemoteHandlers(service))
-    : undefined
+  // D-2 可视化：scope 映射 Remote 端点（仅安全门开启时暴露；client ScopeMapPanel 消费）。
+  // grayRemote 是可选依赖——用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后
+  // 自动补注册（修复组合根 LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。
+  // 注销随 inject 纤维自动回收（HMR 重载后同 key 可重新注册）。
+  if (config.allowLegacyReaders) {
+    ctx.inject(['grayRemote'], (child) => {
+      const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+      const disposeRemote = grayRemote?.register(createMigrationRemoteHandlers(service))
+      child.effect(() => () => disposeRemote?.())
+    })
+  }
   return () => {
     registrar.dispose()
-    disposeRemote?.()
   }
 }

@@ -4,6 +4,7 @@ import { BranchCoordinatorService } from './service.ts'
 import { createDshBranchSessionAdapter } from './adapters/dshSessionAdapter.ts'
 import { createBranchTools } from './tools.ts'
 import { createBranchesRemoteHandlers } from './adapters/dsh/remote.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
 
 export const name = 'graycode-branches'
@@ -39,11 +40,16 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
   await service.initialize()
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createBranchTools(service))
-  // C5：向根装配的 ctx.grayRemote 注册 branches 管理端点；独立挂载时静默跳过。
-  // 注销函数挂进本 fiber：HMR 重载时旧端点先注销，新实例同 key 可重新注册。
-  const disposeRemote = ctx.grayRemote?.register(createBranchesRemoteHandlers(service))
+  // C5：向根装配的 ctx.grayRemote 注册 branches 管理端点；grayRemote 是可选依赖——
+  // 用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后自动补注册（修复组合根
+  // LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。注销随 inject 纤维
+  // 自动回收（HMR 重载后同 key 可重新注册）。
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(createBranchesRemoteHandlers(service))
+    child.effect(() => () => disposeRemote?.())
+  })
   return () => {
-    disposeRemote?.()
     registrar.dispose()
     service.dispose()
   }
