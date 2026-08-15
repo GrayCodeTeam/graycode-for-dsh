@@ -257,7 +257,6 @@ export function apply(ctx: ClientContext): void {
           store,
           locale: localeFace,
           remote,
-          defaultWorkspace: connection.hostDescription.getSnapshot()?.cwd,
           activityT,
           memoryT,
         }),

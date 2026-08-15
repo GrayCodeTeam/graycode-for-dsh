@@ -10,6 +10,17 @@ import {
   zh,
 } from '../src/client/settings/locales.ts'
 import { CATEGORIES } from '../src/client/settings/pages.tsx'
+import { selectCurrentSessionWorkspace } from '../src/client/settings/GrayCodeSettingsSection.tsx'
+import {
+  createFieldDraft,
+  prepareNumberCommit,
+  prepareTextCommit,
+  reduceFieldDraft,
+} from '../src/client/settings/fieldDraft.ts'
+import {
+  WorkspaceRequestGuard,
+  shouldAdoptWorkspaceDefault,
+} from '../src/client/settings/workspaceRequestGuard.ts'
 import {
   buttonStyle,
   checkpointCreateActionsStyle,
@@ -44,6 +55,69 @@ describe('settings path helpers', () => {
 
   it('emits no patch for an unchanged value', () => {
     expect(setAtPath(structuredClone(DEFAULTS), ['todo', 'enabled'], true).patch).toEqual({})
+  })
+})
+
+describe('settings workspace and local-draft guards', () => {
+  it('selects the current session cwd and never invents a host cwd fallback', () => {
+    const base = {
+      ids: ['session-a'],
+      byId: { 'session-a': { cwd: '  D:\\repo  ' } },
+      current: 'session-a',
+      phase: 'ready',
+      subagentsByParent: {},
+      jobsBySession: {},
+      currentAddress: undefined,
+    }
+    expect(selectCurrentSessionWorkspace(base as never)).toBe('D:\\repo')
+    expect(selectCurrentSessionWorkspace({ ...base, current: undefined } as never)).toBeUndefined()
+    expect(selectCurrentSessionWorkspace({ ...base, byId: { 'session-a': {} } } as never)).toBeUndefined()
+  })
+
+  it('follows changed session defaults only while the path remains unedited', () => {
+    expect(shouldAdoptWorkspaceDefault('C:\\old', 'C:\\old', 'D:\\next')).toBe(true)
+    expect(shouldAdoptWorkspaceDefault('E:\\manual', 'C:\\old', 'D:\\next')).toBe(false)
+    expect(shouldAdoptWorkspaceDefault('', undefined, 'D:\\next')).toBe(true)
+  })
+
+  it('invalidates old and cross-workspace checkpoint responses', () => {
+    const guard = new WorkspaceRequestGuard('C:\\one')
+    const first = guard.beginFor('C:\\one')!
+    const newer = guard.beginFor(' C:\\one ' )!
+    expect(guard.isCurrent(first)).toBe(false)
+    expect(guard.isCurrent(newer)).toBe(true)
+    guard.moveTo('D:\\two')
+    expect(guard.isCurrent(newer)).toBe(false)
+    expect(guard.beginFor('C:\\one')).toBeNull()
+    expect(guard.isCurrent(guard.beginFor('D:\\two')!)).toBe(true)
+  })
+
+  it('keeps newer typing when an older RPC snapshot is acknowledged', () => {
+    let draft = createFieldDraft('')
+    draft = reduceFieldDraft(draft, { type: 'edit', value: 'a' })
+    draft = reduceFieldDraft(draft, { type: 'commit', canonical: 'a' })
+    draft = reduceFieldDraft(draft, { type: 'edit', value: 'ab' })
+    draft = reduceFieldDraft(draft, { type: 'external', value: 'a' })
+    expect(draft).toEqual({ draft: 'ab', dirty: true, pending: null })
+    draft = reduceFieldDraft(draft, { type: 'commit', canonical: 'ab' })
+    draft = reduceFieldDraft(draft, { type: 'external', value: 'stale-a' })
+    expect(draft.draft).toBe('ab')
+    expect(draft.pending).toBe('ab')
+    expect(reduceFieldDraft(draft, { type: 'external', value: 'ab' })).toEqual(createFieldDraft('ab'))
+    expect(reduceFieldDraft(draft, { type: 'settle', canonical: 'ab' }).pending).toBeNull()
+  })
+
+  it('preserves number intermediate states and normalizes multiline text only at commit', () => {
+    expect(prepareNumberCommit('')).toBeNull()
+    expect(prepareNumberCommit('-')).toBeNull()
+    expect(prepareNumberCommit('1.5')).toEqual({ value: 1.5, canonical: '1.5' })
+    const lines = {
+      toInput: (value: unknown) => Array.isArray(value) ? value.join('\n') : '',
+      fromInput: (value: unknown) => typeof value === 'string'
+        ? value.split(/\r?\n/u).map(line => line.trim()).filter(Boolean)
+        : [],
+    }
+    expect(prepareTextCommit('one\n', lines)).toEqual({ value: ['one'], canonical: 'one' })
   })
 })
 

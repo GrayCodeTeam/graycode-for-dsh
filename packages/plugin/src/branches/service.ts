@@ -152,10 +152,9 @@ export class BranchCoordinatorService {
     }
 
     /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）在内部捕获并记录日志、
-     *  置空 groups + 标记错误状态（loadError），不向调用方拒绝——index.ts 的
-     *  void initialize() 无 catch，拒绝会变成 unhandled rejection 且后续工具全失败无日志
-     *  （BUG: initialize 未处理拒绝）。幂等：并发调用共享同一份加载承诺；加载完成后顺手
-     *  清理超过保留期的软删候选（TREE-09）。 */
+     *  置空 groups + 标记错误状态（loadError），让 async 插件初始化正常收敛，随后所有
+     *  领域操作以 STORAGE_CORRUPT 响亮失败。幂等：并发调用共享同一份加载承诺；加载完成
+     *  后顺手清理超过保留期的软删候选（TREE-09）。 */
     initialize(): Promise<void> {
         if (this.loadPromise) return this.loadPromise;
         this.loadPromise = (async () => {

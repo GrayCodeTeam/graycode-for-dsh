@@ -97,15 +97,17 @@ export function createLiveConfigUpdater(
       for (const key of keys) {
         if (!deepEqualJson(appliedConfig[key], next[key])) {
           await updateOne(key)
+          // 每个 fiber 成功后立即推进该键的真实运行态基线。若后续 fiber 失败，
+          // 下一次提交仍能识别并回滚此前已经成功应用的模块。
+          appliedConfig = { ...appliedConfig, [key]: next[key] }
         }
       }
-      appliedConfig = next
     })
     return updateQueue
   }
 }
 
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   const dataRoot = config.dataRoot === '' ? `${resolveDshHome()}/graycode` : config.dataRoot
   const liveConfig: settings.GrayCodeConfig = {
     workflows: { ...config.workflows, dataRoot },
@@ -158,6 +160,10 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const applyLiveConfig = createLiveConfigUpdater(fibers, liveConfig)
+  // branches/checkpoints/stagedDiff 都有持久化初始化。组合根必须把这三条异步
+  // 子 fiber 纳入自己的 ready 边界；否则父 fiber 已 ACTIVE、调用方已经采集工具
+  // 集时，子 fiber 仍可能在加载 sidecar，造成首次挂载/HMR 观察到半套功能。
+  await Promise.all([fibers.branches, fibers.checkpoints, fibers.stagedDiff])
   // Settings 面板域：注册 graycode settings 命名空间（持久化）+ /graycode 配置
   // 通道（浏览器面板读写；connection 缺失时通道跳过，命名空间不受影响）。
   ctx.plugin(settings, { base: liveConfig, onChange: applyLiveConfig })

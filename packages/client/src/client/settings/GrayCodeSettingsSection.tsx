@@ -7,7 +7,8 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
-import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
+import type { GlobalStandardProps, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CATEGORIES } from './pages.tsx'
 import type { GcTranslate } from './fields.tsx'
 import { useGrayCodeStore, type GrayCodeStore } from './store.ts'
@@ -39,7 +40,6 @@ export interface GrayCodeSettingsSectionInjected {
   store: GrayCodeStore
   locale: GrayCodeLocaleFace
   remote: GrayRemoteInvoke
-  defaultWorkspace?: string
   /** Translate seat for the `graycode.activityHeatmap` namespace. */
   activityT: TranslateNS<'graycode.activityHeatmap'>
   /** Translate seat for the `graycode.memoryManage` namespace. */
@@ -47,13 +47,21 @@ export interface GrayCodeSettingsSectionInjected {
 }
 
 /** 宿主 owner props（设置外壳）+ 注入面。 */
-export interface GrayCodeSettingsSectionProps extends GrayCodeSettingsSectionInjected {
+export interface GrayCodeSettingsSectionProps extends GrayCodeSettingsSectionInjected, Pick<GlobalStandardProps, 'useSessions'> {
   /** 关闭设置面板（外壳提供；当前未使用）。 */
   close?: () => void
 }
 
-export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorkspace, activityT, memoryT }: GrayCodeSettingsSectionProps): ReactNode {
+/** Resolve the selected DSH session's workspace; the host process cwd is unrelated. */
+export function selectCurrentSessionWorkspace(state: SessionListState): string | undefined {
+  if (state.current === undefined) return undefined
+  const cwd = state.byId[state.current]?.cwd?.trim()
+  return cwd === undefined || cwd.length === 0 ? undefined : cwd
+}
+
+export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions, activityT, memoryT }: GrayCodeSettingsSectionProps): ReactNode {
   const state = useGrayCodeStore(store)
+  const defaultWorkspace = useSessions(selectCurrentSessionWorkspace)
   useEffect(() => {
     void store.refresh()
   }, [store])
@@ -73,9 +81,9 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorks
   // each page its own hook scope and lifecycle.
   const ActivePage = active.page
 
-  const handleChange = useCallback((path: readonly string[], value: unknown): void => {
-    if (state.status !== 'ready') return
-    void store.set(path, value).catch(() => undefined)
+  const handleChange = useCallback((path: readonly string[], value: unknown): Promise<void> => {
+    if (state.status !== 'ready') return Promise.resolve()
+    return store.set(path, value)
   }, [state, store])
 
   const handleReset = useCallback((): void => {

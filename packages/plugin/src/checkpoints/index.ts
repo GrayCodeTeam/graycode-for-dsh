@@ -46,11 +46,12 @@ export const Config: z<Config> = z.object({
   agentScope: agentScopeSchema,
 })
 
-export function apply(ctx: Context, config: Config): () => void {
+export async function apply(ctx: Context, config: Config): Promise<() => void> {
   // P0-08：恢复向用户 workspace 写文件必须经 DSH fs 路径——注入 ctx.fs（writeText 原子写、
   // 经过 fs/write-intent 策略缝、可携带 sandboxPolicy）；插件私有 blob root 仍由服务 node fs 管理。
   const service = new CheckpointService(config, createDshFsRestoreWorkspaceWriter(ctx.fs))
-  void service.initialize()
+  // 初始化失败交给 Cordis fiber；成功前不注册任何可调用表面。
+  await service.initialize()
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createCheckpointToolDefinitions(service))
   // Phase 4 host 侧 Remote 查询/命令层（checkpoint 列表/恢复预览）：注册端点；

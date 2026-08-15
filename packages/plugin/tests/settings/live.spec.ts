@@ -40,4 +40,22 @@ describe('native settings live runtime projection', () => {
     expect(updates.memory).toHaveBeenCalledTimes(2)
     expect(updates.memory).toHaveBeenLastCalledWith(second.memory, true)
   })
+
+  it('tracks each successful fiber when a later restart fails, so a revert is applied', async () => {
+    const { fibers, updates } = makeFibers()
+    updates.memory.mockRejectedValueOnce(new Error('memory reload failed'))
+    const apply = createLiveConfigUpdater(fibers, structuredClone(DEFAULTS))
+
+    const partial = structuredClone(DEFAULTS)
+    partial.workflows.documentRoot = '.changed'
+    partial.memory.wakeLines = 120
+    await expect(apply(partial)).rejects.toThrow('memory reload failed')
+
+    // workflows 已成功切到 .changed，而 memory 失败。回退到初始配置时必须
+    // 再次更新 workflows；旧实现仍以整份 initial 为基线，会错误跳过回退。
+    await expect(apply(structuredClone(DEFAULTS))).resolves.toBeUndefined()
+    expect(updates.workflows).toHaveBeenCalledTimes(2)
+    expect(updates.workflows).toHaveBeenLastCalledWith(DEFAULTS.workflows, true)
+    expect(updates.memory).toHaveBeenCalledTimes(1)
+  })
 })

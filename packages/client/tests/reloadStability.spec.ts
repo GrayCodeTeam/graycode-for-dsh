@@ -215,8 +215,8 @@ describe('refresh replay consistency — memory management surface', () => {
 
   it('replaying the same page sequence after a refresh yields the identical list view model', () => {
     const replay = () => {
-      const page1: GrayMemoryListResult = { items: [entry(5), entry(4), entry(3)], total: 5, nextCursor: '3' }
-      const page2: GrayMemoryListResult = { items: [entry(2), entry(1)], total: 5 }
+      const page1: GrayMemoryListResult = { items: [entry(5), entry(4), entry(3)], total: 5, nextCursor: '3', revision: 'rev-a' }
+      const page2: GrayMemoryListResult = { items: [entry(2), entry(1)], total: 5, revision: 'rev-a' }
       const first = buildMemoryListViewModel(page1, { scope: 'global' })
       return appendMemoryListPage(first, buildMemoryListViewModel(page2, { scope: 'global' }))
     }
@@ -229,14 +229,14 @@ describe('refresh replay consistency — memory management surface', () => {
 
   it('a refresh re-fetches page 1 and invalidates the accumulated view (no stale merge)', () => {
     // Accumulated list before a refresh (page 1 + load-more page 2).
-    const page1: GrayMemoryListResult = { items: [entry(5), entry(4), entry(3)], total: 5, nextCursor: '3' }
-    const page2: GrayMemoryListResult = { items: [entry(2), entry(1)], total: 5 }
+    const page1: GrayMemoryListResult = { items: [entry(5), entry(4), entry(3)], total: 5, nextCursor: '3', revision: 'rev-a' }
+    const page2: GrayMemoryListResult = { items: [entry(2), entry(1)], total: 5, revision: 'rev-a' }
     const stale = appendMemoryListPage(
       buildMemoryListViewModel(page1, { scope: 'global' }),
       buildMemoryListViewModel(page2, { scope: 'global' }),
     )
     // Refresh: the host serves the CURRENT page 1 (entry 5 removed, 6 added).
-    const freshPage: GrayMemoryListResult = { items: [entry(6), entry(4), entry(3)], total: 3, nextCursor: '3' }
+    const freshPage: GrayMemoryListResult = { items: [entry(6), entry(4), entry(3)], total: 3, nextCursor: '3', revision: 'rev-b' }
     // The panel replaces the whole list on refresh (MemoryManagePanel.tsx:
     // setList(buildMemoryListViewModel(...))) — nothing from the stale
     // accumulation may survive the cache-invalidated rebuild.

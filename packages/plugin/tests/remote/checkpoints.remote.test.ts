@@ -53,6 +53,19 @@ function expectFailure(result: GrayRemoteResult<unknown>, code: string): void {
 }
 
 describe('checkpoints/list', () => {
+  it('workspace 缺失或空白 → GRAY_INVALID_INPUT（不得回退宿主 cwd）', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      expectFailure(await env.invoke('checkpoints', 'list', {}), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+      expectFailure(
+        await env.invoke('checkpoints', 'list', { workspace: '   ' }),
+        GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+      )
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+
   it('空工作区 → 空列表', async () => {
     const env = await makeRemoteEnv()
     try {
@@ -114,6 +127,17 @@ describe('checkpoints/list', () => {
         const value = page2.value as GrayCheckpointListResult
         expect(value.items).toHaveLength(1)
         expect(value.nextCursor).toBeUndefined()
+      }
+
+      // 游标对应项被并发删除/不存在时不得静默从第一页重新开始。
+      const stale = await env.invoke('checkpoints', 'list', {
+        workspace: env.workspaceDir,
+        cursor: 'deleted-checkpoint',
+        limit: 2,
+      })
+      expect(stale.ok).toBe(true)
+      if (stale.ok) {
+        expect(stale.value).toMatchObject({ items: [], total: 3 })
       }
     } finally {
       await disposeEnv(env)

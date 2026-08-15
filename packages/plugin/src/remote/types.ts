@@ -247,7 +247,7 @@ export interface GrayCheckpointItemView extends CheckpointSummary {
 }
 
 export interface GrayCheckpointListParams {
-  readonly workspace?: string
+  readonly workspace: string
   readonly cursor?: string
   readonly limit?: number
 }
@@ -259,7 +259,7 @@ export interface GrayCheckpointListResult {
 }
 
 export interface GrayCheckpointCreateParams {
-  readonly workspace?: string
+  readonly workspace: string
   readonly title?: string
   readonly notes?: string
 }
@@ -269,14 +269,14 @@ export interface GrayCheckpointVerifyParams {
 }
 
 export interface GrayCheckpointPreviewParams {
-  readonly workspace?: string
+  readonly workspace: string
   readonly checkpointId: string
   readonly deleteUntrackedFiles?: boolean
 }
 
 /** checkpoints/restore 入参：previewToken 为 previewRestore 签发的审批 token。 */
 export interface GrayCheckpointRestoreParams {
-  readonly workspace?: string
+  readonly workspace: string
   readonly checkpointId: string
   /** previewRestore 返回值，必须原样回传；缺失/过期 → GRAY_APPROVAL_REQUIRED。 */
   readonly previewToken: string
@@ -284,7 +284,7 @@ export interface GrayCheckpointRestoreParams {
 }
 
 export interface GrayCheckpointDeleteParams {
-  readonly workspace?: string
+  readonly workspace: string
   readonly checkpointId: string
   readonly force?: boolean
   /** Browser destructive-action gate. */
@@ -292,7 +292,7 @@ export interface GrayCheckpointDeleteParams {
 }
 
 export interface GrayCheckpointGcParams {
-  readonly workspace?: string
+  readonly workspace: string
   /** Defaults to true. */
   readonly dryRun?: boolean
   /** Required only when dryRun=false. */

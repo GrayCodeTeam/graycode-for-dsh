@@ -185,7 +185,7 @@ describe('BranchCoordinatorService initialize', () => {
     await fs.mkdir(path.join(env.dataRoot, 'branches'), { recursive: true })
     await fs.writeFile(path.join(env.dataRoot, 'branches', 'groups.json'), '{not json', 'utf-8')
     const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, new FakeBranchSessionAdapter())
-    // 不再向调用方拒绝：index.ts 的 void initialize() 不会产生 unhandled rejection
+    // 损坏被记录为领域错误状态；async 插件初始化可正常完成，后续操作响亮失败。
     await expect(service.initialize()).resolves.toBeUndefined()
     // 错误状态响亮失败：读与写路径都返回稳定 STORAGE_CORRUPT
     const readError = thrownSync(() => service.listGroups())

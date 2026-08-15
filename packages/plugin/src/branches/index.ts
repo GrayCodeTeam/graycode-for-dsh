@@ -29,12 +29,14 @@ export const Config: z<Config> = z.object({
   agentScope: agentScopeSchema,
 })
 
-export function apply(ctx: Context, config: Config): () => void {
+export async function apply(ctx: Context, config: Config): Promise<() => void> {
   const service = new BranchCoordinatorService(
     { dataRoot: config.dataRoot },
     createDshBranchSessionAdapter(ctx)
   )
-  void service.initialize()
+  // Cordis 会等待 async apply；初始化完成前不暴露工具/Remote，失败由 fiber
+  // 生命周期接管并记录，不产生 fire-and-forget 的 unhandled rejection。
+  await service.initialize()
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createBranchTools(service))
   // C5：向根装配的 ctx.grayRemote 注册 branches 管理端点；独立挂载时静默跳过。

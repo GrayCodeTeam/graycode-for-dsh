@@ -23,7 +23,7 @@ import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
 export interface GrayCodePageProps {
   t: GcTranslate
   config: GrayCodeConfig
-  onChange: (path: readonly string[], value: unknown) => void
+  onChange: (path: readonly string[], value: unknown) => void | Promise<void>
   onReset: () => void
   remote: GrayRemoteInvoke
   defaultWorkspace?: string

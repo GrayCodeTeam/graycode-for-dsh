@@ -24,8 +24,8 @@ import {
   normalizeLimit,
   optionalBoolean,
   optionalString,
-  optionalWorkspace,
   requireString,
+  requireWorkspace,
 } from '../../../remote/validate.ts'
 import type {
   GrayCheckpointItemView,
@@ -70,7 +70,7 @@ function classifyRestoreError(message: string | undefined, signal?: AbortSignal)
 export function createCheckpointsRemoteHandlers(service: CheckpointService): GrayRemoteHandlers {
   return {
     'checkpoints/create': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const title = optionalString(args, 'title')
       const notes = optionalString(args, 'notes')
       const result = await service.createCheckpoint(workspace, { title, notes, signal })
@@ -81,7 +81,7 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
     },
 
     'checkpoints/list': async (args: GrayRemoteArgs) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const cursor = args.cursor === undefined || args.cursor === null ? undefined : requireString(args, 'cursor')
       const limit = normalizeLimit(args.limit)
       let result
@@ -105,7 +105,7 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
     },
 
     'checkpoints/previewRestore': async (args: GrayRemoteArgs) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const checkpointId = requireString(args, 'checkpointId')
       const deleteUntrackedFiles = optionalBoolean(args, 'deleteUntrackedFiles')
       const outcome = await service.previewRestore(workspace, checkpointId, { deleteUntrackedFiles })
@@ -117,7 +117,7 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
     },
 
     'checkpoints/restore': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const checkpointId = requireString(args, 'checkpointId')
       // 审批门闸（契约 §5.6）：token 缺失/为空视为未确认 → GRAY_APPROVAL_REQUIRED；
       // 仅非字符串类型才是入参类型错误（GRAY_INVALID_INPUT）。
@@ -146,7 +146,7 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
     },
 
     'checkpoints/delete': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const checkpointId = requireString(args, 'checkpointId')
       const force = optionalBoolean(args, 'force')
       if (args.confirm !== true) {
@@ -169,7 +169,7 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
     },
 
     'checkpoints/gc': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
-      const workspace = optionalWorkspace(args)
+      const workspace = requireWorkspace(args)
       const dryRun = optionalBoolean(args, 'dryRun') !== false
       if (!dryRun && args.confirm !== true) {
         throw GrayRemoteError.approvalRequired('checkpoints.gc requires confirmation when dryRun is false')

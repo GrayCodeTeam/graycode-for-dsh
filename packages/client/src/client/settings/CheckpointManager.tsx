@@ -19,6 +19,12 @@ import type {
   CheckpointVerifyResult,
   GrayRemoteInvoke,
 } from './types.ts'
+import {
+  WorkspaceRequestGuard,
+  normalizeWorkspaceInput,
+  shouldAdoptWorkspaceDefault,
+  type WorkspaceRequestToken,
+} from './workspaceRequestGuard.ts'
 
 export interface CheckpointManagerProps {
   t: GcTranslate
@@ -56,7 +62,7 @@ const errorStyle: CSSProperties = { ...metaStyle, color: tokens.danger, whiteSpa
 const codeStyle: CSSProperties = { fontFamily: tokens.fontMono, overflowWrap: 'anywhere' }
 
 function argsWithWorkspace(workspace: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return workspace.trim() === '' ? extra : { workspace: workspace.trim(), ...extra }
+  return { workspace: normalizeWorkspaceInput(workspace), ...extra }
 }
 
 function formatBytes(bytes: number): string {
@@ -68,6 +74,13 @@ function formatBytes(bytes: number): string {
 export function CheckpointManager({ t, remote, defaultWorkspace = '' }: CheckpointManagerProps): ReactNode {
   const initialLoadStarted = useRef(false)
   const [workspace, setWorkspace] = useState(defaultWorkspace)
+  const workspaceRef = useRef(defaultWorkspace)
+  const previousDefaultRef = useRef(defaultWorkspace)
+  const mountedRef = useRef(true)
+  const requestGuardRef = useRef<WorkspaceRequestGuard>()
+  if (requestGuardRef.current === undefined) {
+    requestGuardRef.current = new WorkspaceRequestGuard(defaultWorkspace)
+  }
   const [title, setTitle] = useState('')
   const [items, setItems] = useState<CheckpointItem[]>([])
   const [total, setTotal] = useState(0)
@@ -82,145 +95,212 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
     deleteUntracked: boolean
   } | null>(null)
   const [deleteUntracked, setDeleteUntracked] = useState(false)
-  const [gcPreview, setGcPreview] = useState<CheckpointGcResult | null>(null)
+  const [listWorkspace, setListWorkspace] = useState('')
+  const [gcPreview, setGcPreview] = useState<{ value: CheckpointGcResult; workspace: string } | null>(null)
 
-  const load = useCallback(async (): Promise<void> => {
+  const clearWorkspaceResults = useCallback((): void => {
+    setItems([])
+    setTotal(0)
+    setVerify({})
+    setPreview(null)
+    setGcPreview(null)
+    setListWorkspace('')
+    setNotice('')
+    setError('')
+    setBusy(false)
+  }, [])
+
+  const moveWorkspace = useCallback((next: string): void => {
+    workspaceRef.current = next
+    requestGuardRef.current!.moveTo(next)
+    setWorkspace(next)
+    clearWorkspaceResults()
+  }, [clearWorkspaceResults])
+
+  const beginRequest = useCallback((targetWorkspace: string): WorkspaceRequestToken | null => {
+    const token = requestGuardRef.current!.beginFor(targetWorkspace)
+    if (token === null) {
+      if (normalizeWorkspaceInput(targetWorkspace) === '') setError(t('checkpoint.workspaceRequired'))
+      return null
+    }
     setBusy(true)
     setError('')
+    return token
+  }, [t])
+
+  const isCurrent = (token: WorkspaceRequestToken): boolean => mountedRef.current && requestGuardRef.current!.isCurrent(token)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      // React StrictMode intentionally tears down and re-runs mount effects in
+      // development. Let the second setup perform a fresh initial load after
+      // the first request is invalidated below.
+      initialLoadStarted.current = false
+      requestGuardRef.current!.invalidate()
+    }
+  }, [])
+
+  const load = useCallback(async (targetWorkspace = workspaceRef.current): Promise<void> => {
+    const token = beginRequest(targetWorkspace)
+    if (token === null) return
     try {
-      const result = await remote<CheckpointListResult>('checkpoints', 'list', argsWithWorkspace(workspace, { limit: 100 }))
+      const result = await remote<CheckpointListResult>('checkpoints', 'list', argsWithWorkspace(token.workspace, { limit: 100 }))
+      if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setItems(result.value.items)
       setTotal(result.value.total)
+      setListWorkspace(token.workspace)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
-  }, [remote, workspace])
+  }, [beginRequest, remote])
 
   useEffect(() => {
-    if (initialLoadStarted.current) return
-    initialLoadStarted.current = true
-    void load()
-  }, [load])
+    const previousDefault = previousDefaultRef.current
+    previousDefaultRef.current = defaultWorkspace
+    if (!initialLoadStarted.current) {
+      initialLoadStarted.current = true
+      void load(defaultWorkspace)
+      return
+    }
+    if (!shouldAdoptWorkspaceDefault(workspaceRef.current, previousDefault, defaultWorkspace)) return
+    moveWorkspace(defaultWorkspace)
+    void load(defaultWorkspace)
+  }, [defaultWorkspace, load, moveWorkspace])
 
   const create = async (): Promise<void> => {
-    setBusy(true)
-    setError('')
+    const token = beginRequest(workspaceRef.current)
+    if (token === null) return
+    const checkpointTitle = title.trim()
     try {
-      const result = await remote<{ checkpointId: string }>('checkpoints', 'create', argsWithWorkspace(workspace, {
-        ...(title.trim() === '' ? {} : { title: title.trim() }),
+      const result = await remote<{ checkpointId: string }>('checkpoints', 'create', argsWithWorkspace(token.workspace, {
+        ...(checkpointTitle === '' ? {} : { title: checkpointTitle }),
       }))
+      if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setTitle('')
       setNotice(`${t('checkpoint.created')}: ${result.value.checkpointId}`)
-      await load()
+      await load(token.workspace)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
   }
 
-  const verifyOne = async (checkpointId: string): Promise<void> => {
-    setError('')
-    const result = await remote<CheckpointVerifyResult>('checkpoints', 'verify', { checkpointId })
-    if (!result.ok) {
-      setError(`${result.error.code}: ${result.error.message}`)
-      return
-    }
-    setVerify(current => ({ ...current, [checkpointId]: result.value }))
-  }
-
-  const previewRestore = async (checkpointId: string): Promise<void> => {
-    setBusy(true)
-    setError('')
+  const verifyOne = async (checkpointId: string, targetWorkspace: string): Promise<void> => {
+    const token = beginRequest(targetWorkspace)
+    if (token === null) return
     try {
-      const result = await remote<CheckpointPreviewOutcome>('checkpoints', 'previewRestore', argsWithWorkspace(workspace, {
+      const result = await remote<CheckpointVerifyResult>('checkpoints', 'verify', { checkpointId })
+      if (!isCurrent(token)) return
+      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+      setVerify(current => ({ ...current, [checkpointId]: result.value }))
+    } catch (cause) {
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (isCurrent(token)) setBusy(false)
+    }
+  }
+
+  const previewRestore = async (checkpointId: string, targetWorkspace: string): Promise<void> => {
+    const token = beginRequest(targetWorkspace)
+    if (token === null) return
+    const shouldDeleteUntracked = deleteUntracked
+    try {
+      const result = await remote<CheckpointPreviewOutcome>('checkpoints', 'previewRestore', argsWithWorkspace(token.workspace, {
         checkpointId,
-        deleteUntrackedFiles: deleteUntracked,
+        deleteUntrackedFiles: shouldDeleteUntracked,
       }))
+      if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setPreview({
         id: checkpointId,
         value: result.value,
-        workspace: workspace.trim(),
-        deleteUntracked,
+        workspace: token.workspace,
+        deleteUntracked: shouldDeleteUntracked,
       })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
   }
 
   const restore = async (): Promise<void> => {
     if (preview?.value.previewToken === undefined) return
     if (!window.confirm(t('checkpoint.restoreConfirm'))) return
-    setBusy(true)
-    setError('')
+    const target = preview
+    const token = beginRequest(target.workspace)
+    if (token === null) return
     try {
-      const result = await remote<unknown>('checkpoints', 'restore', argsWithWorkspace(preview.workspace, {
-        checkpointId: preview.id,
-        previewToken: preview.value.previewToken,
-        deleteUntrackedFiles: preview.deleteUntracked,
+      const result = await remote<unknown>('checkpoints', 'restore', argsWithWorkspace(token.workspace, {
+        checkpointId: target.id,
+        previewToken: target.value.previewToken,
+        deleteUntrackedFiles: target.deleteUntracked,
       }))
+      if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setNotice(t('checkpoint.restored'))
       setPreview(null)
-      await load()
+      await load(token.workspace)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
   }
 
-  const deleteOne = async (checkpointId: string, force = false): Promise<void> => {
+  const deleteOne = async (checkpointId: string, targetWorkspace: string, force = false): Promise<void> => {
     if (!window.confirm(t(force ? 'checkpoint.forceDeleteConfirm' : 'checkpoint.deleteConfirm'))) return
-    setBusy(true)
-    setError('')
+    const token = beginRequest(targetWorkspace)
+    if (token === null) return
     try {
-      const result = await remote<unknown>('checkpoints', 'delete', argsWithWorkspace(workspace, {
+      const result = await remote<unknown>('checkpoints', 'delete', argsWithWorkspace(token.workspace, {
         checkpointId,
         force,
         confirm: true,
       }))
+      if (!isCurrent(token)) return
       if (!result.ok) {
         if (!force && result.error.code === 'GRAY_CONFLICT') {
           setBusy(false)
-          await deleteOne(checkpointId, true)
+          await deleteOne(checkpointId, token.workspace, true)
           return
         }
         throw new Error(`${result.error.code}: ${result.error.message}`)
       }
       setNotice(t('checkpoint.deleted'))
-      await load()
+      await load(token.workspace)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
   }
 
-  const gc = async (dryRun: boolean): Promise<void> => {
+  const gc = async (dryRun: boolean, targetWorkspace: string): Promise<void> => {
     if (!dryRun && !window.confirm(t('checkpoint.gcConfirm'))) return
-    setBusy(true)
-    setError('')
+    const token = beginRequest(targetWorkspace)
+    if (token === null) return
     try {
-      const result = await remote<CheckpointGcResult>('checkpoints', 'gc', argsWithWorkspace(workspace, {
+      const result = await remote<CheckpointGcResult>('checkpoints', 'gc', argsWithWorkspace(token.workspace, {
         dryRun,
         ...(!dryRun ? { confirm: true } : {}),
       }))
+      if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
-      setGcPreview(result.value)
+      setGcPreview({ value: result.value, workspace: token.workspace })
       setNotice(dryRun ? t('checkpoint.gcPreviewDone') : t('checkpoint.gcDone'))
-      if (!dryRun) await load()
+      if (!dryRun) await load(token.workspace)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setBusy(false)
+      if (isCurrent(token)) setBusy(false)
     }
   }
 
@@ -233,10 +313,7 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
         <input
           style={inputStyle}
           value={workspace}
-          onChange={event => {
-            setWorkspace(event.target.value)
-            setPreview(null)
-          }}
+          onChange={event => moveWorkspace(event.target.value)}
         />
       </label>
       <div style={checkpointCreateRowStyle}>
@@ -247,14 +324,15 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
           onChange={event => setTitle(event.target.value)}
         />
         <div style={checkpointCreateActionsStyle}>
-          <button type="button" style={buttonStyle} disabled={busy} onClick={() => void create()}>{t('checkpoint.create')}</button>
-          <button type="button" style={buttonStyle} disabled={busy} onClick={() => void load()}>{t('checkpoint.refresh')}</button>
+          <button type="button" style={buttonStyle} disabled={busy || normalizeWorkspaceInput(workspace) === ''} onClick={() => void create()}>{t('checkpoint.create')}</button>
+          <button type="button" style={buttonStyle} disabled={busy || normalizeWorkspaceInput(workspace) === ''} onClick={() => void load()}>{t('checkpoint.refresh')}</button>
         </div>
       </div>
       <label style={metaStyle}>
         <input
           type="checkbox"
           checked={deleteUntracked}
+          disabled={busy}
           onChange={event => {
             setDeleteUntracked(event.target.checked)
             setPreview(null)
@@ -266,12 +344,12 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
       {error !== '' && <div style={errorStyle}>{error}</div>}
       {notice !== '' && <div style={metaStyle}>{notice}</div>}
       <div style={buttonRowStyle}>
-        <button type="button" style={buttonStyle} disabled={busy} onClick={() => void gc(true)}>{t('checkpoint.gcPreview')}</button>
-        {gcPreview !== null && !gcPreview.dryRun && <span style={metaStyle}>{t('checkpoint.gcRemoved')}: {gcPreview.removedBlobs.length} / {formatBytes(gcPreview.removedBytes)}</span>}
-        {gcPreview?.dryRun === true && (
+        <button type="button" style={buttonStyle} disabled={busy || normalizeWorkspaceInput(workspace) === ''} onClick={() => void gc(true, workspaceRef.current)}>{t('checkpoint.gcPreview')}</button>
+        {gcPreview !== null && !gcPreview.value.dryRun && <span style={metaStyle}>{t('checkpoint.gcRemoved')}: {gcPreview.value.removedBlobs.length} / {formatBytes(gcPreview.value.removedBytes)}</span>}
+        {gcPreview?.value.dryRun === true && (
           <>
-            <span style={metaStyle}>{t('checkpoint.gcCandidates')}: {gcPreview.removedBlobs.length}</span>
-            <button type="button" style={buttonDangerStyle} disabled={busy} onClick={() => void gc(false)}>{t('checkpoint.gcApply')}</button>
+            <span style={metaStyle}>{t('checkpoint.gcCandidates')}: {gcPreview.value.removedBlobs.length}</span>
+            <button type="button" style={buttonDangerStyle} disabled={busy} onClick={() => void gc(false, gcPreview.workspace)}>{t('checkpoint.gcApply')}</button>
           </>
         )}
       </div>
@@ -290,9 +368,9 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
               {item.type} · {item.fileCount} {t('checkpoint.files')} · {formatBytes(item.backupBytes)}
             </div>
             <div style={buttonRowStyle}>
-              <button type="button" style={buttonStyle} disabled={busy} onClick={() => void verifyOne(item.id)}>{t('checkpoint.verify')}</button>
-              <button type="button" style={buttonStyle} disabled={busy} onClick={() => void previewRestore(item.id)}>{t('checkpoint.previewRestore')}</button>
-              <button type="button" style={buttonDangerStyle} disabled={busy} onClick={() => void deleteOne(item.id)}>{t('checkpoint.delete')}</button>
+              <button type="button" style={buttonStyle} disabled={busy} onClick={() => void verifyOne(item.id, listWorkspace)}>{t('checkpoint.verify')}</button>
+              <button type="button" style={buttonStyle} disabled={busy} onClick={() => void previewRestore(item.id, listWorkspace)}>{t('checkpoint.previewRestore')}</button>
+              <button type="button" style={buttonDangerStyle} disabled={busy} onClick={() => void deleteOne(item.id, listWorkspace)}>{t('checkpoint.delete')}</button>
             </div>
             {result !== undefined && (
               <div style={result.ok ? metaStyle : errorStyle}>

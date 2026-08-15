@@ -8,8 +8,8 @@
  * `useState`）。
  */
 
-import { useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import {
   IconChevronDownOutline14,
   IconCopyOutline16,
@@ -58,6 +58,14 @@ import {
   tokens,
 } from './styles.ts'
 import type { GrayCodeConfig } from './types.ts'
+import {
+  createFieldDraft,
+  prepareNumberCommit,
+  prepareTextCommit,
+  reduceFieldDraft,
+  type FieldValueTransform,
+  type PreparedFieldCommit,
+} from './fieldDraft.ts'
 
 /** 宽松的翻译座（locale 包自身的类型可能随 rc 漂移）。 */
 export type GcTranslate = (key: string) => string
@@ -81,17 +89,99 @@ export interface FieldSpec {
   rows?: number
   monospace?: boolean
   /** 存储值 ↔ 输入形状的转换（如数组 ↔ 文本）。 */
-  transform?: {
-    toInput(value: unknown): unknown
-    fromInput(value: unknown): unknown
-  }
+  transform?: FieldValueTransform
 }
 
 export interface FieldRenderProps {
   spec: FieldSpec
   value: unknown
-  onChange: (value: unknown) => void
+  onChange: (value: unknown) => void | Promise<void>
   t: GcTranslate
+}
+
+/** Delay remote writes while the user is actively typing. Blur commits now. */
+const FIELD_COMMIT_DEBOUNCE_MS = 500
+
+interface DraftControlProps {
+  external: string
+  prepare: (raw: string) => PreparedFieldCommit | null
+  onCommit: (value: unknown) => void | Promise<void>
+  render: (props: {
+    value: string
+    onChange: (value: string) => void
+    onBlur: () => void
+    onKeyDown: (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => void
+  }) => ReactNode
+  multiline?: boolean
+}
+
+/**
+ * Local draft boundary for RPC-backed fields. An acknowledged host snapshot
+ * may normalize the value, but intermediate/older snapshots cannot overwrite
+ * a newer local edit.
+ */
+function DraftControl({ external, prepare, onCommit, render, multiline = false }: DraftControlProps): ReactNode {
+  const [state, dispatch] = useReducer(reduceFieldDraft, external, createFieldDraft)
+  const stateRef = useRef(state)
+  const externalRef = useRef(external)
+  const mountedRef = useRef(true)
+  stateRef.current = state
+  externalRef.current = external
+
+  useEffect(() => {
+    dispatch({ type: 'external', value: external })
+  }, [external])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  const commit = useCallback((resetInvalid: boolean): void => {
+    const current = stateRef.current
+    if (!current.dirty) return
+    const prepared = prepare(current.draft)
+    if (prepared === null) {
+      if (resetInvalid) dispatch({ type: 'reset', external: externalRef.current })
+      return
+    }
+    dispatch({ type: 'commit', canonical: prepared.canonical })
+    Promise.resolve(onCommit(prepared.value)).then(
+      () => {
+        if (mountedRef.current) dispatch({ type: 'settle', canonical: prepared.canonical })
+      },
+      () => {
+        if (mountedRef.current) {
+          dispatch({ type: 'reject', canonical: prepared.canonical, external: externalRef.current })
+        }
+      },
+    )
+  }, [onCommit, prepare])
+
+  useEffect(() => {
+    // A textarea must keep ordinary Enter/newline editing entirely local.
+    // Its transform (for example lines -> trimmed string[]) may canonicalize
+    // a trailing newline, so only explicit Ctrl/Cmd+Enter or blur commits it.
+    if (!state.dirty || multiline) return
+    const handle = setTimeout(() => commit(false), FIELD_COMMIT_DEBOUNCE_MS)
+    return () => clearTimeout(handle)
+  }, [commit, multiline, state.dirty, state.draft])
+
+  return render({
+    value: state.draft,
+    onChange: value => dispatch({ type: 'edit', value }),
+    onBlur: () => commit(true),
+    onKeyDown: event => {
+      const submit = multiline
+        ? (event.ctrlKey || event.metaKey) && event.key === 'Enter'
+        : event.key === 'Enter'
+      if (!submit) return
+      event.preventDefault()
+      // Blur is the single commit edge; calling commit here as well would
+      // enqueue the same RPC twice before the reducer can clear `dirty`.
+      event.currentTarget.blur()
+    },
+  })
 }
 
 /** 自定义开关（轨道 + 旋钮，checked 状态驱动内联样式）。 */
@@ -125,7 +215,8 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
   const placeholder = spec.placeholderKey === undefined ? undefined : t(spec.placeholderKey)
   const displayValue = spec.transform === undefined ? value : spec.transform.toInput(value)
   const handleChange = (next: unknown): void => {
-    onChange(spec.transform === undefined ? next : spec.transform.fromInput(next))
+    void Promise.resolve(onChange(spec.transform === undefined ? next : spec.transform.fromInput(next)))
+      .catch(() => undefined)
   }
   switch (spec.kind) {
     case 'boolean': {
@@ -158,22 +249,29 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
       )
     }
     case 'number': {
+      const external = typeof displayValue === 'number' && Number.isFinite(displayValue) ? String(displayValue) : ''
       return (
         <div style={fieldStyle}>
           <label style={fieldLabelStyle}>{t(spec.labelKey)}</label>
           {description !== undefined && <p style={fieldDescriptionStyle}>{description}</p>}
-          <input
-            type="number"
-            style={inputStyle}
-            value={typeof displayValue === 'number' ? displayValue : ''}
-            min={spec.min}
-            max={spec.max}
-            step={spec.step}
-            placeholder={placeholder}
-            onChange={event => {
-              const next = event.target.valueAsNumber
-              if (Number.isFinite(next)) handleChange(next)
-            }}
+          <DraftControl
+            external={external}
+            prepare={raw => prepareNumberCommit(raw, spec.transform)}
+            onCommit={onChange}
+            render={draft => (
+              <input
+                type="number"
+                style={inputStyle}
+                value={draft.value}
+                min={spec.min}
+                max={spec.max}
+                step={spec.step}
+                placeholder={placeholder}
+                onChange={event => draft.onChange(event.target.value)}
+                onBlur={draft.onBlur}
+                onKeyDown={draft.onKeyDown}
+              />
+            )}
           />
         </div>
       )
@@ -183,12 +281,22 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
         <div style={fieldStyle}>
           <label style={fieldLabelStyle}>{t(spec.labelKey)}</label>
           {description !== undefined && <p style={fieldDescriptionStyle}>{description}</p>}
-          <textarea
-            style={spec.monospace === true ? { ...textareaStyle, ...monoStyle } : textareaStyle}
-            rows={spec.rows ?? 6}
-            placeholder={placeholder}
-            value={typeof displayValue === 'string' ? displayValue : ''}
-            onChange={event => handleChange(event.target.value)}
+          <DraftControl
+            external={typeof displayValue === 'string' ? displayValue : ''}
+            prepare={raw => prepareTextCommit(raw, spec.transform)}
+            onCommit={onChange}
+            multiline
+            render={draft => (
+              <textarea
+                style={spec.monospace === true ? { ...textareaStyle, ...monoStyle } : textareaStyle}
+                rows={spec.rows ?? 6}
+                placeholder={placeholder}
+                value={draft.value}
+                onChange={event => draft.onChange(event.target.value)}
+                onBlur={draft.onBlur}
+                onKeyDown={draft.onKeyDown}
+              />
+            )}
           />
         </div>
       )
@@ -198,13 +306,22 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
         <div style={fieldStyle}>
           <label style={fieldLabelStyle}>{t(spec.labelKey)}</label>
           {description !== undefined && <p style={fieldDescriptionStyle}>{description}</p>}
-          <input
-            type="password"
-            style={inputStyle}
-            autoComplete="off"
-            placeholder={placeholder ?? '••••••••'}
-            value={typeof displayValue === 'string' ? displayValue : ''}
-            onChange={event => handleChange(event.target.value)}
+          <DraftControl
+            external={typeof displayValue === 'string' ? displayValue : ''}
+            prepare={raw => prepareTextCommit(raw, spec.transform)}
+            onCommit={onChange}
+            render={draft => (
+              <input
+                type="password"
+                style={inputStyle}
+                autoComplete="off"
+                placeholder={placeholder ?? '••••••••'}
+                value={draft.value}
+                onChange={event => draft.onChange(event.target.value)}
+                onBlur={draft.onBlur}
+                onKeyDown={draft.onKeyDown}
+              />
+            )}
           />
         </div>
       )
@@ -247,12 +364,21 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
         <div style={fieldStyle}>
           <label style={fieldLabelStyle}>{t(spec.labelKey)}</label>
           {description !== undefined && <p style={fieldDescriptionStyle}>{description}</p>}
-          <input
-            type="text"
-            style={spec.monospace === true ? { ...inputStyle, ...monoStyle } : inputStyle}
-            placeholder={placeholder}
-            value={typeof displayValue === 'string' ? displayValue : ''}
-            onChange={event => handleChange(event.target.value)}
+          <DraftControl
+            external={typeof displayValue === 'string' ? displayValue : ''}
+            prepare={raw => prepareTextCommit(raw, spec.transform)}
+            onCommit={onChange}
+            render={draft => (
+              <input
+                type="text"
+                style={spec.monospace === true ? { ...inputStyle, ...monoStyle } : inputStyle}
+                placeholder={placeholder}
+                value={draft.value}
+                onChange={event => draft.onChange(event.target.value)}
+                onBlur={draft.onBlur}
+                onKeyDown={draft.onKeyDown}
+              />
+            )}
           />
         </div>
       )
@@ -265,7 +391,7 @@ export interface FieldSectionProps {
   description?: string
   fields: readonly FieldSpec[]
   config: GrayCodeConfig
-  onChange: (path: readonly string[], value: unknown) => void
+  onChange: (path: readonly string[], value: unknown) => void | Promise<void>
   t: GcTranslate
 }
 

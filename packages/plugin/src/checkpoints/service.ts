@@ -822,9 +822,8 @@ export class CheckpointService {
         let startIndex = 0;
         if (options?.cursor) {
             const cursorIndex = sorted.findIndex(record => record.id === options.cursor);
-            if (cursorIndex >= 0) {
-                startIndex = cursorIndex + 1;
-            }
+            // 并发删除使游标消失时视为分页结束；不能回到第一页制造重复项。
+            startIndex = cursorIndex >= 0 ? cursorIndex + 1 : sorted.length;
         }
         const page = sorted.slice(startIndex, startIndex + limit);
         const nextCursor = startIndex + limit < sorted.length ? page[page.length - 1]?.id : undefined;
