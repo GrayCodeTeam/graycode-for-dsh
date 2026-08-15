@@ -10,6 +10,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { GrayCodeBadge } from './GrayCodeBadge.tsx'
 import { GRAYCODE_NS, graycodeDictionaries, graycodeJaPlaceholder } from './locales.ts'
@@ -82,6 +83,21 @@ import {
   graycodeSubagentBackDictionaries,
   graycodeSubagentBackJaPlaceholder,
 } from './subagentBack/locales.ts'
+import { RegenerateButton, type RegenerateInjected } from './rerollEdit/RegenerateButton.tsx'
+import { EditTurnButton, type EditTurnInjected } from './rerollEdit/EditTurnButton.tsx'
+import {
+  GRAYCODE_REROLL_NS,
+  graycodeRerollEditDictionaries,
+  graycodeRerollEditJaPlaceholder,
+} from './rerollEdit/locales.ts'
+import { installSummarize } from './summarize/install.ts'
+
+/**
+ * Chain routing for the F2 edit-turn seat: the `conversation.chat.turnTail`
+ * seat only exists for completed turns, so every occurrence is claimable; the
+ * selector hands the completed turn's session turn number to the entry.
+ */
+const selectEditTurn = (owner: TurnTailOwnerProps) => ({ turn: owner.turn.turn })
 
 // Pluggable renderer surface for `kind: 'graycode.workflow'` chat nodes.
 // DSH rc.6 has no conversation-node renderer mount available to this package
@@ -224,6 +240,13 @@ export function apply(ctx: ClientContext): void {
   const disposeSubagentBackJa = ctx.locale.register(GRAYCODE_SUBAGENT_BACK_NS, 'ja', graycodeSubagentBackJaPlaceholder)
   ctx.effect(() => disposeSubagentBackJa)
 
+  // F1/F2 reroll & edit-turn locale namespace (own ns, same pattern as the
+  // other surfaces).
+  const disposeRerollEdit = ctx.locale.register(GRAYCODE_REROLL_NS, graycodeRerollEditDictionaries)
+  ctx.effect(() => disposeRerollEdit)
+  const disposeRerollEditJa = ctx.locale.register(GRAYCODE_REROLL_NS, 'ja', graycodeRerollEditJaPlaceholder)
+  ctx.effect(() => disposeRerollEditJa)
+
   const disposeGraycode = ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
   ctx.effect(() => disposeGraycode)
   const disposeGraycodeJa = ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
@@ -316,4 +339,51 @@ export function apply(ctx: ClientContext): void {
       },
       GrayCodeSettingsSection,
     ))
+
+  // F1: regenerate the addressed assistant message. The
+  // `conversation.chat.assistant-actions` list slot is additive (rendered in
+  // the closing message's IconActions row); the addressed turn number is
+  // resolved from the conversation snapshot and the reroll rides the same
+  // trusted `/graycode` remote dispatcher as the settings panel.
+  ctx.slots.inject('conversation.chat.assistant-actions', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.chat.assistant-actions',
+        id: 'graycode.regenerate',
+        order: 20,
+        locale: GRAYCODE_REROLL_NS,
+        inject: (): RegenerateInjected => ({
+          remote,
+          // The sessions service is resolved at action time (4.3-L5, same as
+          // the subagent back-to-main action): a late-started host service is
+          // honored, and an unwired host simply no-ops on navigation.
+          open: (sessionId: string) => {
+            const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
+            sessions?.open(sessionId)
+          },
+        }),
+      },
+      RegenerateButton,
+    ))
+
+  // F2: edit the user message that opened a completed turn and retry it via
+  // `branches/editRetry`. The `conversation.chat.turnTail` chain seat renders
+  // per completed turn; the selector hands the turn number to the entry.
+  ctx.slots.inject('conversation.chat.turnTail', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.chat.turnTail',
+        select: selectEditTurn,
+        priority: 0,
+        locale: GRAYCODE_REROLL_NS,
+        inject: (): EditTurnInjected => ({ remote }),
+      },
+      EditTurnButton,
+    ))
+
+  // Manual conversation summary: `graycode.summarize` locale namespace + the
+  // header action (order 30, above the subagent back-to-main action). Locale
+  // disposers are fiber-tied; the slot injection follows the declaration
+  // lifetime; absent `connection` degrades to skipping the action with a warn.
+  installSummarize(ctx)
 }

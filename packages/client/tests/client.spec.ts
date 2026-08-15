@@ -13,6 +13,7 @@ import {
   graycodeWorkflowDictionaries,
   graycodeWorkflowJaPlaceholder,
 } from '../src/client/workflowNode/locales.ts'
+import { GRAYCODE_REROLL_NS } from '../src/client/rerollEdit/locales.ts'
 
 /** Minimal client-context double covering exactly what apply() touches. */
 function makeFakeCtx(options: { sessions?: { open: (sessionId: string) => void } } = {}) {
@@ -67,13 +68,14 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Thirteen namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = twenty-six registrations. Covers the base `graycode` ns,
+    // Fifteen namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = thirty registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
     // activity heatmap surface (C6), the notifications surface (C4), the
     // migration scope-map surface (D-1/D-2), the subagent back-to-main
-    // action (S1) and the settings panel ns.
-    expect(localeRegister).toHaveBeenCalledTimes(26)
+    // action (S1), the reroll/edit-turn actions (F1/F2), the summarize
+    // action and the settings panel ns.
+    expect(localeRegister).toHaveBeenCalledTimes(30)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -88,6 +90,8 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.notifications',
       'graycode.scopeMap',
       'graycode.subagentBack',
+      'graycode.rerollEdit',
+      'graycode.summarize',
       'settings.graycode',
     ]) {
       // Each namespace is registered exactly twice: dict + ja placeholder.
@@ -115,9 +119,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (13 × dict + ja placeholder) plus the
-    // connection/reset refresh subscription = 1 + 26 + 1.
-    expect(effect).toHaveBeenCalledTimes(28)
+    // every locale namespace (15 × dict + ja placeholder) plus the
+    // connection/reset refresh subscription = 1 + 30 + 1.
+    expect(effect).toHaveBeenCalledTimes(32)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -230,6 +234,45 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const options = actionCall?.[0] as { id?: string; inject?: () => { open: (id: string) => void } } | undefined
     expect(options?.id).toBe('graycode.back-to-main')
     expect(() => options?.inject?.().open('session-parent')).not.toThrow()
+  })
+
+  it('registers the regenerate action into assistant-actions (F1)', () => {
+    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open: () => {} } })
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('conversation.chat.assistant-actions', expect.any(Function))
+    const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.chat.assistant-actions')
+    expect(actionCall).toBeDefined()
+    const options = actionCall?.[0] as {
+      id?: string
+      order?: number
+      locale?: string
+      inject?: () => { remote: unknown; open?: (sessionId: string) => void }
+    }
+    expect(options.id).toBe('graycode.regenerate')
+    expect(options.order).toBe(20)
+    expect(options.locale).toBe(GRAYCODE_REROLL_NS)
+    // The injected seat carries the /graycode remote dispatcher and (with the
+    // sessions service present) the branch-session navigator.
+    expect(typeof options.inject?.().remote).toBe('function')
+    expect(typeof options.inject?.().open).toBe('function')
+  })
+
+  it('registers the edit-turn seat into the turn-tail chain (F2)', () => {
+    const { ctx, slotInject, slotRegister } = makeFakeCtx()
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('conversation.chat.turnTail', expect.any(Function))
+    const chainCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.chat.turnTail')
+    expect(chainCall).toBeDefined()
+    const options = chainCall?.[0] as {
+      locale?: string
+      select?: (owner: { turn: { turn: number } }) => unknown
+      inject?: () => { remote: unknown }
+    }
+    expect(options.locale).toBe(GRAYCODE_REROLL_NS)
+    expect(typeof options.inject?.().remote).toBe('function')
+    // The chain selector hands the completed turn's session turn number to
+    // the entry as `matched`.
+    expect(options.select?.({ turn: { turn: 3 } })).toEqual({ turn: 3 })
   })
 })
 
