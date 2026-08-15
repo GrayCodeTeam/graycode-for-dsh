@@ -33,8 +33,8 @@ beforeEach(async () => {
   remote.register(createActivityRemoteHandlers(service))
 })
 
-afterEach(() => {
-  service.dispose()
+afterEach(async () => {
+  await service.dispose()
   fs.rmSync(dataRoot, { recursive: true, force: true })
 })
 

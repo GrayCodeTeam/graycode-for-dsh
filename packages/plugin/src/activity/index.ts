@@ -104,11 +104,16 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // 订阅随本 fiber dispose 卸载；停用时立即落盘尽量不丢数据。
-  ctx.effect(() => () => {
+  ctx.effect(() => async () => {
     disposeRemote?.()
     registrar.dispose()
     detachInbox()
     detachPreStep()
-    void service.dispose()
+    // markActive() is intentionally fire-and-forget while the plugin is live,
+    // but its store operations are serialized. Awaiting dispose here places a
+    // final flush behind every queued sample and lets the host wait for it
+    // before removing/reloading the data root (especially important on
+    // Windows, where a late mkdir/write races recursive directory cleanup).
+    await service.dispose()
   })
 }
