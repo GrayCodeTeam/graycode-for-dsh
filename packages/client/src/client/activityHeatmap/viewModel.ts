@@ -57,8 +57,10 @@ export interface ActivityMonthlyBarView {
   readonly sessionCount: number
 }
 
-/** Render-ready summary strip. */
+/** Render-ready overview (legacy Gray Code panel: today / current / range). */
 export interface ActivitySummaryView {
+  /** Result generation time (ms epoch) for the header stamp. */
+  readonly generatedAt: number
   /** Total minutes across the query range (sum of daily). */
   readonly totalMinutes: number
   /** Number of days with any activity in the range. */
@@ -136,6 +138,7 @@ export function buildActivitySummary(result: ActivityStatsResultLike): ActivityS
     sessionCount += day.sessionCount
   }
   return {
+    generatedAt: result.generatedAt,
     totalMinutes,
     activeDays,
     sessionCount,
@@ -143,4 +146,40 @@ export function buildActivitySummary(result: ActivityStatsResultLike): ActivityS
     currentActive: result.currentSession.active,
     currentMinutes: result.currentSession.minutes,
   }
+}
+
+/**
+ * Format a minute count the way the legacy Gray Code panel does:
+ * `0m` / `23m` / `2h` / `2h 5m`. Units are injected so the surface can keep
+ * them localized (zh `小时/分钟`, en `h/min`, ja placeholder).
+ */
+export function formatActivityDuration(
+  minutes: number,
+  units: { readonly hour: string; readonly minute: string },
+): string {
+  const total = Number.isFinite(minutes) ? Math.max(0, Math.round(minutes)) : 0
+  if (total <= 0) return `0${units.minute}`
+  const hours = Math.floor(total / 60)
+  const rest = total % 60
+  if (hours === 0) return `${rest}${units.minute}`
+  if (rest === 0) return `${hours}${units.hour}`
+  return `${hours}${units.hour} ${rest}${units.minute}`
+}
+
+/** Format a ms epoch as local `YYYY-MM-DD HH:mm` (legacy panel header stamp). */
+export function formatGeneratedAt(ms: number): string {
+  if (!Number.isFinite(ms)) return ''
+  const date = new Date(ms)
+  const two = (value: number): string => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    '-',
+    two(date.getMonth() + 1),
+    '-',
+    two(date.getDate()),
+    ' ',
+    two(date.getHours()),
+    ':',
+    two(date.getMinutes()),
+  ].join('')
 }

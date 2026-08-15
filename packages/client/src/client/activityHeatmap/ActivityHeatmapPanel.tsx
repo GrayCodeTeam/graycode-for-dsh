@@ -27,6 +27,8 @@ import {
   buildActivityHeatmap,
   buildActivityMonthlyBars,
   buildActivitySummary,
+  formatActivityDuration,
+  formatGeneratedAt,
   type ActivityDailyBarView,
   type ActivityHeatmapRowView,
   type ActivityMonthlyBarView,
@@ -102,6 +104,52 @@ const toggleStyle: CSSProperties = {
   gap: '0.25rem',
   fontSize: '11px',
   opacity: 0.9,
+}
+
+const headerStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  gap: '0.5rem',
+}
+
+const generatedStyle: CSSProperties = {
+  fontSize: '10px',
+  fontFamily: 'var(--dsh-font-mono, monospace)',
+  opacity: 0.7,
+}
+
+const overviewStyle: CSSProperties = {
+  display: 'flex',
+  gap: '0.75rem',
+  padding: '0.5rem 0.625rem',
+  borderRadius: '0.375rem',
+  borderLeft: '3px solid var(--dsh-accent-color, #4a9eff)',
+  background: 'var(--dsh-surface-color, #1e1e1e)',
+}
+
+const overviewItemStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '0.125rem',
+  flex: 1,
+  minWidth: 0,
+}
+
+const overviewValueStyle: CSSProperties = {
+  fontSize: '13px',
+  fontWeight: 600,
+  whiteSpace: 'nowrap',
+}
+
+const overviewValueActiveStyle: CSSProperties = {
+  ...overviewValueStyle,
+  color: 'var(--dsh-success-color, #4caf50)',
+}
+
+const overviewLabelStyle: CSSProperties = {
+  fontSize: '10px',
+  opacity: 0.7,
 }
 
 /** Render-ready page state for the panel. */
@@ -186,7 +234,10 @@ export function ActivityHeatmapPanel({
       data-state={state.phase}
       style={panelStyle}
     >
-      <h2 style={titleStyle}>{t('title')}</h2>
+      <div style={headerStyle}>
+        <h2 style={titleStyle}>{t('title')}</h2>
+        {summary !== null && <span style={generatedStyle}>{formatGeneratedAt(summary.generatedAt)}</span>}
+      </div>
 
       <div style={controlsStyle}>
         {ACTIVITY_RANGES.map((candidate) => {
@@ -238,20 +289,27 @@ export function ActivityHeatmapPanel({
 
       {state.phase === 'loaded' && summary !== null && (
         <>
-          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', fontSize: '11px', opacity: 0.9 }}>
-            <span>
-              {t('summary.total')}: {summary.totalMinutes} {t('summary.minutes')}
-            </span>
-            <span>
-              {t('summary.activeDays')}: {summary.activeDays}
-            </span>
-            <span>
-              {t('summary.sessions')}: {summary.sessionCount}
-            </span>
-            <span>
-              {t('summary.today')}: {summary.todayMinutes} {t('summary.minutes')}
-            </span>
-            <span>{summary.currentActive ? t('summary.currentActive') : t('summary.currentInactive')}</span>
+          <div style={overviewStyle}>
+            <div style={overviewItemStyle}>
+              <span style={overviewValueStyle}>
+                {formatActivityDuration(summary.todayMinutes, { hour: t('summary.hours'), minute: t('summary.minutes') })}
+              </span>
+              <span style={overviewLabelStyle}>{t('summary.today')}</span>
+            </div>
+            <div style={overviewItemStyle}>
+              <span style={summary.currentActive ? overviewValueActiveStyle : overviewValueStyle}>
+                {summary.currentActive
+                  ? formatActivityDuration(summary.currentMinutes, { hour: t('summary.hours'), minute: t('summary.minutes') })
+                  : '—'}
+              </span>
+              <span style={overviewLabelStyle}>{t('summary.currentSession')}</span>
+            </div>
+            <div style={overviewItemStyle}>
+              <span style={overviewValueStyle}>
+                {formatActivityDuration(summary.totalMinutes, { hour: t('summary.hours'), minute: t('summary.minutes') })}
+              </span>
+              <span style={overviewLabelStyle}>{t('summary.totalInRange')}</span>
+            </div>
           </div>
 
           {showHourly && <ActivityHeatmapChart t={t} rows={heatmap} />}

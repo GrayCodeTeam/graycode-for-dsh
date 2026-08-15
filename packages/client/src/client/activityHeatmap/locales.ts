@@ -22,13 +22,13 @@ export type GrayCodeActivityHeatmapLocaleKey =
   | 'state.errorRetry'
   | 'state.replayOnly'
   | 'state.empty'
-  | 'summary.total'
+  | 'summary.today'
+  | 'summary.currentSession'
+  | 'summary.totalInRange'
+  | 'summary.hours'
+  | 'summary.minutes'
   | 'summary.activeDays'
   | 'summary.sessions'
-  | 'summary.today'
-  | 'summary.currentActive'
-  | 'summary.currentInactive'
-  | 'summary.minutes'
   | 'heatmap.title'
   | 'heatmap.hourLabels'
   | 'daily.title'
@@ -76,13 +76,13 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'state.errorRetry': '重试',
     'state.replayOnly': '回放视图，此面板不可用',
     'state.empty': '没有活动记录',
-    'summary.total': '总计',
+    'summary.today': '今日已用',
+    'summary.currentSession': '当前连续工作',
+    'summary.totalInRange': '范围内合计',
+    'summary.hours': '小时',
+    'summary.minutes': '分钟',
     'summary.activeDays': '活跃天数',
     'summary.sessions': '会话数',
-    'summary.today': '今日',
-    'summary.currentActive': '正在连续工作',
-    'summary.currentInactive': '当前无进行中会话',
-    'summary.minutes': '分钟',
     'heatmap.title': '7×24 作息热力图',
     'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
     'daily.title': '每日活跃时长',
@@ -114,13 +114,13 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'state.errorRetry': 'Retry',
     'state.replayOnly': 'Not available in replay view',
     'state.empty': 'No activity recorded',
-    'summary.total': 'Total',
-    'summary.activeDays': 'Active days',
-    'summary.sessions': 'Sessions',
     'summary.today': 'Today',
-    'summary.currentActive': 'Working now',
-    'summary.currentInactive': 'No session in progress',
+    'summary.currentSession': 'Current session',
+    'summary.totalInRange': 'Total in range',
+    'summary.hours': 'h',
     'summary.minutes': 'min',
+    'summary.activeDays': 'active days',
+    'summary.sessions': 'sessions',
     'heatmap.title': '7×24 heatmap',
     'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
     'daily.title': 'Daily activity',
@@ -160,13 +160,13 @@ export const graycodeActivityHeatmapJaPlaceholder: LocaleDict = {
   'state.errorRetry': '再試行',
   'state.replayOnly': 'リプレイ表示のためこのパネルは利用できません',
   'state.empty': 'アクティビティ記録がありません',
-  'summary.total': '合計',
+  'summary.today': '今日の利用時間',
+  'summary.currentSession': '現在の連続作業',
+  'summary.totalInRange': '範囲内合計',
+  'summary.hours': '時間',
+  'summary.minutes': '分',
   'summary.activeDays': 'アクティブ日数',
   'summary.sessions': 'セッション数',
-  'summary.today': '今日',
-  'summary.currentActive': '連続作業中',
-  'summary.currentInactive': '進行中のセッションはありません',
-  'summary.minutes': '分',
   'heatmap.title': '7×24 ヒートマップ',
   'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
   'daily.title': '日別アクティビティ',

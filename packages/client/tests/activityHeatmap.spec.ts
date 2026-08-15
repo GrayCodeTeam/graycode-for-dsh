@@ -40,6 +40,8 @@ import {
   buildActivityHeatmap,
   buildActivityMonthlyBars,
   buildActivitySummary,
+  formatActivityDuration,
+  formatGeneratedAt,
   type ActivityHeatmapRowView,
 } from '../src/client/activityHeatmap/viewModel.ts'
 import {
@@ -296,6 +298,7 @@ describe('activity view model', () => {
   it('builds the summary strip (totals, active days, today, current session)', () => {
     const summary = buildActivitySummary(FIXTURE)
     expect(summary).toEqual({
+      generatedAt: 1_700_000_000_000,
       totalMinutes: 165,
       activeDays: 2,
       sessionCount: 3,
@@ -303,6 +306,23 @@ describe('activity view model', () => {
       currentActive: true,
       currentMinutes: 42,
     })
+  })
+
+  it('formats durations like the legacy panel (0m / 23m / 2h / 2h 5m)', () => {
+    const units = { hour: 'h', minute: 'm' }
+    expect(formatActivityDuration(0, units)).toBe('0m')
+    expect(formatActivityDuration(-10, units)).toBe('0m')
+    expect(formatActivityDuration(NaN, units)).toBe('0m')
+    expect(formatActivityDuration(23, units)).toBe('23m')
+    expect(formatActivityDuration(60, units)).toBe('1h')
+    expect(formatActivityDuration(125, units)).toBe('2h 5m')
+    expect(formatActivityDuration(59.6, units)).toBe('1h')
+  })
+
+  it('formats the generated stamp as local YYYY-MM-DD HH:mm', () => {
+    const local = new Date(2026, 7, 14, 9, 5, 0)
+    expect(formatGeneratedAt(local.getTime())).toBe('2026-08-14 09:05')
+    expect(formatGeneratedAt(Number.NaN)).toBe('')
   })
 })
 
