@@ -13,6 +13,8 @@ import { createPromptRemoteHandlers } from '../../src/prompt/remote.ts'
 import { createBranchesRemoteHandlers } from '../../src/branches/adapters/dsh/remote.ts'
 import { createActivityRemoteHandlers } from '../../src/activity/adapters/dsh/remote.ts'
 import { createMigrationRemoteHandlers } from '../../src/migration/adapters/dsh/remote.ts'
+import { createSummaryRemoteHandlers } from '../../src/summary/index.ts'
+import { SummaryService } from '../../src/summary/service.ts'
 import { GRAY_REMOTE_ERROR_CODES } from '../../src/remote/types.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import { CheckpointService } from '../../src/checkpoints/service.ts'
@@ -51,8 +53,11 @@ const CONTRACT_ENDPOINTS: readonly string[] = [
   'prompt/modes.export',
   'branches/list',
   'branches/rename',
+  'branches/reroll',
+  'branches/editRetry',
   'activity/stats',
   'migration/scopeMap',
+  'summary/generate',
 ]
 
 describe('Remote 契约表', () => {
@@ -66,6 +71,7 @@ describe('Remote 契约表', () => {
     remote.register(createBranchesRemoteHandlers(undefined as never))
     remote.register(createActivityRemoteHandlers(undefined as never))
     remote.register(createMigrationRemoteHandlers(undefined as never))
+    remote.register(createSummaryRemoteHandlers(new SummaryService(new Context(), { keepRecentRounds: 2, keepRecentTokens: '50%', summarizePrompt: '' })))
 
     const registered = remote.listEndpoints()
     for (const endpoint of CONTRACT_ENDPOINTS) {

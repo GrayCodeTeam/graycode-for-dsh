@@ -79,6 +79,9 @@ beforeEach(async () => {
     ev('turn/start', 0, { turn: 1 }),
     ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'q' }] }),
     ev('turn/end', 2, { turn: 1 }),
+    ev('turn/start', 3, { turn: 2 }),
+    ev('user/message', 4, { source: { kind: 'user' }, content: [{ type: 'text', text: 'second' }] }),
+    ev('turn/end', 5, { turn: 2 }),
   ])
   const service = new BranchCoordinatorService({ dataRoot }, adapter)
   await service.initialize()
@@ -210,6 +213,127 @@ describe('branches/rename', () => {
     if (!result.ok) {
       expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
       expect(result.error.details.causeCode).toBe(BranchErrorCode.INVALID_INPUT)
+    }
+  })
+})
+
+describe('branches/reroll', () => {
+  it('reroll 成功：fork 新候选并自动激活，返回 branchSessionId', async () => {
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const value = result.value as { branchSessionId: string }
+      expect(value.branchSessionId).toMatch(/^branch-/)
+      const group = env.service.groupForSession(value.branchSessionId)
+      expect(group).toBeDefined()
+      expect(group!.activeSessionId).toBe(value.branchSessionId)
+      expect(group!.candidates).toHaveLength(2)
+    }
+  })
+
+  it('会话未归组时自动建组（单会话直接可用）', async () => {
+    const fresh = 'fresh-session'
+    env.service.dispose()
+    const adapter = new FakeBranchSessionAdapter()
+    adapter.addSession(fresh, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'a' }] }),
+      ev('turn/end', 2, { turn: 1 }),
+      ev('turn/start', 3, { turn: 2 }),
+      ev('user/message', 4, { source: { kind: 'user' }, content: [{ type: 'text', text: 'b' }] }),
+      ev('turn/end', 5, { turn: 2 }),
+    ])
+    const service = new BranchCoordinatorService({ dataRoot: env.dataRoot }, adapter)
+    await service.initialize()
+    const ctx = new Context()
+    const remote = new GrayRemoteService(ctx, {})
+    remote.register(createBranchesRemoteHandlers(service))
+    env = { ...env, service, remote }
+
+    const result = await invoke('reroll', { sessionId: fresh, turn: 2 })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const group = service.groupForSession(fresh)
+      expect(group).toBeDefined()
+      expect(group!.rootSessionId).toBe(fresh)
+    }
+  })
+
+  it('首轮 reroll → NO_PREVIOUS_TURN（GRAY_INVALID_INPUT，causeCode 保留）', async () => {
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 1 })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+      expect(result.error.details.causeCode).toBe(BranchErrorCode.NO_PREVIOUS_TURN)
+    }
+  })
+
+  it('不存在的轮次 → GRAY_NOT_FOUND（TARGET_TURN_NOT_FOUND）', async () => {
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 9 })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.NOT_FOUND)
+      expect(result.error.details.causeCode).toBe(BranchErrorCode.TARGET_TURN_NOT_FOUND)
+    }
+  })
+
+  it('缺 sessionId / turn → GRAY_INVALID_INPUT', async () => {
+    const r1 = await invoke('reroll', { turn: 2 })
+    expect(r1.ok).toBe(false)
+    if (!r1.ok) expect(r1.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+
+    const r2 = await invoke('reroll', { sessionId: ROOT_SESSION })
+    expect(r2.ok).toBe(false)
+    if (!r2.ok) expect(r2.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
+
+  it('expectedRevision 冲突 → GRAY_CONFLICT', async () => {
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 2, expectedRevision: 99 })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.CONFLICT)
+      expect(result.error.details.causeCode).toBe(BranchErrorCode.REVISION_CONFLICT)
+    }
+  })
+
+  it('expectedRevision 接受数字字符串（契约双兼容）', async () => {
+    const group = env.service.groupForSession(ROOT_SESSION)!
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 2, expectedRevision: String(group.revision) })
+    expect(result.ok).toBe(true)
+  })
+
+  it('expectedRevision 非数字字符串 → GRAY_INVALID_INPUT', async () => {
+    const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 2, expectedRevision: 'x' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
+})
+
+describe('branches/editRetry', () => {
+  it('editRetry 成功：重发编辑文本，返回 branchSessionId 并自动激活', async () => {
+    const result = await invoke('editRetry', { sessionId: ROOT_SESSION, turn: 2, text: 'edited question' })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const value = result.value as { branchSessionId: string }
+      expect(value.branchSessionId).toMatch(/^branch-/)
+      const group = env.service.groupForSession(value.branchSessionId)
+      expect(group).toBeDefined()
+      expect(group!.activeSessionId).toBe(value.branchSessionId)
+    }
+  })
+
+  it('缺 text → GRAY_INVALID_INPUT', async () => {
+    const result = await invoke('editRetry', { sessionId: ROOT_SESSION, turn: 2 })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
+
+  it('首轮 editRetry → NO_PREVIOUS_TURN', async () => {
+    const result = await invoke('editRetry', { sessionId: ROOT_SESSION, turn: 1, text: 'x' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+      expect(result.error.details.causeCode).toBe(BranchErrorCode.NO_PREVIOUS_TURN)
     }
   })
 })
