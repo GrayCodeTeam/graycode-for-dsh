@@ -12,13 +12,14 @@ export const inject = ['agents', 'fs'] as const
 
 /**
  * Media domain: crop_image / resize_image / rotate_image built on the sharp
- * npm dependency, plus generate_image / remove_background (model-channel
- * dependent). File access goes through `ctx.fs` (binary reads native; binary
- * writes are a documented rc.6 GAP with node-fs fallback, see
- * adapters/mediaFs.ts). The image model channel is fail-closed for now:
- * dsh-llm rc.6 exposes streaming text only, so `createUnavailableChannelImagePort`
- * is injected and channel tools return GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE
- * until a real ChannelImagePort is wired — see README.md「模型渠道」节.
+ * npm dependency, plus remove_background (model-channel dependent; generate_image
+ * moved to the images domain, src/images/). File access goes through `ctx.fs`
+ * (binary reads native; binary writes are a documented rc.6 GAP with node-fs
+ * fallback, see adapters/mediaFs.ts). The image model channel is fail-closed
+ * for now: dsh-llm rc.6 exposes streaming text only, so
+ * `createUnavailableChannelImagePort` is injected and channel tools return
+ * GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE until a real ChannelImagePort is
+ * wired — see README.md「模型渠道」节.
  */
 export interface Config {
   /** Master switch: false skips tool registration entirely. Default true. */

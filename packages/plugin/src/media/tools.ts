@@ -1,6 +1,6 @@
 /**
  * GrayCode - media 工具定义（crop_image / resize_image / rotate_image /
- * generate_image / remove_background）
+ * remove_background）
  *
  * 与老版 Gray Code 参数/语义对齐（DSH 变体）：
  * - 批量模式 `images` 数组 + 单张模式（image_path/output_path/... 顶层参数）；
@@ -8,10 +8,11 @@
  * - resize width/height 为正整数像素（≤ 16K），拉伸填充（fit: 'fill'）；
  * - rotate angle 枚举 0/90/180/270（任务要求），format 可选 png/jpeg/webp；
  * - 输出格式优先级：显式 format → 输出路径扩展名 → 原图格式 → png；
- * - generate_image / remove_background 依赖模型渠道（ChannelImagePort）：
- *   prompt/size/format 透传，输出写回工作区默认 media-output 目录；rc.6
- *   无公开图像生成 API，未注入真实渠道时 fail-closed 报
- *   GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE（见 README「模型渠道」节）；
+ * - remove_background 依赖模型渠道（ChannelImagePort）：输入工作区内图片，
+ *   输出写回工作区默认 media-output 目录；rc.6 无公开图像生成 API，未注入
+ *   真实渠道时 fail-closed 报 GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE
+ *   （见 README「模型渠道」节）；generate_image 已迁出到 images 域
+ *   （真实 REST 实现，src/images/）；
  * - 结构化结果：成功/失败列表（results[].code 稳定错误码）、输出路径、尺寸；
  * - 取消：顺序执行，每任务/每步检查 exec.signal，aborted 任务标记 cancelled；
  * - 批量上限 maxBatch（Config 可配，默认 10，与老插件一致）。
@@ -25,18 +26,17 @@ import type { MediaFsPort } from './adapters/mediaFs.ts'
 import { createUnavailableChannelImagePort } from './adapters/modelChannel.ts'
 import { loadSharp, type SharpModule } from './adapters/sharpLoader.ts'
 import { MediaError, MediaErrorCode } from './domain/errors.ts'
-import { resolveInsideWorkspace, buildDefaultOutputPath, buildGeneratedOutputPath, buildBackgroundRemovedOutputPath } from './domain/paths.ts'
+import { resolveInsideWorkspace, buildDefaultOutputPath, buildBackgroundRemovedOutputPath } from './domain/paths.ts'
 import type { ChannelImagePort, ChannelImageResult } from './domain/modelChannel.ts'
 import { assertBatchLimit, findDuplicateOutput, toTasks } from './domain/batch.ts'
 import { extFromSharpFormat, isSupportedImageExt } from './domain/mime.ts'
 import { normalizeCoord, resolveOutputFormat, toDimensions, exceedsOutputPixelLimit, estimateRotatedSize } from './domain/ops.ts'
-import { validateGenerateImageTask, validateRemoveBackgroundTask } from './domain/validate.ts'
+import { validateRemoveBackgroundTask } from './domain/validate.ts'
 import {
   DEFAULT_MAX_BATCH,
   MAX_MEDIA_MAX_BATCH,
   MAX_READ_BYTES,
   type CropTask,
-  type GenerateImageTask,
   type MediaTask,
   type MediaTaskResult,
   type MediaToolResult,
@@ -52,11 +52,11 @@ export interface MediaToolDeps {
   /** 单次调用任务数上限（默认 10，与老插件一致） */
   maxBatch: number
   /**
-   * 模型渠道端口（generate_image / remove_background）。缺省 fail-closed：
-   * 未注入时用 createUnavailableChannelImagePort，调用报
-   * GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE（rc.6 无公开图像生成 API）。
+   * 模型渠道端口（remove_background）。缺省 fail-closed：未注入时用
+   * createUnavailableChannelImagePort，调用报 GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE
+   * （rc.6 无公开图像 API；generate_image 已迁出到 images 域）。
    */
-  channel?: ChannelImagePort
+  channel?: Pick<ChannelImagePort, 'removeBackground'>
 }
 
 /** 从执行上下文解析工作区 cwd（undefined 回退 process.cwd()，与其他域一致） */
@@ -561,68 +561,6 @@ async function executeRotateTask(
 }
 
 /**
- * generate_image 单任务执行：校验通过后调用模型渠道，返回字节原样写盘。
- * 流程：取消检查 → 输出格式（format → 输出路径扩展名 → png）→ 输出路径
- * （显式或 media-output/gen-<ts>.<ext>）→ channel.generateImage（signal 透传）
- * → 响应非空校验 → MediaFsPort.writeBytes。渠道未注入（缺省 fail-closed）
- * 时抛出 MediaError（MODEL_CHANNEL_UNAVAILABLE），投影为任务级失败。
- */
-async function executeGenerateImageTask(
-  deps: MediaToolDeps,
-  channel: ChannelImagePort,
-  cwd: string,
-  signal: AbortSignal | undefined,
-  task: GenerateImageTask,
-  index: number,
-): Promise<MediaTaskResult> {
-  if (signal?.aborted) return cancelledResultFor('', index)
-
-  // 输出格式：显式 format → 输出路径扩展名 → png（README：png 优先）
-  const outputFormat = resolveOutputFormat(task.format, task.output_path, undefined)
-  const ts = nextOutputTimestamp()
-  const defaultPath = buildGeneratedOutputPath(cwd, outputFormat.ext, ts)
-  const output = resolveModelOutput(cwd, task.output_path, defaultPath, index)
-  if (!output.ok) return output.result
-
-  if (signal?.aborted) return cancelledResultFor('', index)
-
-  let result: ChannelImageResult
-  try {
-    result = await channel.generateImage({
-      prompt: task.prompt,
-      size: task.size,
-      format: task.format,
-      signal,
-    })
-  } catch (error) {
-    const mediaError = error instanceof MediaError ? error : new MediaError(MediaErrorCode.MODEL_CHANNEL_FAILED, String(error))
-    return failResultFor('', index, mediaError.code, mediaError.message)
-  }
-
-  if (signal?.aborted) return cancelledResultFor('', index)
-  if (!result.bytes || result.bytes.byteLength === 0) {
-    return failResultFor('', index, MediaErrorCode.MODEL_RESPONSE_INVALID, 'model channel returned an empty image response')
-  }
-  // H-17：magic bytes + 期望格式 + 渠道声明一致性校验，不一致明确拒绝（不静默落盘）
-  const mismatch = imageOutputMismatch(outputFormat.ext, result.bytes, {
-    format: result.format,
-    mime: result.mime,
-  })
-  if (mismatch !== null) {
-    return failResultFor('', index, MediaErrorCode.MODEL_RESPONSE_INVALID, mismatch)
-  }
-
-  try {
-    await deps.fs.writeBytes(output.absolute, result.bytes, { signal, workspaceRoot: cwd })
-  } catch (error) {
-    const mediaError = error instanceof MediaError ? error : new MediaError(MediaErrorCode.WRITE_FAILED, String(error))
-    return failResultFor('', index, mediaError.code, mediaError.message)
-  }
-
-  return { index, success: true, inputPath: '', outputPath: output.display }
-}
-
-/**
  * remove_background 单任务执行：读取工作区内输入图片 → 调用模型渠道 →
  * 返回字节写盘（默认 <ws>/media-output/<name>-bg-removed-<ts>.png）。
  * 输入路径安全走 resolveInput（domain/paths.ts 纯字符串层）+
@@ -630,7 +568,7 @@ async function executeGenerateImageTask(
  */
 async function executeRemoveBackgroundTask(
   deps: MediaToolDeps,
-  channel: ChannelImagePort,
+  channel: Pick<ChannelImagePort, 'removeBackground'>,
   cwd: string,
   signal: AbortSignal | undefined,
   task: RemoveBackgroundTask,
@@ -694,13 +632,12 @@ async function executeRemoveBackgroundTask(
 }
 
 /** 工具类别（汇总消息文案用） */
-type MediaOpKind = 'crop' | 'resize' | 'rotate' | 'generate' | 'remove-background'
+type MediaOpKind = 'crop' | 'resize' | 'rotate' | 'remove-background'
 
 const OP_LABELS: Record<MediaOpKind, string> = {
   crop: 'Crop',
   resize: 'Resize',
   rotate: 'Rotate',
-  generate: 'Generate Image',
   'remove-background': 'Remove Background',
 }
 
@@ -708,7 +645,6 @@ const OP_PAST: Record<MediaOpKind, string> = {
   crop: 'Cropped',
   resize: 'Resized',
   rotate: 'Rotated',
-  generate: 'Generated',
   'remove-background': 'Removed background',
 }
 
@@ -761,7 +697,7 @@ function summarize(
     // 全部成功
     if (isBatch) {
       message = `✅ Batch ${kind} completed: ${successResults.length}/${tasksCount} tasks succeeded\n\nSaved to:\n${paths.map(p => `• ${p}`).join('\n')}`
-    } else if (kind === 'generate' || kind === 'remove-background') {
+    } else if (kind === 'remove-background') {
       // 模型渠道工具无输入图/尺寸维度：只报输出路径
       message = `✅ ${OP_PAST[kind]} completed!\n\nOutput: ${paths[0] ?? ''}`
     } else {
@@ -856,17 +792,15 @@ function parseTasks(
 }
 
 /**
- * 模型渠道工具参数解析（generate_image / remove_background，单任务模式）：
+ * 模型渠道工具参数解析（remove_background，单任务模式）：
  * 校验失败 → 整批拒绝结果（GRAY_MEDIA_INVALID_ARGUMENTS），不向框架抛错。
  */
 function parseModelTask(
-  kind: 'generate_image' | 'remove_background',
+  kind: 'remove_background',
   args: Record<string, unknown>,
-): { task: GenerateImageTask | RemoveBackgroundTask } | { rejected: MediaToolResult } {
+): { task: RemoveBackgroundTask } | { rejected: MediaToolResult } {
   try {
-    const validated = kind === 'generate_image'
-      ? validateGenerateImageTask(args)
-      : validateRemoveBackgroundTask(args)
+    const validated = validateRemoveBackgroundTask(args)
     if (!validated.ok) {
       throw new MediaError(MediaErrorCode.INVALID_ARGUMENTS, validated.error)
     }
@@ -937,11 +871,11 @@ function batchItemSchema(extra: Record<string, ParameterPropertySpec>): ObjectVa
   }
 }
 
-/** 创建 media 工具的 defineTool 定义（本地三件套 + 模型渠道两工具） */
+/** 创建 media 工具的 defineTool 定义（本地三件套 + remove_background） */
 export function createMediaToolDefinitions(deps: MediaToolDeps): ToolDefinition[] {
   // L9：运行时同样钳制到硬顶（schema 在 settings 层已拦，此处兜底直传 Config/注入）
   const maxBatch = Math.min(deps.maxBatch > 0 ? deps.maxBatch : DEFAULT_MAX_BATCH, MAX_MEDIA_MAX_BATCH)
-  // 模型渠道：未注入时 fail-closed（rc.6 无公开图像生成 API → GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE）
+  // 模型渠道：未注入时 fail-closed（rc.6 无公开图像 API → GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE）
   const channel = deps.channel ?? createUnavailableChannelImagePort()
 
   /** 整批拒绝检查（上限/重复输出），返回 null 表示通过（cwd 由 execute 注入；
@@ -1099,33 +1033,6 @@ export function createMediaToolDefinitions(deps: MediaToolDeps): ToolDefinition[
     },
   })
 
-  const generate_image = defineTool({
-    name: 'generate_image',
-    description:
-      `Generate an image from a text prompt using the configured image model channel. ` +
-      `Provide a prompt (required) plus optional size ("1024x1024"), format (png/jpeg/webp, png preferred) and output_path. ` +
-      `The generated image is written to output_path or <workspace>/media-output/gen-<ts>.<ext> by default. ` +
-      `The image model channel is not connected in this build: calls return GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE until a provider is wired (see media README).`,
-    parameters: {
-      prompt: { type: 'string', required: true, description: 'Text prompt describing the image to generate (passthrough to the model channel).' },
-      size: { type: 'string', description: 'Optional output size like "1024x1024" (passthrough to the model channel).' },
-      format: { type: 'string', description: 'Optional output format: png, jpeg or webp (png preferred).' },
-      output_path: { type: 'string', description: 'Optional output path; defaults to <workspace>/media-output/gen-<ts>.<ext>.' },
-    },
-    output: { schema: toolResultSchema, render: renderJson },
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const cwd = resolveCwd(exec)
-      const signal = exec.signal
-      const parsed = parseModelTask('generate_image', args)
-      if ('rejected' in parsed) return parsed.rejected
-      const task = parsed.task as GenerateImageTask
-      return summarize('generate', false, 1, [
-        await executeGenerateImageTask(deps, channel, cwd, signal, task, 0),
-      ])
-    },
-  })
-
   const remove_background = defineTool({
     name: 'remove_background',
     description:
@@ -1151,5 +1058,5 @@ export function createMediaToolDefinitions(deps: MediaToolDeps): ToolDefinition[
     },
   })
 
-  return [crop_image, resize_image, rotate_image, generate_image, remove_background]
+  return [crop_image, resize_image, rotate_image, remove_background]
 }
