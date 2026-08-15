@@ -22,6 +22,7 @@ describe('StoredRecord JSONL 编解码', () => {
   test('全字段 round-trip', () => {
     const rec: StoredRecord = {
       id: 7,
+      identity: '6b4c0c9e-e1ca-46b9-b1f7-70f06fde3255',
       date: '2026-02-13',
       text: '用户偏好：PowerShell',
       createdAt: '2026-02-13T08:00:00.000Z',

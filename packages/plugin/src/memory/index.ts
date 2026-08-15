@@ -13,8 +13,9 @@ export const inject = ['agents'] as const
 /**
  * Permanent memory domain (OptMem-style log + tree summaries), scoped
  * globally and per workspace, persisted under the plugin-private data root.
- * The numeric knobs seed the shared memory config; the memory_config tool
- * may override them at runtime (persisted to <dataRoot>/memory/config).
+ * The numeric knobs seed the shared memory config. On process startup an
+ * existing memory_config file wins; a later in-process settings/HMR change
+ * applies only changed knobs. memory_config overrides remain persisted.
  */
 export interface Config {
   /** Plugin-private data root (resolved by the composition root). */

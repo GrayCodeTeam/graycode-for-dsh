@@ -168,12 +168,15 @@ export interface GrayMemoryListParams {
   /** scope=workspace 时的 workspace 根（绝对路径）。 */
   readonly workspace?: string
   readonly search?: string
-  readonly cursor?: number
+  /** Opaque snapshot-bound cursor returned by the previous page. */
+  readonly cursor?: string
   readonly limit?: number
 }
 
 export interface GrayMemoryListResult extends GrayPage<GrayMemoryEntryView> {
   /** 过滤后总条目数（total 同义，兼容旧客户端）。 */
+  /** 完整底层记录快照的 opaque CAS revision；编辑/删除时必须原样回传。 */
+  readonly revision: string
 }
 
 /** memory/note 入参：手动新增一条原始记忆（等价 memory_note 工具写入路径）。 */
@@ -190,6 +193,8 @@ export interface GrayMemoryEditParams {
   readonly workspace?: string
   readonly id: number
   readonly text: string
+  /** memory/list 返回的完整快照 revision。 */
+  readonly expectedRevision: string
 }
 
 /** memory/forget 入参：blockId 语义与 memory_forget 工具一致。 */
@@ -200,6 +205,8 @@ export interface GrayMemoryForgetParams {
    * `"16-31"` 丢树摘要；`"5"` 删单条原始记忆；`"1,3"` 闭区间删除。
    */
   readonly blockId: string
+  /** raw 单条/区间删除时必须回传 memory/list 的快照 revision。 */
+  readonly expectedRevision?: string
   /** 破坏性确认：必须为 true，否则 GRAY_APPROVAL_REQUIRED。 */
   readonly confirm: boolean
 }

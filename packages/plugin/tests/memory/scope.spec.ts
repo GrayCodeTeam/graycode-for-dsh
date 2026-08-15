@@ -119,4 +119,152 @@ describe('MemoryService 作用域隔离', () => {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })
+
+  test('多个 MemoryService 并发追加同一日志：ID 唯一连续且不丢记录', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-concurrent-log-'))
+    try {
+      const serviceA = new MemoryService({ dataRoot })
+      const serviceB = new MemoryService({ dataRoot })
+      const managerA = await serviceA.getGlobal()
+      const managerB = await serviceB.getGlobal()
+      // 两边都先观察空日志，锁若仅限实例会同时分配 id=0。
+      expect(await managerA.listEntries()).toEqual([])
+      expect(await managerB.listEntries()).toEqual([])
+      const results = await Promise.all([
+        managerA.note('from-a'),
+        managerB.note('from-b'),
+      ])
+      expect(results.map(result => result.id).sort((a, b) => a - b)).toEqual([0, 1])
+      const entries = await managerA.listEntries()
+      expect(entries.map(entry => entry.id)).toEqual([0, 1])
+      expect(entries.map(entry => entry.text).sort()).toEqual(['from-a', 'from-b'])
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('跨 Service 的整文件编辑与追加串行合并，不发生 stale rewrite 丢记录', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-concurrent-rewrite-'))
+    try {
+      const managerA = await new MemoryService({ dataRoot }).getGlobal()
+      const managerB = await new MemoryService({ dataRoot }).getGlobal()
+      await managerA.note('a')
+      await managerA.note('b')
+      await managerB.listEntries() // 预热第二个实例的旧快照
+
+      await Promise.all([
+        managerA.updateEntry(0, 'a-edited'),
+        managerB.note('c-appended'),
+      ])
+      expect((await managerA.listEntries()).map(entry => entry.text)).toEqual([
+        'a-edited',
+        'b',
+        'c-appended',
+      ])
+
+      await Promise.all([
+        managerA.updateEntry(0, 'a-edited-again'),
+        managerB.updateEntry(1, 'b-edited'),
+      ])
+      expect((await managerB.listEntries()).map(entry => entry.text)).toEqual([
+        'a-edited-again',
+        'b-edited',
+        'c-appended',
+      ])
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('共享配置：已缓存 global/workspace 与不同 Service 即时一致，并发局部更新不丢字段', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-shared-config-'))
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-shared-config-ws-'))
+    try {
+      const serviceA = new MemoryService({ dataRoot })
+      const serviceB = new MemoryService({ dataRoot })
+      const globalA = await serviceA.getGlobal()
+      const workspaceA = await serviceA.getWorkspace(workspace, true)
+      const globalB = await serviceB.getGlobal()
+
+      await workspaceA!.updateConfig({ entryChars: 500 })
+      expect(globalA.getConfig().entryChars).toBe(500)
+      expect(globalB.getConfig().entryChars).toBe(500)
+
+      await Promise.all([
+        globalA.updateConfig({ wakeLines: 200 }),
+        globalB.updateConfig({ partLines: 900 }),
+      ])
+      expect(globalA.getConfig()).toMatchObject({ entryChars: 500, wakeLines: 200, partLines: 900 })
+      expect(globalB.getConfig()).toEqual(globalA.getConfig())
+      expect(workspaceA!.getConfig()).toEqual(globalA.getConfig())
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin seed：进程首次加载保留 memory_config 覆盖；同进程 settings 变更才覆盖对应键', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-plugin-seed-'))
+    try {
+      // 模拟前一进程留下的 memory_config；无 plugin seed 的服务只负责造持久状态。
+      const persisted = new MemoryService({ dataRoot })
+      await (await persisted.getGlobal()).updateConfig({ entryChars: 500, partLines: 777 })
+
+      const initialFiber = new MemoryService({
+        dataRoot,
+        wakeLines: 96,
+        entryChars: 280,
+        partChars: 20_000,
+        partLines: 500,
+      })
+      const initialManager = await initialFiber.getGlobal()
+      // 首次 seed 只建立基线，不能在进程启动时抹掉工具持久化覆盖。
+      expect(initialManager.getConfig()).toMatchObject({ entryChars: 500, partLines: 777 })
+
+      const updatedFiber = new MemoryService({
+        dataRoot,
+        wakeLines: 96,
+        entryChars: 600,
+        partChars: 20_000,
+        partLines: 500,
+      })
+      const updatedManager = await updatedFiber.getGlobal()
+      // HMR 中 seed 的 entryChars 从 280 → 600，只有该键由 settings 接管；
+      // 未变的 partLines 保留 memory_config 的 777。
+      expect(updatedManager.getConfig()).toMatchObject({ entryChars: 600, partLines: 777 })
+      expect(initialManager.getConfig()).toEqual(updatedManager.getConfig())
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('settings 在 lazy manager 首次打开前 HMR，变更仍会被记录并应用', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-lazy-seed-'))
+    try {
+      const persisted = new MemoryService({ dataRoot })
+      await (await persisted.getGlobal()).updateConfig({ entryChars: 500, partLines: 777 })
+
+      const oldFiber = new MemoryService({
+        dataRoot,
+        wakeLines: 96,
+        entryChars: 280,
+        partChars: 20_000,
+        partLines: 500,
+      })
+      // 模拟 memory fiber 尚未被任何工具访问时 settings 已热更。
+      const newFiber = new MemoryService({
+        dataRoot,
+        wakeLines: 96,
+        entryChars: 650,
+        partChars: 20_000,
+        partLines: 500,
+      })
+      const current = await newFiber.getGlobal()
+      expect(current.getConfig()).toMatchObject({ entryChars: 650, partLines: 777 })
+      // 迟到的旧 fiber 初始化不能把当前 settings 回滚。
+      expect((await oldFiber.getGlobal()).getConfig()).toEqual(current.getConfig())
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
 })

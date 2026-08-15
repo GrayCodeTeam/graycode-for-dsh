@@ -23,6 +23,7 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MemoryManageTransport } from './api.ts'
 import {
   IDLE_FORGET_STATE,
+  MemoryAddInFlightGate,
   appendMemoryListPage,
   buildMemoryEntryView,
   buildMemoryListParams,
@@ -30,12 +31,20 @@ import {
   cancelForget,
   confirmForget,
   dismissForget,
+  isCurrentMemoryConfigResponse,
+  isStaleMemoryCursorFailure,
+  isStaleMemoryRevisionFailure,
+  isWorkspaceStoreMissingFailure,
   mapMemoryFailure,
+  memoryEntryCharsExceededFailure,
+  memoryRequestContextKey,
+  normalizeMemoryEntryChars,
   normalizeMemoryLimit,
   parseMemoryNextCursor,
   rejectForget,
   requestForget,
   resolveForget,
+  startMemoryAddRequest,
   toMemoryFailure,
   type ForgetState,
   type MemoryEntryViewModel,
@@ -44,7 +53,7 @@ import {
   type MemoryListViewModel,
   type MemoryQueryState,
 } from './logic.ts'
-import { GRAY_MEMORY_SCOPES, type GrayMemoryScope } from './types.ts'
+import { GRAY_MEMORY_SCOPES, GRAY_REMOTE_ERROR_CODES, type GrayMemoryScope } from './types.ts'
 import { MemoryEntryList } from './MemoryEntryList.tsx'
 import { MemoryEditOverlay } from './MemoryEditOverlay.tsx'
 
@@ -62,7 +71,7 @@ export interface MemoryManagePanelProps {
   workspace?: string
   /** Page size (normalized to the host contract; default 20, cap 100). */
   pageSize?: number
-  /** entryChars byte limit for the add box counter (host config mirror). */
+  /** Safe fallback while `memory/configGet` is unavailable or in flight. */
   entryChars?: number
 }
 
@@ -268,10 +277,16 @@ function MemoryErrorBanner({
   onRetry: () => void
 }): ReactNode {
   const color = ERROR_TONE_COLOR[error.tone]
+  const informational = error.localeKey === 'error.workspaceNotInitialized'
   return (
-    <div data-graycode-memory="error" data-code={error.code} style={{ ...errorBannerStyle, color }}>
+    <div
+      data-graycode-memory={informational ? 'info' : 'error'}
+      data-code={error.code}
+      role={informational ? 'status' : 'alert'}
+      style={{ ...errorBannerStyle, color }}
+    >
       <span>
-        {t('error.title')}: {t(error.localeKey)}
+        {informational ? t(error.localeKey) : `${t('error.title')}: ${t(error.localeKey)}`}
       </span>
       {error.retryable && (
         <button type="button" data-graycode-memory="retry" style={buttonStyle} onClick={onRetry}>
@@ -309,8 +324,41 @@ export function MemoryManagePanel({
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<MemoryErrorView | null>(null)
   const [addNote, setAddNote] = useState<string | null>(null)
+  const workspaceRoot = workspace?.trim() || undefined
+  const fallbackEntryChars = normalizeMemoryEntryChars(entryChars)
+  const configContextKey = memoryRequestContextKey({ text: '', scope, workspace: workspaceRoot })
+  const [configSnapshot, setConfigSnapshot] = useState<{
+    readonly transport: MemoryManageTransport
+    readonly contextKey: string
+    readonly entryChars: number
+  } | null>(null)
+  const effectiveEntryChars = configSnapshot !== null
+    && configSnapshot.transport === transport
+    && configSnapshot.contextKey === configContextKey
+    ? configSnapshot.entryChars
+    : fallbackEntryChars
+  // The raw search text participates immediately, before the debounce applies
+  // it, so an old write/list response cannot briefly restore the previous
+  // query's rows after the user has started typing a new query.
+  const viewContextKey = memoryRequestContextKey({ text: queryText, scope, workspace: workspaceRoot })
+  /** Latest rendered context; updated during render to close the pre-effect race window. */
+  const currentContextKeyRef = useRef(viewContextKey)
+  currentContextKeyRef.current = viewContextKey
+  const currentAppliedQueryRef = useRef(appliedQuery)
+  currentAppliedQueryRef.current = appliedQuery
   /** Stale-response guard: only the latest request may commit state. */
   const seqRef = useRef(0)
+  const loadMoreSeqRef = useRef(0)
+  const addSeqRef = useRef(0)
+  const editSeqRef = useRef(0)
+  const forgetSeqRef = useRef(0)
+  const configSeqRef = useRef(0)
+  const addGateRef = useRef<MemoryAddInFlightGate>()
+  if (addGateRef.current === undefined) addGateRef.current = new MemoryAddInFlightGate()
+  const currentConfigContextKeyRef = useRef(configContextKey)
+  currentConfigContextKeyRef.current = configContextKey
+  const currentTransportRef = useRef(transport)
+  currentTransportRef.current = transport
   /** Unmount guard: never commit state after the panel is gone. */
   const mountedRef = useRef(true)
 
@@ -318,8 +366,66 @@ export function MemoryManagePanel({
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      seqRef.current += 1
+      loadMoreSeqRef.current += 1
+      addSeqRef.current += 1
+      editSeqRef.current += 1
+      forgetSeqRef.current += 1
+      configSeqRef.current += 1
     }
   }, [])
+
+  const fetchEffectiveConfig = useCallback(async (
+    targetScope: GrayMemoryScope,
+    targetWorkspace: string | undefined,
+  ): Promise<void> => {
+    const requestTransport = transport
+    const contextKey = memoryRequestContextKey({ text: '', scope: targetScope, workspace: targetWorkspace })
+    const requestId = ++configSeqRef.current
+    if (
+      contextKey !== currentConfigContextKeyRef.current
+      || requestTransport !== currentTransportRef.current
+    ) return
+    // Never keep a value owned by an older fetch while a new host snapshot is
+    // pending. `effectiveEntryChars` immediately falls back to the prop.
+    setConfigSnapshot(null)
+    if (
+      requestTransport?.configGet === undefined
+      || (targetScope === 'workspace' && targetWorkspace === undefined)
+    ) return
+    try {
+      const result = await requestTransport.configGet({
+        scope: targetScope,
+        ...(targetScope === 'workspace' && targetWorkspace !== undefined
+          ? { workspace: targetWorkspace }
+          : {}),
+      })
+      if (!isCurrentMemoryConfigResponse({
+        mounted: mountedRef.current,
+        requestId,
+        latestRequestId: configSeqRef.current,
+        requestContextKey: contextKey,
+        currentContextKey: currentConfigContextKeyRef.current,
+        requestTransport,
+        currentTransport: currentTransportRef.current,
+      })) return
+      if (!result.ok) return
+      const hostEntryChars = normalizeMemoryEntryChars(result.value.entryChars)
+      if (hostEntryChars === undefined) return
+      setConfigSnapshot({ transport: requestTransport, contextKey, entryChars: hostEntryChars })
+    } catch {
+      // Config is advisory for local validation. A missing/legacy/misbehaving
+      // endpoint safely falls back to the native settings snapshot; writes
+      // remain host-authoritative.
+    }
+  }, [transport])
+
+  useEffect(() => {
+    void fetchEffectiveConfig(scope, workspaceRoot)
+    return () => {
+      configSeqRef.current += 1
+    }
+  }, [fetchEffectiveConfig, scope, workspaceRoot, fallbackEntryChars])
 
   // Debounce the search box into the applied query (pure UI timing).
   useEffect(() => {
@@ -327,39 +433,88 @@ export function MemoryManagePanel({
     return () => clearTimeout(handle)
   }, [queryText])
 
-  const queryState = (q: string, s: GrayMemoryScope, cursor?: number): MemoryQueryState => ({
+  const queryState = (q: string, s: GrayMemoryScope, targetWorkspace: string | undefined, cursor?: string): MemoryQueryState => ({
     text: q,
     scope: s,
-    workspace,
+    workspace: targetWorkspace,
     ...(cursor !== undefined ? { cursor } : {}),
     limit: pageLimit,
   })
 
-  const fetchFirstPage = useCallback(async (q: string, s: GrayMemoryScope) => {
+  const fetchFirstPage = useCallback(async (
+    q: string,
+    s: GrayMemoryScope,
+    targetWorkspace = workspaceRoot,
+  ) => {
+    const contextKey = memoryRequestContextKey({ text: q, scope: s, workspace: targetWorkspace })
+    const seq = ++seqRef.current
+    loadMoreSeqRef.current += 1
+    setLoadingMore(false)
     if (transport === undefined) {
+      if (contextKey !== currentContextKeyRef.current) return
       setList(null)
       setError(null)
       setPhase('ready')
       return
     }
-    const seq = ++seqRef.current
     setPhase('loading')
     setError(null)
     let result
-    try {
-      result = await transport.list(buildMemoryListParams(queryState(q, s)))
-    } catch (err) {
-      result = { ok: false as const, error: toMemoryFailure(err) }
+    if (s === 'workspace' && targetWorkspace === undefined) {
+      result = {
+        ok: false as const,
+        error: {
+          code: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+          message: 'workspace scope requires an active session workspace',
+          details: { field: 'workspace' },
+        },
+      }
+    } else {
+      try {
+        result = await transport.list(buildMemoryListParams(queryState(q, s, targetWorkspace)))
+      } catch (err) {
+        result = { ok: false as const, error: toMemoryFailure(err) }
+      }
     }
-    if (seq !== seqRef.current || !mountedRef.current) return // stale response or unmounted — drop
+    if (seq !== seqRef.current || contextKey !== currentContextKeyRef.current || !mountedRef.current) return
     if (result.ok) {
-      setList(buildMemoryListViewModel(result.value, { scope: s, workspace, query: q }))
+      setList(buildMemoryListViewModel(result.value, { scope: s, workspace: targetWorkspace, query: q }))
       setPhase('ready')
     } else {
-      setError(mapMemoryFailure(result.error))
-      setPhase('error')
+      const mapped = mapMemoryFailure(result.error)
+      setError(mapped)
+      if (isWorkspaceStoreMissingFailure(result.error)) {
+        // A never-written workspace is a normal, addable empty state rather
+        // than a failed panel. Keep the informational hint visible.
+        setList(buildMemoryListViewModel(
+          { items: [], total: 0, revision: 'workspace-store-missing' },
+          { scope: s, workspace: targetWorkspace, query: q },
+        ))
+        setPhase('ready')
+      } else {
+        setPhase('error')
+      }
     }
-  }, [transport, workspace, pageLimit]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, workspaceRoot, pageLimit]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A visible scope/workspace/search change invalidates how pending actions
+  // render. It deliberately does not release the add gate: the host write is
+  // not cancellable and only its own finally may permit another submission.
+  useEffect(() => {
+    seqRef.current += 1
+    loadMoreSeqRef.current += 1
+    addSeqRef.current += 1
+    editSeqRef.current += 1
+    forgetSeqRef.current += 1
+    setList(null)
+    if (transport !== undefined) setPhase('loading')
+    setLoadingMore(false)
+    setEditSaving(false)
+    setEditTarget(null)
+    setForget(IDLE_FORGET_STATE)
+    setAddError(null)
+    setAddNote(null)
+  }, [viewContextKey])
 
   useEffect(() => {
     void fetchFirstPage(appliedQuery, scope)
@@ -371,6 +526,11 @@ export function MemoryManagePanel({
     // superseded generation (scope/search changed meanwhile) are dropped so
     // old pages never append into a newer list.
     const seq = seqRef.current
+    const requestId = ++loadMoreSeqRef.current
+    const targetQuery = appliedQuery
+    const targetScope = scope
+    const targetWorkspace = workspaceRoot
+    const contextKey = currentContextKeyRef.current
     setLoadingMore(true)
     const cursor = parseMemoryNextCursor(list.nextCursor)
     if (cursor === null) {
@@ -383,31 +543,55 @@ export function MemoryManagePanel({
     }
     let result
     try {
-      result = await transport.list(buildMemoryListParams(queryState(appliedQuery, scope, cursor)))
+      result = await transport.list(buildMemoryListParams(queryState(targetQuery, targetScope, targetWorkspace, cursor)))
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
-    if (seq !== seqRef.current || !mountedRef.current) {
-      setLoadingMore(false)
-      return // stale generation or unmounted — drop
-    }
+    if (
+      seq !== seqRef.current
+      || requestId !== loadMoreSeqRef.current
+      || contextKey !== currentContextKeyRef.current
+      || !mountedRef.current
+    ) return
     setLoadingMore(false)
     if (result.ok) {
-      const next = buildMemoryListViewModel(result.value, { scope, workspace, query: appliedQuery })
+      const next = buildMemoryListViewModel(result.value, { scope: targetScope, workspace: targetWorkspace, query: targetQuery })
       setList(prev =>
         prev === null
           ? next
           : appendMemoryListPage(prev, next),
       )
       setError(null)
+    } else if (isStaleMemoryCursorFailure(result.error)) {
+      // The host binds cursors to a list snapshot. A mutation between pages
+      // invalidates the token: discard accumulated rows and restart instead
+      // of appending an inconsistent page or leaving a dead retry button.
+      setList(null)
+      await fetchFirstPage(targetQuery, targetScope, targetWorkspace)
     } else {
       // Keep the accumulated list; surface the failure as a banner.
       setError(mapMemoryFailure(result.error))
     }
-  }, [transport, list, loadingMore, appliedQuery, scope, workspace]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, list, loadingMore, appliedQuery, scope, workspaceRoot, fetchFirstPage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onScopeChange = (next: GrayMemoryScope) => {
     if (next === scope) return
+    // Invalidate synchronously; a promise microtask may settle before React
+    // commits the state update below.
+    seqRef.current += 1
+    loadMoreSeqRef.current += 1
+    addSeqRef.current += 1
+    editSeqRef.current += 1
+    forgetSeqRef.current += 1
+    configSeqRef.current += 1
+    currentConfigContextKeyRef.current = memoryRequestContextKey({
+      text: '',
+      scope: next,
+      workspace: workspaceRoot,
+    })
+    setList(null)
+    setLoadingMore(false)
+    setEditSaving(false)
     setEditTarget(null)
     setForget(IDLE_FORGET_STATE)
     setAddError(null)
@@ -416,38 +600,69 @@ export function MemoryManagePanel({
   }
 
   const submitAdd = useCallback(async () => {
-    if (transport === undefined || adding) return
+    if (transport === undefined) return
     const text = addText.trim()
     if (text.length === 0) return
     setAddError(null)
     setAddNote(null)
-    if (entryChars !== undefined && utf8Bytes(text) > entryChars) {
-      setAddError(mapMemoryFailure(toMemoryFailure(new Error(`Too long: ${utf8Bytes(text)} bytes, limit ${entryChars}.`))))
+    setForget(current => current.phase === 'done' ? IDLE_FORGET_STATE : current)
+    const textBytes = utf8Bytes(text)
+    if (effectiveEntryChars !== undefined && textBytes > effectiveEntryChars) {
+      setAddError(mapMemoryFailure(memoryEntryCharsExceededFailure(textBytes, effectiveEntryChars)))
       return
     }
+    const addGate = addGateRef.current!
+    const requestTransport = transport
+    const request = startMemoryAddRequest(addGate, () => requestTransport.add({
+      scope,
+      workspace: workspaceRoot,
+      text,
+    }))
+    if (!request.started) return
+    const targetScope = scope
+    const targetWorkspace = workspaceRoot
+    const contextKey = currentContextKeyRef.current
+    const requestId = ++addSeqRef.current
     setAdding(true)
     let result
     try {
-      result = await transport.add({ scope, workspace, text })
+      result = await request.completion
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
+    } finally {
+      // The request wrapper owns the lease. This finally only reflects its
+      // settled state in the mounted UI; view generations never unlock it.
+      if (mountedRef.current) setAdding(addGate.isInFlight())
     }
-    if (!mountedRef.current) return
-    setAdding(false)
+    if (
+      !mountedRef.current
+      || requestId !== addSeqRef.current
+      || contextKey !== currentContextKeyRef.current
+      || requestTransport !== currentTransportRef.current
+    ) return
     if (result.ok) {
       setAddText('')
       setAddNote(t('add.success'))
-      await fetchFirstPage(appliedQuery, scope)
+      // `memory/note` may have initialized a previously absent workspace
+      // store. Refresh its effective persisted config as well as the list.
+      void fetchEffectiveConfig(targetScope, targetWorkspace)
+      // The debounced applied query may have advanced while the write was in
+      // flight even though the raw-input view identity stayed the same. Always
+      // refresh the newest applied query; never cancel it with an older one.
+      await fetchFirstPage(currentAppliedQueryRef.current, targetScope, targetWorkspace)
     } else {
       setAddError(mapMemoryFailure(result.error))
     }
-  }, [transport, adding, addText, entryChars, scope, workspace, appliedQuery, fetchFirstPage, t]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, addText, effectiveEntryChars, scope, workspaceRoot, fetchFirstPage, fetchEffectiveConfig, t]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
+    setAddNote(null)
     // Capture the list generation the target belongs to; a response landing
     // after a scope/search change must not write into the newer list.
-    const seq = seqRef.current
+    const requestId = ++editSeqRef.current
+    const contextKey = currentContextKeyRef.current
+    const targetQuery = appliedQuery
     setEditSaving(true)
     const target = editTarget
     let result
@@ -457,37 +672,52 @@ export function MemoryManagePanel({
         workspace: target.workspace,
         id: target.id,
         text: nextText,
+        expectedRevision: target.revision,
       })
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
-    if (seq !== seqRef.current || !mountedRef.current) {
-      // The visible list moved to a newer generation (or the panel unmounted):
-      // close the overlay but never touch the newer list.
-      setEditSaving(false)
-      setEditTarget(null)
-      return
-    }
+    if (!mountedRef.current || requestId !== editSeqRef.current || contextKey !== currentContextKeyRef.current) return
     setEditSaving(false)
     if (result.ok) {
       const updated = buildMemoryEntryView(result.value, {
         scope: target.scope,
         workspace: target.workspace,
-        query: appliedQuery,
-      })
+        query: targetQuery,
+      }, target.revision)
       setList(prev =>
         prev === null || !prev.items.some(item => item.id === updated.id)
           ? prev // entry no longer part of the current list — drop the write-back
           : { ...prev, items: prev.items.map(item => (item.id === updated.id ? updated : item)) },
       )
       setEditTarget(null)
+      await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
     } else {
-      setError(mapMemoryFailure(result.error))
+      const mapped = mapMemoryFailure(result.error)
+      if (isStaleMemoryRevisionFailure(result.error)) {
+        setEditTarget(null)
+        await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
+        if (
+          mountedRef.current
+          && requestId === editSeqRef.current
+          && contextKey === currentContextKeyRef.current
+        ) setError(mapped)
+      } else {
+        setError(mapped)
+      }
     }
-  }, [transport, editTarget, appliedQuery])
+  }, [transport, editTarget, appliedQuery, fetchFirstPage])
 
   const onForgetRequest = (entry: MemoryEntryViewModel) => {
-    setForget(requestForget(forget, { id: entry.id, scope: entry.scope, workspace: entry.workspace }, entry.text))
+    forgetSeqRef.current += 1
+    setAddNote(null)
+    const current = forget.phase === 'done' ? IDLE_FORGET_STATE : forget
+    setForget(requestForget(current, {
+      id: entry.id,
+      revision: entry.revision,
+      scope: entry.scope,
+      workspace: entry.workspace,
+    }, entry.text))
   }
 
   const onForgetConfirm = useCallback(async () => {
@@ -495,25 +725,21 @@ export function MemoryManagePanel({
     const submitting = confirmForget(forget)
     setForget(submitting)
     const target = submitting.target!
-    const seq = seqRef.current
+    const requestId = ++forgetSeqRef.current
+    const contextKey = currentContextKeyRef.current
     let result
     try {
       result = await transport.forget({
         scope: target.scope,
         workspace: target.workspace,
         blockId: String(target.id),
+        expectedRevision: target.revision,
         confirm: true,
       })
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
-    if (!mountedRef.current) return
-    if (seq !== seqRef.current) {
-      // The list moved to a newer generation: settle the machine but never
-      // mutate the visible list (it no longer contains the target).
-      setForget(result.ok ? resolveForget(submitting, result.value) : rejectForget(submitting, result.error))
-      return
-    }
+    if (!mountedRef.current || requestId !== forgetSeqRef.current || contextKey !== currentContextKeyRef.current) return
     if (result.ok) {
       setList(prev =>
         prev === null
@@ -525,12 +751,28 @@ export function MemoryManagePanel({
             },
       )
       setForget(resolveForget(submitting, result.value))
+      await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
     } else {
-      setForget(rejectForget(submitting, result.error))
+      if (isStaleMemoryRevisionFailure(result.error)) {
+        await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
+        if (
+          mountedRef.current
+          && requestId === forgetSeqRef.current
+          && contextKey === currentContextKeyRef.current
+        ) {
+          setForget(IDLE_FORGET_STATE)
+          setError(mapMemoryFailure(result.error))
+        }
+      } else {
+        setForget(rejectForget(submitting, result.error))
+      }
     }
-  }, [transport, forget])
+  }, [transport, forget, fetchFirstPage])
 
-  const onForgetCancel = useCallback(() => setForget(cancelForget(forget)), [forget])
+  const onForgetCancel = useCallback(() => {
+    forgetSeqRef.current += 1
+    setForget(cancelForget(forget))
+  }, [forget])
 
   // Auto-dismiss the forget success note (pure UI timing).
   useEffect(() => {
@@ -565,7 +807,15 @@ export function MemoryManagePanel({
           value={queryText}
           disabled={!wired}
           style={searchStyle}
-          onChange={event => setQueryText(event.target.value)}
+          onChange={event => {
+            // Invalidate synchronously; do not wait for the debounce/effect.
+            seqRef.current += 1
+            loadMoreSeqRef.current += 1
+            addSeqRef.current += 1
+            editSeqRef.current += 1
+            forgetSeqRef.current += 1
+            setQueryText(event.target.value)
+          }}
         />
         <div style={scopeGroupStyle} role="group" aria-label={t('scope.global')}>
           {GRAY_MEMORY_SCOPES.map(s => (
@@ -595,7 +845,7 @@ export function MemoryManagePanel({
             rows={3}
             placeholder={t('add.placeholder')}
             value={addText}
-            disabled={adding || (scope === 'workspace' && workspace === undefined)}
+            disabled={adding || (scope === 'workspace' && workspaceRoot === undefined)}
             style={addTextareaStyle}
             onChange={event => setAddText(event.target.value)}
             onKeyDown={event => {
@@ -608,16 +858,16 @@ export function MemoryManagePanel({
           <div style={addRowStyle}>
             <span
               data-graycode-memory="add-bytes"
-              style={entryChars !== undefined && utf8Bytes(addText) > entryChars ? addCharOverflowStyle : addCharStyle}
+              style={effectiveEntryChars !== undefined && utf8Bytes(addText) > effectiveEntryChars ? addCharOverflowStyle : addCharStyle}
             >
               {utf8Bytes(addText)}
-              {entryChars !== undefined ? `/${entryChars}` : ''}
+              {effectiveEntryChars !== undefined ? `/${effectiveEntryChars}` : ''}
             </span>
             <button
               type="button"
               data-graycode-memory="add-submit"
-              style={adding || addText.trim().length === 0 || (scope === 'workspace' && workspace === undefined) ? buttonDisabledStyle : buttonStyle}
-              disabled={adding || addText.trim().length === 0 || (scope === 'workspace' && workspace === undefined)}
+              style={adding || addText.trim().length === 0 || (scope === 'workspace' && workspaceRoot === undefined) ? buttonDisabledStyle : buttonStyle}
+              disabled={adding || addText.trim().length === 0 || (scope === 'workspace' && workspaceRoot === undefined)}
               onClick={() => void submitAdd()}
             >
               {adding ? t('add.busy') : t('add.button')}
@@ -653,7 +903,11 @@ export function MemoryManagePanel({
           items={list.items}
           wired={wired}
           forget={forget}
-          onEdit={setEditTarget}
+          onEdit={entry => {
+            setAddNote(null)
+            setForget(current => current.phase === 'done' ? IDLE_FORGET_STATE : current)
+            setEditTarget(entry)
+          }}
           onForgetRequest={onForgetRequest}
           onForgetConfirm={() => void onForgetConfirm()}
           onForgetCancel={onForgetCancel}

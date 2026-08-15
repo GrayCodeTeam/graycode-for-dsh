@@ -26,6 +26,8 @@ export const MEMORY_FORMAT_VERSION = 1;
 export interface StoredRecord {
     /** 条目 ID：真实记录在文件中的序号（连续）；损坏行占位为 null 不计 ID */
     id: number;
+    /** 稳定身份：删除导致位置重编号时保持不变；旧记录首次经管理面读取时回填。 */
+    identity?: string;
     /** 展示/检索日期，ISO YYYY-MM-DD（与旧格式 "#id date text" 的 date 同语义） */
     date: string;
     /** 记忆文本（单行） */
@@ -112,6 +114,9 @@ export function decodeRecordLine(line: string): StoredRecord | null {
     if (typeof o.id !== 'number' || !Number.isInteger(o.id) || o.id < 0) return null;
     if (typeof o.date !== 'string' || typeof o.text !== 'string') return null;
     const rec: StoredRecord = { id: o.id, date: o.date, text: o.text };
+    if (typeof o.identity === 'string' && o.identity.length > 0 && o.identity.length <= 128) {
+        rec.identity = o.identity;
+    }
     if (typeof o.createdAt === 'string') rec.createdAt = o.createdAt;
     if (typeof o.updatedAt === 'string') rec.updatedAt = o.updatedAt;
     if (typeof o.version === 'number' && Number.isInteger(o.version) && o.version > 0) {

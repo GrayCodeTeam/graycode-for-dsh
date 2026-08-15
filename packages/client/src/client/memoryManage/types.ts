@@ -40,8 +40,8 @@ export interface GrayMemoryListParams {
   readonly workspace?: string
   /** Substring search, case-insensitive. */
   readonly search?: string
-  /** Cursor = last seen entry id (host slices after it). */
-  readonly cursor?: number
+  /** Opaque host-issued cursor. Clients must return it verbatim. */
+  readonly cursor?: string
   readonly limit?: number
 }
 
@@ -49,6 +49,8 @@ export interface GrayMemoryListParams {
 export interface GrayMemoryListResult {
   readonly items: readonly GrayMemoryEntryView[]
   readonly total: number
+  /** Opaque full-store snapshot revision used for edit/delete CAS. */
+  readonly revision: string
   /** Last item id; absent when there are no more pages. */
   readonly nextCursor?: string
 }
@@ -61,12 +63,28 @@ export interface GrayMemoryNoteParams {
   readonly text: string
 }
 
+/** Scope selector shared by `memory/configGet`. */
+export interface GrayMemoryConfigGetParams {
+  readonly scope?: GrayMemoryScope
+  readonly workspace?: string
+}
+
+/** Effective memory-store configuration returned by `memory/configGet`. */
+export interface GrayMemoryConfig {
+  readonly wakeLines: number
+  readonly entryChars: number
+  readonly partChars: number
+  readonly partLines: number
+}
+
 /** memory/edit params (mirrors `GrayMemoryEditParams`). */
 export interface GrayMemoryEditParams {
   readonly scope?: GrayMemoryScope
   readonly workspace?: string
   readonly id: number
   readonly text: string
+  /** `memory/list` revision for the row being edited. */
+  readonly expectedRevision: string
 }
 
 /** memory/forget params (mirrors `GrayMemoryForgetParams`). */
@@ -79,6 +97,8 @@ export interface GrayMemoryForgetParams {
    * `"<id>"` blockIds (entry-level forget).
    */
   readonly blockId: string
+  /** Required by the host for raw single/range deletion. */
+  readonly expectedRevision?: string
   /** Destructive confirmation: must be true, else GRAY_APPROVAL_REQUIRED. */
   readonly confirm: boolean
 }
@@ -191,9 +211,36 @@ export function readMemoryListResult(value: unknown): GrayMemoryListResult | nul
   if (typeof record.total !== 'number' || !Number.isSafeInteger(record.total) || record.total < 0) {
     return null
   }
+  if (typeof record.revision !== 'string' || record.revision.trim().length === 0) return null
   const nextCursor =
     typeof record.nextCursor === 'string' && record.nextCursor.length > 0 ? record.nextCursor : undefined
-  return { items, total: record.total, ...(nextCursor !== undefined ? { nextCursor } : {}) }
+  return {
+    items,
+    total: record.total,
+    revision: record.revision,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+  }
+}
+
+function readBoundedPositiveInteger(value: unknown, max: number): number | null {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= max
+    ? value
+    : null
+}
+
+/** Narrow the effective config returned by `memory/configGet`. */
+export function readMemoryConfig(value: unknown): GrayMemoryConfig | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  const wakeLines = readBoundedPositiveInteger(record.wakeLines, 10_000)
+  const entryChars = readBoundedPositiveInteger(record.entryChars, 1_000)
+  const partChars = readBoundedPositiveInteger(record.partChars, 1_000_000)
+  const partLines = readBoundedPositiveInteger(record.partLines, 100_000)
+  if (wakeLines === null || entryChars === null || partChars === null || partLines === null) return null
+  return { wakeLines, entryChars, partChars, partLines }
 }
 
 /** Narrow an unknown value to a forget result. */

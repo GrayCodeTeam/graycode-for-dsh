@@ -24,13 +24,21 @@ import {
   dismissForget,
   findMatchRanges,
   IDLE_FORGET_STATE,
+  MemoryAddInFlightGate,
+  isCurrentMemoryConfigResponse,
+  isStaleMemoryCursorFailure,
+  isStaleMemoryRevisionFailure,
   mapMemoryFailure,
+  memoryEntryCharsExceededFailure,
+  memoryRequestContextKey,
   MEMORY_DIFF_MAX_CELLS,
   normalizeMemoryLimit,
+  normalizeMemoryEntryChars,
   parseMemoryNextCursor,
   rejectForget,
   requestForget,
   resolveForget,
+  startMemoryAddRequest,
   toMemoryFailure,
 } from '../src/client/memoryManage/logic.ts'
 import {
@@ -46,6 +54,7 @@ import {
   GRAY_REMOTE_ERROR_CODES,
   isGrayRemoteResult,
   readGrayRemoteFailure,
+  readMemoryConfig,
   readMemoryEntryView,
   readMemoryForgetResult,
   readMemoryListResult,
@@ -58,6 +67,7 @@ import {
 } from '../src/client/memoryManage/locales.ts'
 
 const CODES = GRAY_REMOTE_ERROR_CODES
+const REVISION = 'sha256:test-revision'
 
 function failure(code: string, message = 'boom'): { code: string; message: string; details: Record<string, unknown> } {
   return { code, message, details: {} }
@@ -79,11 +89,11 @@ describe('buildMemoryListParams', () => {
     expect(params.workspace).toBe('C:\\ws')
   })
 
-  it('drops invalid cursors and keeps valid ones', () => {
-    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: 0 })).not.toHaveProperty('cursor')
-    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: -3 })).not.toHaveProperty('cursor')
-    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: 1.5 })).not.toHaveProperty('cursor')
-    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: 42 }).cursor).toBe(42)
+  it('drops empty cursors and returns opaque host tokens verbatim', () => {
+    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: '' })).not.toHaveProperty('cursor')
+    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: '   ' })).not.toHaveProperty('cursor')
+    const opaque = 'eyJ2IjoxLCJzIjoiYWJjIiwibyI6Mn0'
+    expect(buildMemoryListParams({ text: '', scope: 'global', cursor: opaque }).cursor).toBe(opaque)
   })
 
   it('normalizes the limit to the host contract', () => {
@@ -95,6 +105,52 @@ describe('buildMemoryListParams', () => {
 
   it('omits the workspace when empty', () => {
     expect(buildMemoryListParams({ text: '', scope: 'workspace', workspace: '' })).not.toHaveProperty('workspace')
+  })
+})
+
+describe('memory request context identity', () => {
+  it('binds workspace views to a normalized workspace and global views only to their query', () => {
+    expect(memoryRequestContextKey({ text: 'q', scope: 'workspace', workspace: ' C:\\repo ' }))
+      .toBe(memoryRequestContextKey({ text: 'q', scope: 'workspace', workspace: 'C:\\repo' }))
+    expect(memoryRequestContextKey({ text: 'q', scope: 'workspace', workspace: 'C:\\repo' }))
+      .not.toBe(memoryRequestContextKey({ text: 'q', scope: 'workspace', workspace: 'D:\\repo' }))
+    expect(memoryRequestContextKey({ text: 'q', scope: 'global', workspace: 'C:\\repo' }))
+      .toBe(memoryRequestContextKey({ text: 'q', scope: 'global', workspace: 'D:\\repo' }))
+  })
+})
+
+describe('MemoryAddInFlightGate', () => {
+  it('keeps one delayed host write locked across search, scope, and workspace changes', async () => {
+    let resolveWrite!: () => void
+    const delayedWrite = new Promise<void>(resolve => { resolveWrite = resolve })
+    const gate = new MemoryAddInFlightGate()
+    let transportCalls = 0
+
+    const submit = () => {
+      return startMemoryAddRequest(gate, async () => {
+        transportCalls += 1
+        await delayedWrite
+      })
+    }
+
+    const first = submit()
+    expect(first.started).toBe(true)
+    expect(gate.isInFlight()).toBe(true)
+    const changedViews = [
+      memoryRequestContextKey({ text: 'new search', scope: 'global' }),
+      memoryRequestContextKey({ text: 'new search', scope: 'workspace', workspace: 'C:\\one' }),
+      memoryRequestContextKey({ text: 'new search', scope: 'workspace', workspace: 'D:\\two' }),
+    ]
+    for (const view of changedViews) {
+      expect(view.length).toBeGreaterThan(0) // model the view-generation changes
+      expect(submit()).toEqual({ started: false })
+    }
+    expect(transportCalls).toBe(1)
+
+    resolveWrite()
+    if (!first.started) throw new Error('first add should have acquired the gate')
+    await expect(first.completion).resolves.toBeUndefined()
+    expect(gate.isInFlight()).toBe(false)
   })
 })
 
@@ -110,19 +166,16 @@ describe('normalizeMemoryLimit', () => {
 })
 
 describe('parseMemoryNextCursor', () => {
-  it('parses positive safe integer cursors', () => {
-    expect(parseMemoryNextCursor('42')).toBe(42)
-    expect(parseMemoryNextCursor('1')).toBe(1)
+  it('accepts and preserves non-empty opaque tokens', () => {
+    expect(parseMemoryNextCursor('42')).toBe('42')
+    expect(parseMemoryNextCursor('opaque.token-_')).toBe('opaque.token-_')
   })
 
-  it('rejects malformed cursors (re-fetching page 1 would duplicate items)', () => {
+  it('rejects only absent/empty cursors without interpreting host tokens', () => {
     expect(parseMemoryNextCursor(undefined)).toBeNull()
     expect(parseMemoryNextCursor('')).toBeNull()
-    expect(parseMemoryNextCursor('abc')).toBeNull()
-    expect(parseMemoryNextCursor('0')).toBeNull()
-    expect(parseMemoryNextCursor('-1')).toBeNull()
-    expect(parseMemoryNextCursor('1.5')).toBeNull()
-    expect(parseMemoryNextCursor('9007199254740992')).toBeNull() // not a safe integer
+    expect(parseMemoryNextCursor('   ')).toBeNull()
+    expect(parseMemoryNextCursor('abc')).toBe('abc')
   })
 })
 
@@ -130,8 +183,8 @@ describe('appendMemoryListPage', () => {
   const entry = (id: number): GrayMemoryEntryView => ({ id, date: '2025-01-01', text: `memory ${id}` })
 
   it('appends items and adopts total/nextCursor/hasMore from the newest page', () => {
-    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 3, nextCursor: '2' }, { scope: 'global' })
-    const next = buildMemoryListViewModel({ items: [entry(1)], total: 3, nextCursor: '1' }, { scope: 'global' })
+    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 3, nextCursor: '2', revision: REVISION }, { scope: 'global' })
+    const next = buildMemoryListViewModel({ items: [entry(1)], total: 3, nextCursor: '1', revision: REVISION }, { scope: 'global' })
     const merged = appendMemoryListPage(prev, next)
     expect(merged.items.map(item => item.id)).toEqual([2, 1])
     expect(merged.total).toBe(3)
@@ -140,8 +193,8 @@ describe('appendMemoryListPage', () => {
   })
 
   it('ends pagination when the next page carries no cursor', () => {
-    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 2, nextCursor: '2' }, { scope: 'global' })
-    const next = buildMemoryListViewModel({ items: [entry(1)], total: 2 }, { scope: 'global' })
+    const prev = buildMemoryListViewModel({ items: [entry(2)], total: 2, nextCursor: '2', revision: REVISION }, { scope: 'global' })
+    const next = buildMemoryListViewModel({ items: [entry(1)], total: 2, revision: REVISION }, { scope: 'global' })
     const merged = appendMemoryListPage(prev, next)
     expect(merged.items.map(item => item.id)).toEqual([2, 1])
     expect(merged.nextCursor).toBeUndefined()
@@ -182,27 +235,27 @@ describe('buildMemoryEntryView / buildMemoryListViewModel', () => {
   const entry: GrayMemoryEntryView = { id: 7, date: '2025-01-02', text: 'Remember the Alpha build' }
 
   it('folds scope, workspace and highlight ranges into the view', () => {
-    const view = buildMemoryEntryView(entry, { scope: 'workspace', workspace: 'C:\\ws', query: 'alpha' })
+    const view = buildMemoryEntryView(entry, { scope: 'workspace', workspace: 'C:\\ws', query: 'alpha' }, REVISION)
     expect(view).toMatchObject({ id: 7, date: '2025-01-02', text: entry.text, scope: 'workspace', workspace: 'C:\\ws' })
     expect(view.highlight).toEqual([{ start: 13, end: 18 }])
   })
 
   it('omits workspace and highlight when not applicable', () => {
-    const view = buildMemoryEntryView(entry, { scope: 'global' })
+    const view = buildMemoryEntryView(entry, { scope: 'global' }, REVISION)
     expect(view.workspace).toBeUndefined()
     expect(view.highlight).toEqual([])
   })
 
   it('builds a page view model with hasMore from nextCursor', () => {
     const vm = buildMemoryListViewModel(
-      { items: [entry], total: 3, nextCursor: '7' },
+      { items: [entry], total: 3, nextCursor: '7', revision: REVISION },
       { scope: 'global', query: 'alpha' },
     )
     expect(vm.items).toHaveLength(1)
     expect(vm.total).toBe(3)
     expect(vm.nextCursor).toBe('7')
     expect(vm.hasMore).toBe(true)
-    expect(buildMemoryListViewModel({ items: [entry], total: 1 }, { scope: 'global' }).hasMore).toBe(false)
+    expect(buildMemoryListViewModel({ items: [entry], total: 1, revision: REVISION }, { scope: 'global' }).hasMore).toBe(false)
   })
 })
 
@@ -404,6 +457,89 @@ describe('mapMemoryFailure', () => {
     expect(mapMemoryFailure(null)).toMatchObject({ code: 'UNKNOWN', localeKey: 'error.internal' })
     expect(mapMemoryFailure(undefined)).toMatchObject({ code: 'UNKNOWN', localeKey: 'error.internal' })
   })
+
+  it('distinguishes an absent workspace store from an absent entry using structured details', () => {
+    expect(mapMemoryFailure({
+      code: CODES.NOT_FOUND,
+      message: 'not parsed by the client',
+      details: { kind: 'workspace-store', workspace: 'D:\\repo' },
+    })).toMatchObject({ localeKey: 'error.workspaceNotInitialized', tone: 'info' })
+    expect(mapMemoryFailure({
+      code: CODES.NOT_FOUND,
+      message: 'not parsed by the client',
+      details: { workspace: 'D:\\repo' },
+    })).toMatchObject({ localeKey: 'error.notFound', tone: 'warning' })
+    expect(mapMemoryFailure({
+      code: CODES.NOT_FOUND,
+      message: 'not parsed by the client',
+      details: { kind: 'memory-entry', workspace: 'D:\\repo', id: 7 },
+    })).toMatchObject({ localeKey: 'error.notFound', tone: 'warning' })
+  })
+
+  it('classifies only the structured stale-cursor conflict as restartable', () => {
+    expect(isStaleMemoryCursorFailure({
+      code: CODES.CONFLICT,
+      message: 'stale',
+      details: { kind: 'memory-cursor', reason: 'stale', restartRequired: true },
+    })).toBe(true)
+    expect(isStaleMemoryCursorFailure({
+      code: CODES.CONFLICT,
+      message: 'other conflict',
+      details: { kind: 'memory-entry' },
+    })).toBe(false)
+  })
+
+  it('classifies only structured stale memory revisions as CAS refresh conflicts', () => {
+    expect(isStaleMemoryRevisionFailure({
+      code: CODES.CONFLICT,
+      message: 'stale',
+      details: { kind: 'memory-revision', reason: 'stale', restartRequired: true },
+    })).toBe(true)
+    expect(isStaleMemoryRevisionFailure({
+      code: CODES.CONFLICT,
+      message: 'other conflict',
+      details: { kind: 'memory-entry', reason: 'stale' },
+    })).toBe(false)
+  })
+
+  it('maps local entryChars overflow to INVALID_INPUT rather than INTERNAL', () => {
+    const failure = memoryEntryCharsExceededFailure(11, 10)
+    expect(failure).toMatchObject({
+      code: CODES.INVALID_INPUT,
+      details: { field: 'text', actualBytes: 11, limit: 10 },
+    })
+    expect(mapMemoryFailure(failure)).toMatchObject({ localeKey: 'error.invalidInput', retryable: false })
+  })
+})
+
+describe('normalizeMemoryEntryChars', () => {
+  it('accepts only host-valid integer limits', () => {
+    expect(normalizeMemoryEntryChars(1)).toBe(1)
+    expect(normalizeMemoryEntryChars(1_000)).toBe(1_000)
+    expect(normalizeMemoryEntryChars(0)).toBeUndefined()
+    expect(normalizeMemoryEntryChars(1_001)).toBeUndefined()
+    expect(normalizeMemoryEntryChars(1.5)).toBeUndefined()
+    expect(normalizeMemoryEntryChars('280')).toBeUndefined()
+  })
+
+  it('rejects stale config responses after a newer request, context switch, HMR, or unmount', () => {
+    const oldTransport = {}
+    const currentTransport = {}
+    const base = {
+      mounted: true,
+      requestId: 2,
+      latestRequestId: 2,
+      requestContextKey: '["workspace","C:\\\\repo",""]',
+      currentContextKey: '["workspace","C:\\\\repo",""]',
+      requestTransport: currentTransport,
+      currentTransport,
+    }
+    expect(isCurrentMemoryConfigResponse(base)).toBe(true)
+    expect(isCurrentMemoryConfigResponse({ ...base, latestRequestId: 3 })).toBe(false)
+    expect(isCurrentMemoryConfigResponse({ ...base, currentContextKey: '["global","",""]' })).toBe(false)
+    expect(isCurrentMemoryConfigResponse({ ...base, requestTransport: oldTransport })).toBe(false)
+    expect(isCurrentMemoryConfigResponse({ ...base, mounted: false })).toBe(false)
+  })
 })
 
 describe('toMemoryFailure', () => {
@@ -452,11 +588,21 @@ describe('defensive wire readers', () => {
   })
 
   it('reads list pages strictly (one bad item voids the page)', () => {
-    const good = { items: [{ id: 1, date: '2025-01-01', text: 'a' }], total: 1, nextCursor: '1' }
+    const good = { items: [{ id: 1, date: '2025-01-01', text: 'a' }], total: 1, nextCursor: '1', revision: REVISION }
     expect(readMemoryListResult(good)).toEqual(good)
-    expect(readMemoryListResult({ items: [{ id: 1, date: '2025-01-01', text: 'a' }, { id: 'x' }], total: 2 })).toBeNull()
-    expect(readMemoryListResult({ items: [], total: -1 })).toBeNull()
-    expect(readMemoryListResult({ items: [], total: 0, nextCursor: '' })).toEqual({ items: [], total: 0 })
+    expect(readMemoryListResult({ items: [{ id: 1, date: '2025-01-01', text: 'a' }, { id: 'x' }], total: 2, revision: REVISION })).toBeNull()
+    expect(readMemoryListResult({ items: [], total: -1, revision: REVISION })).toBeNull()
+    expect(readMemoryListResult({ items: [], total: 0 })).toBeNull()
+    expect(readMemoryListResult({ items: [], total: 0, nextCursor: '', revision: REVISION }))
+      .toEqual({ items: [], total: 0, revision: REVISION })
+  })
+
+  it('reads bounded effective memory configs', () => {
+    const config = { wakeLines: 96, entryChars: 400, partChars: 20_000, partLines: 500 }
+    expect(readMemoryConfig(config)).toEqual(config)
+    expect(readMemoryConfig({ ...config, entryChars: 0 })).toBeNull()
+    expect(readMemoryConfig({ ...config, entryChars: 1_001 })).toBeNull()
+    expect(readMemoryConfig({ ...config, wakeLines: '96' })).toBeNull()
   })
 
   it('reads forget results', () => {
@@ -472,10 +618,10 @@ describe('defensive wire readers', () => {
 
 describe('createMockMemoryTransport', () => {
   const seed: GrayMemoryEntryView[] = [
-    { id: 1, date: '2025-01-01', text: 'Alpha note' },
-    { id: 2, date: '2025-01-02', text: 'beta design' },
-    { id: 3, date: '2025-01-03', text: 'ALPHA plan' },
-    { id: 4, date: '2025-01-04', text: 'gamma review' },
+    { id: 0, date: '2025-01-01', text: 'Alpha note' },
+    { id: 1, date: '2025-01-02', text: 'beta design' },
+    { id: 2, date: '2025-01-03', text: 'ALPHA plan' },
+    { id: 3, date: '2025-01-04', text: 'gamma review' },
   ]
 
   it('is wired:false and lists newest-first with totals', async () => {
@@ -484,7 +630,7 @@ describe('createMockMemoryTransport', () => {
     const result = await transport.list({})
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.value.items.map(item => item.id)).toEqual([4, 3, 2, 1])
+    expect(result.value.items.map(item => item.id)).toEqual([3, 2, 1, 0])
     expect(result.value.total).toBe(4)
     expect(result.value.nextCursor).toBeUndefined()
   })
@@ -492,30 +638,87 @@ describe('createMockMemoryTransport', () => {
   it('filters by search (case-insensitive) and scope', async () => {
     const transport = createMockMemoryTransport(seed)
     const searched = await transport.list({ search: 'alpha' })
-    expect(searched.ok && searched.value.items.map(item => item.id)).toEqual([3, 1])
+    expect(searched.ok && searched.value.items.map(item => item.id)).toEqual([2, 0])
     expect(searched.ok && searched.value.total).toBe(2)
 
     const scoped = createMockMemoryTransport([
       ...seed,
-      { id: 5, date: '2025-01-05', text: 'workspace only', scope: 'workspace' },
+      { id: 0, date: '2025-01-05', text: 'workspace only', scope: 'workspace' },
     ], { workspace: 'C:\\ws' })
     const ws = await scoped.list({ scope: 'workspace' })
-    expect(ws.ok && ws.value.items.map(item => item.id)).toEqual([5])
+    expect(ws.ok && ws.value.items.map(item => item.id)).toEqual([0])
     const global = await scoped.list({ scope: 'global' })
-    expect(global.ok && global.value.items.map(item => item.id)).toEqual([4, 3, 2, 1])
+    expect(global.ok && global.value.items.map(item => item.id)).toEqual([3, 2, 1, 0])
   })
 
   it('paginates by cursor and normalizes the limit', async () => {
     const transport = createMockMemoryTransport(seed)
     const page1 = await transport.list({ limit: 2 })
-    expect(page1.ok && page1.value.items.map(item => item.id)).toEqual([4, 3])
-    expect(page1.ok && page1.value.nextCursor).toBe('3')
-    const page2 = await transport.list({ limit: 2, cursor: 3 })
-    expect(page2.ok && page2.value.items.map(item => item.id)).toEqual([2, 1])
+    expect(page1.ok && page1.value.items.map(item => item.id)).toEqual([3, 2])
+    expect(page1.ok && page1.value.nextCursor).toMatch(/^mock-memory-cursor-/)
+    if (!page1.ok || page1.value.nextCursor === undefined) return
+    const page2 = await transport.list({ limit: 2, cursor: page1.value.nextCursor })
+    expect(page2.ok && page2.value.items.map(item => item.id)).toEqual([1, 0])
     expect(page2.ok && page2.value.nextCursor).toBeUndefined()
     const zero = await transport.list({ limit: 0 })
     expect(zero.ok).toBe(true)
     if (zero.ok) expect(zero.value.items).toHaveLength(seed.length) // default 20 > 4 seeds
+  })
+
+  it('rejects a cursor after the backing snapshot mutates', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const first = await transport.list({ limit: 2 })
+    if (!first.ok || first.value.nextCursor === undefined) throw new Error('expected a cursor')
+    await transport.add({ text: 'newer memory' })
+    const stale = await transport.list({ limit: 2, cursor: first.value.nextCursor })
+    expect(stale.ok).toBe(false)
+    if (stale.ok) return
+    expect(stale.error).toMatchObject({
+      code: CODES.CONFLICT,
+      details: { kind: 'memory-cursor', reason: 'stale', restartRequired: true },
+    })
+  })
+
+  it('rejects stale edit/delete revisions after a renumbering mutation', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const stale = await transport.list({})
+    if (!stale.ok) throw new Error('expected list')
+    const removed = await transport.forget({
+      blockId: '0',
+      expectedRevision: stale.value.revision,
+      confirm: true,
+    })
+    expect(removed.ok).toBe(true)
+
+    const edit = await transport.edit({
+      id: 1,
+      text: 'must not overwrite the shifted row',
+      expectedRevision: stale.value.revision,
+    })
+    expect(edit).toMatchObject({
+      ok: false,
+      error: { code: CODES.CONFLICT, details: { kind: 'memory-revision', reason: 'stale' } },
+    })
+    const forget = await transport.forget({
+      blockId: '1',
+      expectedRevision: stale.value.revision,
+      confirm: true,
+    })
+    expect(forget).toMatchObject({
+      ok: false,
+      error: { code: CODES.CONFLICT, details: { kind: 'memory-revision', reason: 'stale' } },
+    })
+  })
+
+  it('returns the effective config and preserves workspace-store details', async () => {
+    const config = { wakeLines: 120, entryChars: 640, partChars: 30_000, partLines: 600 }
+    const transport = createMockMemoryTransport(seed, { config })
+    expect(await transport.configGet?.({ scope: 'global' })).toEqual({ ok: true, value: config })
+    const workspaceResult = await transport.configGet?.({ scope: 'workspace', workspace: 'C:\\ws' })
+    expect(workspaceResult).toMatchObject({
+      ok: false,
+      error: { code: CODES.NOT_FOUND, details: { kind: 'workspace-store', workspace: 'C:\\ws' } },
+    })
   })
 
   it('rejects workspace scope without a workspace root (mirrors host)', async () => {
@@ -528,17 +731,20 @@ describe('createMockMemoryTransport', () => {
 
   it('edits in place keeping id and date; missing id → NOT_FOUND; empty text → INVALID_INPUT', async () => {
     const transport = createMockMemoryTransport(seed)
-    const edited = await transport.edit({ id: 2, text: 'beta revised' })
-    expect(edited).toEqual({ ok: true, value: { id: 2, date: '2025-01-02', text: 'beta revised' } })
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const edited = await transport.edit({ id: 1, text: 'beta revised', expectedRevision: before.value.revision })
+    expect(edited).toEqual({ ok: true, value: { id: 1, date: '2025-01-02', text: 'beta revised' } })
     const listed = await transport.list({})
-    expect(listed.ok && listed.value.items.find(item => item.id === 2)!.text).toBe('beta revised')
+    expect(listed.ok && listed.value.items.find(item => item.id === 1)!.text).toBe('beta revised')
+    if (!listed.ok) throw new Error('expected refreshed list')
 
-    const missing = await transport.edit({ id: 99, text: 'x' })
+    const missing = await transport.edit({ id: 99, text: 'x', expectedRevision: listed.value.revision })
     expect(missing.ok).toBe(false)
     if (missing.ok) return
     expect(missing.error.code).toBe(CODES.NOT_FOUND)
 
-    const empty = await transport.edit({ id: 1, text: '  ' })
+    const empty = await transport.edit({ id: 0, text: '  ', expectedRevision: listed.value.revision })
     expect(empty.ok).toBe(false)
     if (empty.ok) return
     expect(empty.error.code).toBe(CODES.INVALID_INPUT)
@@ -558,17 +764,33 @@ describe('createMockMemoryTransport', () => {
 
   it('forgets single entries and ranges; missing → NOT_FOUND; summary ids → INVALID_INPUT', async () => {
     const transport = createMockMemoryTransport(seed)
-    const single = await transport.forget({ blockId: '2', confirm: true })
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const single = await transport.forget({
+      blockId: '1',
+      expectedRevision: before.value.revision,
+      confirm: true,
+    })
     expect(single).toEqual({ ok: true, value: { mode: 'single', removed: 1 } })
     const after = await transport.list({})
-    expect(after.ok && after.value.items.map(item => item.id)).toEqual([4, 3, 1])
+    expect(after.ok && after.value.items.map(item => item.id)).toEqual([2, 1, 0])
+    if (!after.ok) throw new Error('expected refreshed list')
 
-    const range = await transport.forget({ blockId: '3,4', confirm: true })
+    const range = await transport.forget({
+      blockId: '1,2',
+      expectedRevision: after.value.revision,
+      confirm: true,
+    })
     expect(range.ok && range.value).toEqual({ mode: 'range', removed: 2 })
     const remaining = await transport.list({})
-    expect(remaining.ok && remaining.value.items.map(item => item.id)).toEqual([1])
+    expect(remaining.ok && remaining.value.items.map(item => item.id)).toEqual([0])
+    if (!remaining.ok) throw new Error('expected remaining list')
 
-    const missing = await transport.forget({ blockId: '9', confirm: true })
+    const missing = await transport.forget({
+      blockId: '9',
+      expectedRevision: remaining.value.revision,
+      confirm: true,
+    })
     expect(missing.ok).toBe(false)
     if (missing.ok) return
     expect(missing.error.code).toBe(CODES.NOT_FOUND)
@@ -582,9 +804,9 @@ describe('createMockMemoryTransport', () => {
   it('adds a new entry with the next id and today date; trims and validates', async () => {
     const transport = createMockMemoryTransport(seed)
     const added = await transport.add({ text: '  fresh note  ' })
-    expect(added).toEqual({ ok: true, value: { id: 5, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), text: 'fresh note' } })
+    expect(added).toEqual({ ok: true, value: { id: 4, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), text: 'fresh note' } })
     const listed = await transport.list({})
-    expect(listed.ok && listed.value.items[0]!.id).toBe(5)
+    expect(listed.ok && listed.value.items[0]!.id).toBe(4)
 
     const empty = await transport.add({ text: '   ' })
     expect(empty.ok).toBe(false)
@@ -601,9 +823,9 @@ describe('createMockMemoryTransport', () => {
 
     const scoped = createMockMemoryTransport(seed, { workspace: 'C:\\ws' })
     const added = await scoped.add({ scope: 'workspace', text: 'ws note' })
-    expect(added.ok && added.value.id).toBe(5)
+    expect(added.ok && added.value.id).toBe(0)
     const wsList = await scoped.list({ scope: 'workspace' })
-    expect(wsList.ok && wsList.value.items.map(item => item.id)).toEqual([5])
+    expect(wsList.ok && wsList.value.items.map(item => item.id)).toEqual([0])
   })
 
   it('honours aborted signals with CANCELLED', async () => {
@@ -624,39 +846,60 @@ describe('createRemoteMemoryTransport', () => {
   function recordInvoker(calls: Array<{ namespace: string; method: string; args: unknown }>): GrayRemoteInvoker {
     return async (namespace, method, args) => {
       calls.push({ namespace, method, args })
-      return { ok: true, value: { items: [], total: 0 } }
+      return { ok: true, value: { items: [], total: 0, revision: REVISION } }
     }
   }
 
-  it('dispatches the four endpoints with namespace/method/args', async () => {
+  it('dispatches all endpoints with namespace/method/args', async () => {
     const calls: Array<{ namespace: string; method: string; args: unknown }> = []
     const transport = createRemoteMemoryTransport(recordInvoker(calls))
     await transport.list({ scope: 'global', search: 'x' })
     await transport.add({ text: 'new note' })
-    await transport.edit({ id: 1, text: 't' })
-    await transport.forget({ blockId: '1', confirm: true })
+    await transport.edit({ id: 1, text: 't', expectedRevision: REVISION })
+    await transport.forget({ blockId: '1', expectedRevision: REVISION, confirm: true })
+    await transport.configGet?.({ scope: 'workspace', workspace: 'C:\\ws' })
     expect(calls).toEqual([
       { namespace: 'memory', method: 'list', args: { scope: 'global', search: 'x' } },
       { namespace: 'memory', method: 'note', args: { text: 'new note' } },
-      { namespace: 'memory', method: 'edit', args: { id: 1, text: 't' } },
-      { namespace: 'memory', method: 'forget', args: { blockId: '1', confirm: true } },
+      { namespace: 'memory', method: 'edit', args: { id: 1, text: 't', expectedRevision: REVISION } },
+      { namespace: 'memory', method: 'forget', args: { blockId: '1', expectedRevision: REVISION, confirm: true } },
+      { namespace: 'memory', method: 'configGet', args: { scope: 'workspace', workspace: 'C:\\ws' } },
     ])
     expect(MEMORY_ENDPOINTS).toEqual({
       list: 'memory/list',
       note: 'memory/note',
       edit: 'memory/edit',
       forget: 'memory/forget',
+      configGet: 'memory/configGet',
     })
   })
 
   it('narrows ok values and turns malformed values into INTERNAL failures', async () => {
-    const ok = createRemoteMemoryTransport(async () => ({ ok: true, value: { items: [], total: 0 } }))
-    expect(await ok.list({})).toEqual({ ok: true, value: { items: [], total: 0 } })
+    const ok = createRemoteMemoryTransport(async () => ({
+      ok: true,
+      value: { items: [], total: 0, revision: REVISION },
+    }))
+    expect(await ok.list({})).toEqual({
+      ok: true,
+      value: { items: [], total: 0, revision: REVISION },
+    })
 
     const malformed = createRemoteMemoryTransport(async () => ({ ok: true, value: { items: 'nope' } }))
     const result = await malformed.list({})
     expect(result.ok).toBe(false)
     if (result.ok) return
+    expect(result.error.code).toBe(CODES.INTERNAL)
+  })
+
+  it('defensively narrows configGet values', async () => {
+    const config = { wakeLines: 96, entryChars: 512, partChars: 20_000, partLines: 500 }
+    const ok = createRemoteMemoryTransport(async () => ({ ok: true, value: config }))
+    expect(await ok.configGet?.({ scope: 'global' })).toEqual({ ok: true, value: config })
+
+    const malformed = createRemoteMemoryTransport(async () => ({ ok: true, value: { ...config, entryChars: 0 } }))
+    const result = await malformed.configGet?.({ scope: 'global' })
+    expect(result?.ok).toBe(false)
+    if (result === undefined || result.ok) return
     expect(result.error.code).toBe(CODES.INTERNAL)
   })
 

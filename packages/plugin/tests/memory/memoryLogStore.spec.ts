@@ -17,7 +17,10 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { describe, expect, test } from 'vitest'
-import { MemoryLogStore } from '../../src/memory/domain/MemoryLogStore.ts'
+import {
+  MemoryLogStore,
+  MemoryRevisionConflictError,
+} from '../../src/memory/domain/MemoryLogStore.ts'
 import { DEFAULT_MEMORY_CONFIG, LOG_REC, TREE_REC } from '../../src/memory/domain/types.ts'
 import { pad } from '../../src/memory/domain/logFormat.ts'
 import { encodeRecordLine } from '../../src/memory/domain/memoryFormat.ts'
@@ -258,6 +261,30 @@ describe('MemoryLogStore updateEntry', () => {
       await expect(store.updateEntry(0, 'a\nb')).rejects.toThrow(/one line/)
       await expect(store.updateEntry(0, 'x'.repeat(300))).rejects.toThrow(/Too long/)
       await expect(store.updateEntry(5, 'x')).rejects.toThrow(/No memory at index 5/)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('同一存储锁内校验 snapshot revision，重编号后的旧 id 不会误改或误删', async () => {
+    const { store, dir } = makeStore()
+    try {
+      await store.logAppend([
+        { date: '2026-01-01', text: 'a' },
+        { date: '2026-01-01', text: 'b' },
+        { date: '2026-01-01', text: 'c' },
+      ])
+      const stale = await store.listEntriesSnapshot()
+      await store.deleteRange(0, 0)
+
+      await expect(store.updateEntry(1, 'wrong', 'update', stale.revision))
+        .rejects.toBeInstanceOf(MemoryRevisionConflictError)
+      await expect(store.deleteRange(1, 1, stale.revision))
+        .rejects.toBeInstanceOf(MemoryRevisionConflictError)
+
+      const current = await store.listEntriesSnapshot()
+      expect(current.revision).not.toBe(stale.revision)
+      expect(current.entries.map(entry => entry.text)).toEqual(['b', 'c'])
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

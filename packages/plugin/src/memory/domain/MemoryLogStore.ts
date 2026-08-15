@@ -18,11 +18,13 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { createHash } from 'node:crypto';
 import {
     LOG_REC, TREE_REC,
     type LogEntry, type MemoryConfig,
 } from './types.ts';
 import { AsyncLock } from './AsyncLock.ts';
+import { getProcessPathCoordinator, type ProcessPathCoordinator } from './processLock.ts';
 import {
     die, ISO_DATE_RE, OLD_LOG_REC, parse, records,
 } from './logFormat.ts';
@@ -50,9 +52,32 @@ function errnoCode(e: unknown): string | undefined {
     return undefined;
 }
 
+/**
+ * Optimistic concurrency failure for mutations issued from a stale list
+ * snapshot.  The Remote adapter maps this domain error to GRAY_CONFLICT.
+ */
+export class MemoryRevisionConflictError extends Error {
+    readonly expectedRevision: string;
+    readonly actualRevision: string;
+
+    constructor(expectedRevision: string, actualRevision: string) {
+        super('Memory list changed; refresh before editing or deleting.');
+        this.name = 'MemoryRevisionConflictError';
+        this.expectedRevision = expectedRevision;
+        this.actualRevision = actualRevision;
+    }
+}
+
+export interface MemoryEntriesSnapshot {
+    readonly entries: LogEntry[];
+    readonly revision: string;
+}
+
 export class MemoryLogStore {
     private dir: string;
-    private lock = new AsyncLock();
+    private lock: AsyncLock;
+    private coordinator: ProcessPathCoordinator;
+    private observedRevision = 0;
 
     /**
      * 配置访问器：updateEntry 需要 entryChars 做写入前校验。
@@ -80,6 +105,52 @@ export class MemoryLogStore {
     constructor(dir: string, getConfig: () => MemoryConfig) {
         this.dir = dir;
         this.getConfig = getConfig;
+        // Multiple MemoryService instances can address the same store during
+        // HMR and migration.  The lock must therefore be shared by path, not
+        // owned by this object.
+        this.coordinator = getProcessPathCoordinator('memory-store', dir);
+        this.lock = this.coordinator.lock;
+        this.observedRevision = this.coordinator.revision;
+    }
+
+    /** Invalidate local caches after a peer instance commits under the lock. */
+    private observeProcessRevision(): void {
+        if (this.observedRevision === this.coordinator.revision) return;
+        this.recordsCache = null;
+        this.summariesCache = null;
+        this.observedRevision = this.coordinator.revision;
+    }
+
+    /** Publish a successful file mutation to every store instance for this dir. */
+    private publishMutation(): void {
+        this.coordinator.revision += 1;
+        this.observedRevision = this.coordinator.revision;
+    }
+
+    /**
+     * Content-addressed revision for the exact records snapshot.  It includes
+     * null/corrupt placeholders and all persisted metadata, so an id shift,
+     * append, edit, delete, or repair invalidates stale mutation requests.
+     * Call only while holding {@link lock}.
+     */
+    private recordsRevisionLocked(recordsArr: ReadonlyArray<StoredRecord | null>): string {
+        const hash = createHash('sha256');
+        for (const record of recordsArr) {
+            hash.update(record === null ? '\n' : encodeRecordLine(record), 'utf8');
+        }
+        return `sha256:${hash.digest('base64url')}`;
+    }
+
+    /** Compare a caller's snapshot revision inside the same lock as mutation. */
+    private assertExpectedRevisionLocked(
+        recordsArr: ReadonlyArray<StoredRecord | null>,
+        expectedRevision: string | undefined,
+    ): void {
+        if (expectedRevision === undefined) return;
+        const actualRevision = this.recordsRevisionLocked(recordsArr);
+        if (actualRevision !== expectedRevision) {
+            throw new MemoryRevisionConflictError(expectedRevision, actualRevision);
+        }
     }
 
     /** 初始化存储目录结构（新格式只需目录；records.jsonl 在首次访问时创建/导入） */
@@ -367,6 +438,7 @@ export class MemoryLogStore {
         try {
             await fs.writeFile(tmpPath, content, 'utf-8');
             await renameConfigOverwrite(tmpPath, targetPath);
+            this.publishMutation();
         } catch (e: unknown) {
             try {
                 await fs.unlink(tmpPath);
@@ -385,6 +457,7 @@ export class MemoryLogStore {
      * 忽略并在本方法内截断修复（与旧 repairLog 同口径）。
      */
     private async loadRecordsLocked(): Promise<void> {
+        this.observeProcessRevision();
         const p = this.recordsPath();
         let stat: import('fs').Stats;
         try {
@@ -410,6 +483,7 @@ export class MemoryLogStore {
             start = nl + 1;
         }
         let fileSize = stat.size;
+        let mtimeMs = stat.mtimeMs;
         if (validBytes < buf.length) {
             const handle = await fs.open(p, 'r+');
             try {
@@ -418,8 +492,11 @@ export class MemoryLogStore {
                 await handle.close();
             }
             fileSize = validBytes;
+            this.publishMutation();
+            const repairedStat = await fs.stat(p);
+            mtimeMs = repairedStat.mtimeMs;
         }
-        this.recordsCache = { mtimeMs: stat.mtimeMs, fileSize, records: recordsArr };
+        this.recordsCache = { mtimeMs, fileSize, records: recordsArr };
     }
 
     /**
@@ -427,6 +504,7 @@ export class MemoryLogStore {
      * 损坏行跳过（树是缓存，缺失只触发重建）。文件不存在视为空摘要。
      */
     private async loadSummariesLocked(): Promise<void> {
+        this.observeProcessRevision();
         const p = this.summariesPath();
         let stat: import('fs').Stats;
         try {
@@ -464,6 +542,8 @@ export class MemoryLogStore {
     private async rewriteRecordsLocked(recordsArr: Array<StoredRecord | null>): Promise<void> {
         const lines = recordsArr.map(r => (r ? encodeRecordLine(r) : '\n')).join('');
         await this.writeFileAtomic(this.recordsPath(), lines);
+        const stat = await fs.stat(this.recordsPath());
+        this.recordsCache = { mtimeMs: stat.mtimeMs, fileSize: stat.size, records: recordsArr };
     }
 
     /** 全量重写 summaries.jsonl（锁内调用；按 lo 升序保证输出确定） */
@@ -473,6 +553,8 @@ export class MemoryLogStore {
             .map(encodeSummaryLine)
             .join('');
         await this.writeFileAtomic(this.summariesPath(), lines);
+        const stat = await fs.stat(this.summariesPath());
+        this.summariesCache = { ...this.summariesCache!, mtimeMs: stat.mtimeMs, fileSize: stat.size };
     }
 
     /**
@@ -529,9 +611,15 @@ export class MemoryLogStore {
                 legacyId: item.legacyId,
             }));
             await fs.appendFile(this.recordsPath(), added.map(encodeRecordLine).join(''), 'utf-8');
+            this.publishMutation();
+            const stat = await fs.stat(this.recordsPath());
             const prev = this.recordsCache!;
             // copy-on-write：快照（logScan）持有旧数组引用不受影响
-            this.recordsCache = { ...prev, records: [...prev.records, ...added] };
+            this.recordsCache = {
+                mtimeMs: stat.mtimeMs,
+                fileSize: stat.size,
+                records: [...prev.records, ...added],
+            };
             return base;
         } finally {
             release();
@@ -593,6 +681,31 @@ export class MemoryLogStore {
         }
         for (const rec of arr) {
             if (rec) yield { id: rec.id, date: rec.date, text: rec.text };
+        }
+    }
+
+    /**
+     * Return the complete visible entry list and its CAS revision from one
+     * locked snapshot.  Remote list/edit/forget use this revision to prevent
+     * a stale positional id from targeting a different record after a delete
+     * renumbers the log.
+     */
+    async listEntriesSnapshot(): Promise<MemoryEntriesSnapshot> {
+        const release = await this.lock.acquire();
+        try {
+            await this.ensureReadyLocked();
+            await this.loadRecordsLocked();
+            const recordsArr = this.recordsCache!.records;
+            const entries: LogEntry[] = [];
+            for (const record of recordsArr) {
+                if (record) entries.push({ id: record.id, date: record.date, text: record.text });
+            }
+            return {
+                entries,
+                revision: this.recordsRevisionLocked(recordsArr),
+            };
+        } finally {
+            release();
         }
     }
 
@@ -727,7 +840,12 @@ export class MemoryLogStore {
      * updateEntry: 原地覆写单条原始记忆的文本（保留 id/date/createdAt/legacyId，
      * 更新 version/updatedAt 并记录审计来源）。
      */
-    async updateEntry(id: number, text: string, source = 'update'): Promise<void> {
+    async updateEntry(
+        id: number,
+        text: string,
+        source = 'update',
+        expectedRevision?: string,
+    ): Promise<LogEntry> {
         const entryChars = this.getConfig().entryChars;
         const trimmed = text.trim();
         if (!trimmed) die('Empty. A memory is one line of text.');
@@ -741,11 +859,13 @@ export class MemoryLogStore {
 
         // 校验与读取必须放在锁内：并发 truncateLog/logAppend 改变日志长度后，
         // 基于过期 id 的写入会越界（与旧实现同口径）。
+        let updatedEntry: LogEntry | undefined;
         const release = await this.lock.acquire();
         try {
             await this.ensureReadyLocked();
             await this.loadRecordsLocked();
             const arr = this.recordsCache!.records;
+            this.assertExpectedRevisionLocked(arr, expectedRevision);
             if (id < 0 || id >= arr.length) {
                 die(`No memory at index ${id}.`);
             }
@@ -766,6 +886,7 @@ export class MemoryLogStore {
             next[id] = updated;
             await this.rewriteRecordsLocked(next);
             this.recordsCache = { ...this.recordsCache!, records: next };
+            updatedEntry = { id: updated.id, date: updated.date, text: updated.text };
         } finally {
             release();
         }
@@ -774,6 +895,7 @@ export class MemoryLogStore {
         // 必须在锁外执行：dropSummariesCovering 内部会再次 acquire 锁，
         // 而 AsyncLock 不可重入，持锁调用会形成闭环等待死锁。
         await this.dropSummariesCovering(id);
+        return updatedEntry!;
     }
 
     /**
@@ -782,7 +904,7 @@ export class MemoryLogStore {
      * （下次 recall/compress 按需重建）。「读全量 → 过滤 → 重编号 → tmp+rename
      * 原子写回」，崩溃安全。
      */
-    async deleteRange(lo: number, hi: number): Promise<{ removed: number }> {
+    async deleteRange(lo: number, hi: number, expectedRevision?: string): Promise<{ removed: number }> {
         // 输入校验：非整数/NaN 不得进入，避免 NaN 比较恒 false 导致静默全量重写
         if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
             die(`Invalid delete range: lo=${lo}, hi=${hi}.`);
@@ -792,6 +914,7 @@ export class MemoryLogStore {
             await this.ensureReadyLocked();
             await this.loadRecordsLocked();
             const arr = this.recordsCache!.records;
+            this.assertExpectedRevisionLocked(arr, expectedRevision);
             const T = arr.length;
             if (lo < 0 || lo >= T) {
                 die(`No memory at index ${lo}.`);

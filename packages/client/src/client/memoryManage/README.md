@@ -13,10 +13,11 @@ implemented in `packages/plugin/src/memory/adapters/dsh/remote.ts`):
 
 | Endpoint | Wire args | Result |
 | --- | --- | --- |
-| `memory/list` | `{ scope?, workspace?, search?, cursor?, limit? }` | `{ items: GrayMemoryEntryView[], total, nextCursor? }` — substring search (case-insensitive), id-desc order, cursor pagination |
+| `memory/list` | `{ scope?, workspace?, search?, cursor?: string, limit? }` | `{ items: GrayMemoryEntryView[], total, nextCursor?, revision }` — substring search, id-desc order, opaque cursor plus full-store CAS revision |
 | `memory/note` | `{ scope?, workspace?, text }` | created `GrayMemoryEntryView` — manual add, equivalent to the `memory_note` tool write path (single line + entryChars byte limit; write path creates a missing workspace store) |
-| `memory/edit` | `{ scope?, workspace?, id, text }` | updated `GrayMemoryEntryView` (id/date preserved) |
-| `memory/forget` | `{ scope?, workspace?, blockId, confirm }` | `{ mode: 'single'\|'range'\|'summary', removed?/gone?/firstId? }` — `confirm: true` required, else `GRAY_APPROVAL_REQUIRED` |
+| `memory/edit` | `{ scope?, workspace?, id, text, expectedRevision }` | updated `GrayMemoryEntryView` (id/date preserved) |
+| `memory/forget` | `{ scope?, workspace?, blockId, expectedRevision?, confirm }` | `{ mode: 'single'\|'range'\|'summary', removed?/gone?/firstId? }` — raw deletion returns the list revision; `confirm: true` is required |
+| `memory/configGet` | `{ scope?, workspace? }` | effective `MemoryConfig`; the panel uses its validated `entryChars` and safely falls back to the native settings snapshot |
 
 Host registration: `memory/index.ts` calls
 `ctx.grayRemote?.register(createMemoryRemoteHandlers(service))` — the
@@ -38,8 +39,13 @@ no dependency). `types.ts` carries a hand-synced STRUCTURAL contract snapshot
   state machine (`logic.ts` — idle → confirming → submitting → done | error;
   the destructive call can only leave `confirming` via `confirmForget`);
   edit shows a live original→new diff and only saves on explicit Save.
-- **List pagination**: cursor-based via the host `nextCursor` ("load more"
-  appends the next page; `total` reflects the filtered count).
+- **List pagination**: the host `nextCursor` is opaque and returned verbatim.
+  A `GRAY_CONFLICT` stale-snapshot cursor clears accumulated rows and safely
+  reloads page 1 instead of mixing revisions.
+- **Mutation CAS**: edit and raw delete return the list's opaque `revision`.
+  The host compares it under the same store lock as the mutation; stale ids
+  return `GRAY_CONFLICT` with `details.kind === 'memory-revision'`, then the
+  panel refreshes instead of touching a row moved by log renumbering.
 - **Error codes → hints**: stable `GRAY_*` codes map to locale keys
   (`mapMemoryFailure`); the UI never renders raw host error text.
 
@@ -83,12 +89,13 @@ const transport = createRemoteMemoryTransport((namespace, method, args, signal) 
 
 The panel remains a mountable export for other hosts; an unwired host renders
 it read-only (`transport` absent → replay hint; a mock transport → demo badge).
-The add box shows a UTF-8 byte counter against `entryChars` and blocks
-over-limit submissions client-side (the host enforces the same bound).
+The add box loads the effective store `entryChars` through `memory/configGet`,
+uses the native setting as a safe fallback, and blocks over-limit submissions
+client-side with `GRAY_INVALID_INPUT` (the host remains authoritative).
 
 ## Host-side status & consumption recommendation
 
-- The three memory endpoints ARE implemented and registered on the host
+- The memory endpoints ARE implemented and registered on the host
   (`memory/adapters/dsh/remote.ts` + `memory/index.ts`).
 - The missing piece is the browser→host channel: DSH rc.6 has no plugin-mountable
   Typert Remote client bridge (see `packages/plugin/src/remote/types.ts`

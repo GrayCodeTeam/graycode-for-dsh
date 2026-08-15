@@ -17,7 +17,7 @@
 
 import * as path from 'path'
 import * as fs from 'fs/promises'
-import { MemoryManager } from './domain/MemoryManager.ts'
+import { MemoryManager, recordPluginConfigSeed } from './domain/MemoryManager.ts'
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './domain/types.ts'
 import {
   WorkspaceRegistry,
@@ -53,6 +53,7 @@ export class MemoryService {
   private readonly workspaceInitPromises = new Map<string, Promise<MemoryManager | null>>()
   private readonly workspaceReadonlyInstances = new Map<string, MemoryManager>()
   private readonly workspaceReadonlyInitPromises = new Map<string, Promise<MemoryManager | null>>()
+  private pluginSeedApply: Promise<void> | null = null
 
   constructor(options: MemoryServiceOptions) {
     this.dataRoot = options.dataRoot
@@ -63,6 +64,7 @@ export class MemoryService {
       ...(options.partChars !== undefined ? { partChars: options.partChars } : {}),
       ...(options.partLines !== undefined ? { partLines: options.partLines } : {}),
     }
+    recordPluginConfigSeed(path.join(this.dataRoot, 'memory', 'config'), this.configDefaults)
   }
 
   /** <dataRoot>/memory — global memory store (also holds the shared config file). */
@@ -80,6 +82,15 @@ export class MemoryService {
     return path.join(this.memoryPath(), 'config')
   }
 
+  /** Apply this fiber's settings seed once; MemoryManager coordinates fibers. */
+  private async ensurePluginSeed(manager: MemoryManager): Promise<void> {
+    if (Object.keys(this.configDefaults).length === 0) return
+    if (!this.pluginSeedApply) {
+      this.pluginSeedApply = manager.applyPluginSeed(this.configDefaults).then(() => undefined)
+    }
+    await this.pluginSeedApply
+  }
+
   /** Global MemoryManager, lazily initialized once (single-flight). */
   getGlobal(): Promise<MemoryManager> {
     if (this.global) return Promise.resolve(this.global)
@@ -87,6 +98,7 @@ export class MemoryService {
       this.globalInit = (async () => {
         const manager = new MemoryManager(this.memoryPath(), this.configDefaults)
         await manager.init()
+        await this.ensurePluginSeed(manager)
         await manager.loadConfig()
         this.global = manager
         return manager
@@ -146,6 +158,8 @@ export class MemoryService {
       if (!createIfMissing) {
         const manager = new MemoryManager(dir, this.configDefaults, this.sharedConfigPath())
         await manager.loadConfig()
+        await this.ensurePluginSeed(manager)
+        await manager.loadConfig()
         const writeInstance = this.workspaceInstances.get(scopeKey)
         if (writeInstance) return writeInstance
         const writePending = this.workspaceInitPromises.get(scopeKey)
@@ -164,6 +178,7 @@ export class MemoryService {
       if (cachedReadonly) {
         this.workspaceReadonlyInstances.delete(scopeKey)
         await cachedReadonly.init()
+        await this.ensurePluginSeed(cachedReadonly)
         await cachedReadonly.loadConfig()
         this.workspaceInstances.set(scopeKey, cachedReadonly)
         return cachedReadonly
@@ -190,6 +205,7 @@ export class MemoryService {
       }
       const manager = new MemoryManager(dir, this.configDefaults, this.sharedConfigPath())
       await manager.init()
+      await this.ensurePluginSeed(manager)
       await manager.loadConfig()
       this.workspaceInstances.set(scopeKey, manager)
       // 写路径登记（best-effort，不抛错）：刷新/补别名/补 realpath 变体。

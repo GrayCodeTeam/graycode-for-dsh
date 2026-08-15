@@ -52,6 +52,7 @@ const napPromptSchema = {
     hi: { type: 'integer', required: true },
     prompt: { type: 'string', required: true },
     remaining: { type: 'integer', required: true },
+    scope: { type: 'string', enum: ['global', 'workspace'] },
   },
 } as const
 
@@ -102,10 +103,13 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Output has two parts: global memory and current workspace memory (isolated per workspace), marked with --- Global memory --- / --- Workspace memory ---.\n' +
       'Recent memories appear verbatim; older ones appear as compressed summaries.\n' +
       'If output is split into parts, read them in order until you see "You are awake."\n' +
-      'Parameters: part (optional, 1-based part number); snapshotT (optional, memory count at snapshot time); scope (optional, "global" or "workspace" to read a single scope instead of both).',
+      'For combined global+workspace reads, continue with the globalSnapshotT and workspaceSnapshotT values returned by the first part.\n' +
+      'Parameters: part (optional, 1-based part number); snapshotT (single-scope snapshot count); globalSnapshotT/workspaceSnapshotT (combined-scope snapshot counts); scope (optional, "global" or "workspace" to read a single scope instead of both).',
     parameters: {
       part: { type: 'integer', description: 'Part number to read (1-based). Omit to start at part 1.' },
       snapshotT: { type: 'integer', description: 'Total memory count at snapshot time. Omit to use the current count. Keeps multi-call wake reads consistent.' },
+      globalSnapshotT: { type: 'integer', description: 'Global memory count returned by part 1 of a combined-scope wake.' },
+      workspaceSnapshotT: { type: 'integer', description: 'Workspace memory count returned by part 1 of a combined-scope wake.' },
       scope: { ...scopeEnum, description: 'Memory scope to read. Omit to read both global and current workspace memory; "global" reads only global; "workspace" reads only the current workspace (requires an active workspace).' },
     },
     output: {
@@ -120,6 +124,15 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
           totalMemories: { type: 'integer', required: true },
           awake: { type: 'boolean', required: true },
           pendingCompression: napPromptSchema,
+          pendingCompressions: { type: 'array', items: napPromptSchema },
+          snapshots: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              global: { type: 'integer' },
+              workspace: { type: 'integer' },
+            },
+          },
           workspace: {
             type: 'object',
             additionalProperties: false,
@@ -141,55 +154,93 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       const readGlobal = scope !== 'workspace'
       const readWorkspace = scope !== 'global'
 
-      // Continue-reading scenario (part > 1): a scope that already returned
-      // "No part" is fully read and skipped; a stale snapshotT (the log holds
-      // fewer memories than the model passed) is retried with the scope's own
-      // current count instead of being silently dropped.
-      const wakeScope = async (mgr: MemoryManager): Promise<WakeResult | null> => {
+      // Combined pagination is synchronized by part number: page k contains
+      // page k of each scope that still has one, so totalParts is max(scope
+      // parts), not their sum. Each scope has its own snapshot count.
+      const wakeScope = async (
+        mgr: MemoryManager,
+        snapshotT: number | undefined,
+      ): Promise<WakeResult | null> => {
         try {
-          return await mgr.wake(args.part, args.snapshotT)
+          return await mgr.wake(args.part, snapshotT)
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e)
           if (args.part !== undefined && args.part > 1) {
             if (/^No part \d+:/.test(msg)) return null
-            if (/^T=\d+, but the log holds/.test(msg)) {
-              console.warn(`[memory_wake] snapshotT=${args.snapshotT} stale (${msg}); retrying part=${args.part} with the current count`)
-              try {
-                return await mgr.wake(args.part)
-              } catch (e2: unknown) {
-                const msg2 = e2 instanceof Error ? e2.message : String(e2)
-                if (/^No part \d+:/.test(msg2)) return null
-                throw e2
-              }
-            }
           }
           throw e
         }
       }
 
-      const globalResult = readGlobal ? await wakeScope(await service.getGlobal()) : null
-      let wsResult: WakeResult | null = null
-      let wsAvailable = false
-      if (readWorkspace && cwd) {
-        const wsMgr = await service.getWorkspace(cwd, false)
+      const globalMgr = readGlobal ? await service.getGlobal() : null
+      let wsMgr: MemoryManager | null = null
+      if (readWorkspace && cwd) wsMgr = await service.getWorkspace(cwd, false)
+
+      let globalSnapshotT = scope === 'global' ? args.snapshotT : args.globalSnapshotT
+      let workspaceSnapshotT = scope === 'workspace' ? args.snapshotT : args.workspaceSnapshotT
+      if (
+        scope === undefined &&
+        args.snapshotT !== undefined &&
+        args.globalSnapshotT === undefined &&
+        args.workspaceSnapshotT === undefined
+      ) {
         if (wsMgr) {
-          wsAvailable = true
-          wsResult = await wakeScope(wsMgr)
+          throw new Error(
+            'Combined memory_wake has two snapshots. Pass globalSnapshotT and workspaceSnapshotT from part 1, or set scope.',
+          )
         }
+        globalSnapshotT = args.snapshotT
       }
+      if (
+        scope === undefined &&
+        (args.part ?? 1) > 1 &&
+        globalMgr &&
+        wsMgr &&
+        (globalSnapshotT === undefined || workspaceSnapshotT === undefined)
+      ) {
+        throw new Error(
+          'Combined memory_wake continuation requires both globalSnapshotT and workspaceSnapshotT from part 1.',
+        )
+      }
+
+      const globalResult = globalMgr ? await wakeScope(globalMgr, globalSnapshotT) : null
+      let wsResult: WakeResult | null = null
+      const wsAvailable = wsMgr !== null
+      if (wsMgr) wsResult = await wakeScope(wsMgr, workspaceSnapshotT)
 
       const globalEmpty = !globalResult || globalResult.totalMemories === 0
       const wsEmpty = !wsResult || wsResult.totalMemories === 0
       const globalSkipped = globalResult === null
       const wsSkipped = wsResult === null && wsAvailable
 
-      const globalPc = globalResult?.pendingCompression
-      const wsPc = wsResult?.pendingCompression
-      const napLines: string[] = []
-      if (globalPc) napLines.push(`[Global] Compress: ${globalPc.prompt}`)
-      if (wsPc) napLines.push(`[Workspace] Compress: ${wsPc.prompt}`)
-
+      const globalTotal = globalResult?.totalMemories ?? globalSnapshotT ?? 0
+      const workspaceTotal = wsResult?.totalMemories ?? workspaceSnapshotT ?? 0
       const awake = (!globalResult || globalResult.awake) && (!wsResult || wsResult.awake)
+
+      // A shorter scope may have finished on an earlier combined page. On the
+      // final page, recover its pending compression prompt from the frozen
+      // snapshot so it is not lost merely because that scope has no page k.
+      let globalPc = globalResult?.pendingCompression
+      let wsPc = wsResult?.pendingCompression
+      if (awake && globalMgr && globalTotal > 0 && !globalPc) {
+        globalPc = await globalMgr.nextNap(globalTotal) ?? undefined
+      }
+      if (awake && wsMgr && workspaceTotal > 0 && !wsPc) {
+        wsPc = await wsMgr.nextNap(workspaceTotal) ?? undefined
+      }
+      const scopedGlobalPc = globalPc
+        ? { ...globalPc, scope: 'global' as const, prompt: `${globalPc.prompt}\nUse scope="global".` }
+        : undefined
+      const scopedWsPc = wsPc
+        ? { ...wsPc, scope: 'workspace' as const, prompt: `${wsPc.prompt}\nUse scope="workspace".` }
+        : undefined
+      const napLines: string[] = []
+      if (scopedGlobalPc) napLines.push(`[Global] Compress: ${scopedGlobalPc.prompt}`)
+      if (scopedWsPc) napLines.push(`[Workspace] Compress: ${scopedWsPc.prompt}`)
+      const pendingCompressions = [
+        ...(scopedGlobalPc ? [scopedGlobalPc] : []),
+        ...(scopedWsPc ? [scopedWsPc] : []),
+      ]
 
       const appendSection = (lines: string[], result: WakeResult, label: string): void => {
         if (result.totalParts > 1) {
@@ -227,13 +278,17 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
         }
 
         if (!awake) {
-          if (globalResult && !globalResult.awake && (!wsResult || wsResult.awake)) {
-            lines.push(`Not awake yet. Run: memory_wake part=${globalResult.part + 1} snapshotT=${globalResult.totalMemories}`)
-          } else if (wsResult && !wsResult.awake && (!globalResult || globalResult.awake)) {
-            lines.push(`Not awake yet. Run: memory_wake part=${wsResult.part + 1} snapshotT=${wsResult.totalMemories}`)
+          const nextPart = Math.max(globalResult?.part ?? 1, wsResult?.part ?? 1) + 1
+          if (scope === 'global' && globalResult) {
+            lines.push(`Not awake yet. Run: memory_wake part=${nextPart} snapshotT=${globalResult.totalMemories} scope="global"`)
+          } else if (scope === 'workspace' && wsResult) {
+            lines.push(`Not awake yet. Run: memory_wake part=${nextPart} snapshotT=${wsResult.totalMemories} scope="workspace"`)
           } else {
-            const nextPart = Math.max(globalResult?.part ?? 1, wsResult?.part ?? 1) + 1
-            lines.push(`Not awake yet. Run: memory_wake part=${nextPart}`)
+            const snapshots = [
+              globalMgr ? `globalSnapshotT=${globalTotal}` : null,
+              wsMgr ? `workspaceSnapshotT=${workspaceTotal}` : null,
+            ].filter((value): value is string => value !== null)
+            lines.push(`Not awake yet. Run: memory_wake part=${nextPart} ${snapshots.join(' ')}`.trimEnd())
           }
         } else {
           lines.push('You are awake.')
@@ -247,16 +302,20 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       return omitUndefined({
         text: lines.join('\n'),
         blocks: [...(globalResult?.blocks ?? []), ...(wsResult?.blocks ?? [])],
-        part: Math.max(globalResult?.part ?? 0, wsResult?.part ?? 0),
-        totalParts: (globalResult?.totalParts ?? 0) + (wsResult?.totalParts ?? 0),
-        totalMemories: (globalResult?.totalMemories ?? 0) + (wsResult?.totalMemories ?? 0),
+        part: args.part ?? 1,
+        totalParts: Math.max(globalResult?.totalParts ?? 0, wsResult?.totalParts ?? 0, 1),
+        totalMemories: globalTotal + workspaceTotal,
         awake,
-        pendingCompression: (() => {
-          if (napLines.length === 0) return undefined
-          const base = globalPc ?? wsPc
-          return base ? { ...base, prompt: napLines.join('\n\n') } : undefined
-        })(),
-        workspace: wsResult && cwd ? { cwd, totalMemories: wsResult.totalMemories } : undefined,
+        // Legacy singular field stays available only when it is complete.
+        // Dual-scope callers consume the lossless array instead of silently
+        // dropping one scope's identically named blockId.
+        pendingCompression: pendingCompressions.length === 1 ? pendingCompressions[0] : undefined,
+        pendingCompressions: pendingCompressions.length > 0 ? pendingCompressions : undefined,
+        snapshots: omitUndefined({
+          global: globalMgr ? globalTotal : undefined,
+          workspace: wsMgr ? workspaceTotal : undefined,
+        }),
+        workspace: wsMgr && cwd ? { cwd, totalMemories: workspaceTotal } : undefined,
       })
     },
   })

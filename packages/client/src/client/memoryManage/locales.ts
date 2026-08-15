@@ -58,6 +58,7 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'error.cancelled'
   | 'error.storageCorrupt'
   | 'error.notFound'
+  | 'error.workspaceNotInitialized'
   | 'error.endpointNotFound'
   | 'error.internal'
 
@@ -120,6 +121,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'error.cancelled': '操作已取消',
     'error.storageCorrupt': '记忆存储损坏，无法读写',
     'error.notFound': '条目不存在（可能已被删除）',
+    'error.workspaceNotInitialized': '当前工作区还没有记忆；在下方新增一条即可初始化。',
     'error.endpointNotFound': 'host 未提供记忆端点，当前为只读演示',
     'error.internal': '内部错误，请重试',
   },
@@ -166,6 +168,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'error.cancelled': 'Operation cancelled',
     'error.storageCorrupt': 'Memory storage corrupted — cannot read or write',
     'error.notFound': 'Entry not found (may have been deleted)',
+    'error.workspaceNotInitialized': 'This workspace has no memory store yet; add a memory below to initialize it.',
     'error.endpointNotFound': 'Memory endpoints unavailable on host — read-only demo',
     'error.internal': 'Internal error, please retry',
   },
@@ -220,6 +223,7 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'error.cancelled': '操作はキャンセルされました',
   'error.storageCorrupt': 'メモリストレージが破損しています',
   'error.notFound': 'エントリが見つかりません（削除された可能性があります）',
+  'error.workspaceNotInitialized': 'このワークスペースにはまだメモリがありません。下で追加すると初期化されます。',
   'error.endpointNotFound': 'ホストにメモリエンドポイントがありません。読み取り専用デモです',
   'error.internal': '内部エラーです。再試行してください',
 }

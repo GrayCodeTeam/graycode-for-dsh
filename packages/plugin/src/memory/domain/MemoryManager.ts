@@ -20,7 +20,7 @@ import {
     type ZoomResult, type NapPrompt, type MemoryConfig,
 } from './types.ts';
 import { validateRegexPattern } from '../../shared/regexGuard.ts';
-import { MemoryLogStore } from './MemoryLogStore.ts';
+import { MemoryLogStore, type MemoryEntriesSnapshot } from './MemoryLogStore.ts';
 import { computeCover } from './cover.ts';
 import { die, plural, MEMORY_CONFIG_BOUNDS, ZOOM_RAW_FALLBACK_MAX } from './logFormat.ts';
 import {
@@ -29,6 +29,54 @@ import {
     renameConfigOverwrite as renameConfigFileOverwrite,
     writeConfigAtomic as writeConfigFileAtomic,
 } from './configFile.ts';
+import { getProcessPathLock } from './processLock.ts';
+
+interface SharedConfigState {
+    lock: ReturnType<typeof getProcessPathLock>;
+    value?: MemoryConfig;
+    /** Last plugin settings seed seen in this process (not memory_config). */
+    pluginSeed?: Partial<MemoryConfig>;
+    /** Settings keys changed after the first seed and not yet persisted. */
+    pendingPluginSeed?: Partial<MemoryConfig>;
+}
+
+const SHARED_CONFIG_STATES = new Map<string, SharedConfigState>();
+
+function configStateKey(configPath: string): string {
+    const absolute = path.resolve(configPath).replace(/\\/g, '/');
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+}
+
+function sharedConfigState(configPath: string): SharedConfigState {
+    const key = configStateKey(configPath);
+    let state = SHARED_CONFIG_STATES.get(key);
+    if (!state) {
+        state = { lock: getProcessPathLock('memory-config', configPath) };
+        SHARED_CONFIG_STATES.set(key, state);
+    }
+    return state;
+}
+
+/**
+ * Record a fiber's native-settings values synchronously at construction time.
+ * This matters when settings HMR occurs before any lazy MemoryManager is opened:
+ * the later manager must still observe that the seed changed in-process.
+ */
+export function recordPluginConfigSeed(configPath: string, seed: Partial<MemoryConfig>): void {
+    if (Object.keys(seed).length === 0) return;
+    const state = sharedConfigState(configPath);
+    const previous = state.pluginSeed;
+    if (!previous) {
+        state.pluginSeed = { ...seed };
+        return;
+    }
+    const pending = { ...(state.pendingPluginSeed ?? {}) };
+    for (const key of Object.keys(seed) as Array<keyof MemoryConfig>) {
+        if (seed[key] !== previous[key]) pending[key] = seed[key];
+    }
+    state.pluginSeed = { ...previous, ...seed };
+    state.pendingPluginSeed = pending;
+}
 
 export class MemoryManager {
     private dir: string;
@@ -39,6 +87,7 @@ export class MemoryManager {
      */
     private configPath: string;
     private config: MemoryConfig;
+    private configState: SharedConfigState;
     /** LOG/TREE 底层存储（锁、记录宽度、槽位位图缓存均在其内部） */
     private store: MemoryLogStore;
 
@@ -46,7 +95,12 @@ export class MemoryManager {
         this.dir = storagePath;
         this.config = { ...DEFAULT_MEMORY_CONFIG, ...config };
         this.configPath = sharedConfigPath ?? path.join(this.dir, 'config');
-        this.store = new MemoryLogStore(this.dir, () => this.config);
+        this.configState = sharedConfigState(this.configPath);
+        this.store = new MemoryLogStore(this.dir, () => this.currentConfig());
+    }
+
+    private currentConfig(): MemoryConfig {
+        return this.configState.value ?? this.config;
     }
 
     /** 初始化存储目录结构 */
@@ -57,10 +111,19 @@ export class MemoryManager {
         // 把用户已改好的全局配置重置为默认值；只有首次初始化（文件不存在）才写默认。
         // 目标不存在时直接写：无旧内容可保护，原子 tmp+rename 无收益，且避免迁移类
         // 测试对 fs.rename 的计数把默认 config 写入误计入；updateConfig 改写才走原子写。
+        const release = await this.configState.lock.acquire();
         try {
-            await fs.access(this.configPath);
-        } catch {
-            await fs.writeFile(this.configPath, buildConfigFileContent(this.config), 'utf-8');
+            try {
+                const content = await fs.readFile(this.configPath, 'utf-8');
+                this.configState.value = parseConfigFileContent(content);
+            } catch (error: unknown) {
+                if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error;
+                await fs.mkdir(path.dirname(this.configPath), { recursive: true });
+                await fs.writeFile(this.configPath, buildConfigFileContent(this.config), 'utf-8');
+                this.configState.value = { ...this.config };
+            }
+        } finally {
+            release();
         }
     }
 
@@ -159,7 +222,7 @@ export class MemoryManager {
         const blockId = `${lo}-${hi - 1}`;
         // 修改原因：compress 的摘要预算已按树记录宽度钳制（min(entryChars, TREE_REC-1)，见 compress），
         //          提示语必须使用同一预算并按字节计，否则模型按 entryChars 生成超长摘要必然被拒。
-        const summaryLimit = Math.min(this.config.entryChars, TREE_REC - 1);
+        const summaryLimit = Math.min(this.currentConfig().entryChars, TREE_REC - 1);
         const prompt = `Compress memories #${lo}-${hi - 1} into one line of at most ${summaryLimit} bytes.\n` +
             `Keep what has lasting effect, drop what does not. Invent nothing.\n\n${body}${tail}\n` +
             `Run: memory_compress "${blockId}" "<your line>"`;
@@ -184,7 +247,8 @@ export class MemoryManager {
         let size = 0;
         for (const line of lines) {
             const n = Buffer.byteLength(line, 'utf-8') + 1;
-            if (cur.length > 0 && (cur.length >= this.config.partLines || size + n > this.config.partChars)) {
+            const cfg = this.currentConfig();
+            if (cur.length > 0 && (cur.length >= cfg.partLines || size + n > cfg.partChars)) {
                 parts.push(cur);
                 cur = [];
                 size = 0;
@@ -248,7 +312,7 @@ export class MemoryManager {
                 lines.push(`#${e.id} ${e.date} ${e.text}`);
             }
         };
-        for (const [lo, hi] of this.cover(snapshotT, this.config.wakeLines)) {
+        for (const [lo, hi] of this.cover(snapshotT, this.currentConfig().wakeLines)) {
             if (hi - lo === 1) {
                 if (runLo < 0) runLo = lo;
                 runHi = hi;
@@ -331,8 +395,9 @@ export class MemoryManager {
             die(`${trimmed.split(/\r?\n/).length} lines. A memory is one line.`);
         }
         const byteLen = Buffer.byteLength(trimmed, 'utf-8');
-        if (byteLen > this.config.entryChars) {
-            die(`Too long: ${byteLen} bytes, limit ${this.config.entryChars}.`);
+        const entryChars = this.currentConfig().entryChars;
+        if (byteLen > entryChars) {
+            die(`Too long: ${byteLen} bytes, limit ${entryChars}.`);
         }
 
         const today = new Date().toISOString().slice(0, 10);
@@ -370,7 +435,7 @@ export class MemoryManager {
             matches.push(line);
             size += Buffer.byteLength(line, 'utf-8') + 1;
             // 保持最新的匹配，丢弃最旧的
-            while (size > this.config.partChars && head < matches.length) {
+            while (size > this.currentConfig().partChars && head < matches.length) {
                 size -= Buffer.byteLength(matches[head]!, 'utf-8') + 1;
                 head++;
             }
@@ -439,7 +504,7 @@ export class MemoryManager {
                 // 摘要预算钳制为 min(entryChars, TREE_REC-1)：TREE_REC-1=287 是旧固定宽度树记录
                 // 的容量上限，新格式 summaries.jsonl 无此限制，但保留该钳制以维持工具语义不变
                 //（napPrompt 提示语与 compress 校验使用同一预算，模型不会生成必然被拒的超长摘要）。
-                const summaryLimit = Math.min(this.config.entryChars, TREE_REC - 1);
+                const summaryLimit = Math.min(this.currentConfig().entryChars, TREE_REC - 1);
                 if (byteLen > summaryLimit) {
                     die(`Too long: ${byteLen} bytes, limit ${summaryLimit}.`);
                 }
@@ -537,13 +602,14 @@ export class MemoryManager {
      * @param limit 可选：最多返回的条目数（不传则返回全部）
      */
     async listEntries(limit?: number): Promise<LogEntry[]> {
+        const snapshot = await this.listEntriesSnapshot();
+        return limit === undefined ? snapshot.entries : snapshot.entries.slice(0, limit);
+    }
+
+    /** Complete entry snapshot plus the revision used by Remote CAS writes. */
+    async listEntriesSnapshot(): Promise<MemoryEntriesSnapshot> {
         await this.ensureReady();
-        const entries: LogEntry[] = [];
-        for await (const e of this.logScan()) {
-            entries.push(e);
-            if (limit !== undefined && entries.length >= limit) break;
-        }
-        return entries;
+        return this.store.listEntriesSnapshot();
     }
 
     /** 当前原始记忆总数（O(1)，仅一次 stat；供设置页列表分页/截断展示） */
@@ -556,23 +622,23 @@ export class MemoryManager {
      * updateEntry: 原地覆写单条原始记忆的文本（保留 id/日期，更新版本与时间戳）。
      * 新文本不得超过 entryChars（默认 280，上限 1000）。
      */
-    async updateEntry(id: number, text: string): Promise<void> {
-        await this.store.updateEntry(id, text);
+    async updateEntry(id: number, text: string, expectedRevision?: string): Promise<LogEntry> {
+        return this.store.updateEntry(id, text, 'update', expectedRevision);
     }
 
     /**
      * deleteRange: 删除闭区间 [lo, hi] 内的所有原始记忆（真·单条/批量删除，不连坐 truncateLog）。
      * 实现已抽离到 MemoryLogStore（行为不变）。
      */
-    async deleteRange(lo: number, hi: number): Promise<{ removed: number }> {
-        return this.store.deleteRange(lo, hi);
+    async deleteRange(lo: number, hi: number, expectedRevision?: string): Promise<{ removed: number }> {
+        return this.store.deleteRange(lo, hi, expectedRevision);
     }
 
     /**
      * deleteEntry: 删除单条原始记忆（真·单条删除，不连坐 truncateLog）。
      */
-    async deleteEntry(id: number): Promise<{ removed: number }> {
-        return this.deleteRange(id, id);
+    async deleteEntry(id: number, expectedRevision?: string): Promise<{ removed: number }> {
+        return this.deleteRange(id, id, expectedRevision);
     }
 
     /**
@@ -595,7 +661,7 @@ export class MemoryManager {
      * 获取/设置配置。
      */
     getConfig(): MemoryConfig {
-        return { ...this.config };
+        return { ...this.currentConfig() };
     }
 
     async updateConfig(updates: Partial<MemoryConfig>): Promise<MemoryConfig> {
@@ -612,11 +678,56 @@ export class MemoryManager {
         }
         // BUG-08: 先写盘成功再提交内存——写盘失败（磁盘满/权限/rename 重试耗尽）时
         // 抛错且内存保持旧值，避免「工具报失败但进程内配置已生效」的内存/磁盘分叉。
-        const next: MemoryConfig = { ...this.config, ...validated };
-        await this.writeConfig(next);
-        this.config = next;
-        // B-2: 返回拷贝，调用方修改返回对象不能绕过校验污染内部 config
-        return { ...this.config };
+        const release = await this.configState.lock.acquire();
+        try {
+            // Always merge over the latest file while holding the shared lock:
+            // independent services updating different keys cannot clobber one
+            // another with a stale whole-file snapshot.
+            const base = await this.readConfigUnlocked();
+            const next: MemoryConfig = { ...base, ...validated };
+            await this.writeConfig(next);
+            this.configState.value = next;
+            return { ...next };
+        } finally {
+            release();
+        }
+    }
+
+    /**
+     * Reconcile native plugin settings with the persisted memory_config.
+     *
+     * The first seed observed in a process is only a baseline, so a process
+     * restart preserves explicit memory_config overrides. A later fiber with
+     * changed settings applies only the keys that changed from that baseline;
+     * this is the settings live-update signal and preserves unrelated tool
+     * updates.
+     */
+    async applyPluginSeed(seed: Partial<MemoryConfig>): Promise<MemoryConfig> {
+        const keys = Object.keys(seed) as Array<keyof MemoryConfig>;
+        if (keys.length === 0) return this.loadConfig();
+        if (!this.configState.pluginSeed) recordPluginConfigSeed(this.configPath, seed);
+        const release = await this.configState.lock.acquire();
+        try {
+            const base = await this.readConfigUnlocked();
+            const changed = { ...(this.configState.pendingPluginSeed ?? {}) };
+            if (Object.keys(changed).length === 0) {
+                this.configState.value = base;
+                return { ...base };
+            }
+            const next = { ...base, ...changed };
+            await this.writeConfig(next);
+            this.configState.value = next;
+            // A newer fiber may have changed a key while the file write was in
+            // flight. Clear only values that still equal this applied batch.
+            const pending = { ...(this.configState.pendingPluginSeed ?? {}) };
+            for (const key of Object.keys(changed) as Array<keyof MemoryConfig>) {
+                if (pending[key] === changed[key]) delete pending[key];
+            }
+            this.configState.pendingPluginSeed = pending;
+            return { ...next };
+        } finally {
+            release();
+        }
     }
 
     /** 构造 config 文件内容（注释头 + 各配置行；与 OptMem 的 memo config 格式一致） */
@@ -637,18 +748,27 @@ export class MemoryManager {
         await writeConfigFileAtomic(this.configPath, buildConfigFileContent(cfg));
     }
 
+    /** Read the latest on-disk config. Caller must hold configState.lock. */
+    private async readConfigUnlocked(): Promise<MemoryConfig> {
+        try {
+            const content = await fs.readFile(this.configPath, 'utf-8');
+            return parseConfigFileContent(content);
+        } catch {
+            return { ...(this.configState.value ?? this.config) };
+        }
+    }
+
     /**
      * 从存储目录读取已有配置。
      */
     async loadConfig(): Promise<MemoryConfig> {
-        const configPath = this.configPath;
+        const release = await this.configState.lock.acquire();
         try {
-            const content = await fs.readFile(configPath, 'utf-8');
-            const cfg = parseConfigFileContent(content);
-            this.config = cfg;
-            return cfg;
-        } catch {
-            return this.config;
+            const cfg = await this.readConfigUnlocked();
+            this.configState.value = cfg;
+            return { ...cfg };
+        } finally {
+            release();
         }
     }
 

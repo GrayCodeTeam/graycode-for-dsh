@@ -3,13 +3,16 @@
  *
  * 持久化「cwd → 稳定工作区身份」的权威映射：`<dataRoot>/workspaces/registry.json`。
  *
- * - stableId = `sha256(normalizeWorkspaceKey(cwd))` 前 16 hex，与工作区记忆目录名
- *   （memory-workspaces/<hash16>/）同算法 —— 注册表上线零目录迁移。
+ * - stableId = `sha256(scopeKey)` 前 16 hex；存在的路径先以 realpath 作为
+ *   scopeKey（消除 `..`/符号链接形态），无法解析时退回 normalize(cwd)。
+ *   与工作区记忆目录名（memory-workspaces/<hash16>/）使用同一算法。
  * - 任何域在「按 cwd 寻址」前先经 `resolve()`：cwd 命中某条记录的 aliases 或旧
  *   cwd → 解析为权威路径（返回该条记录的 cwd）；未命中 → 按现行为（直接哈希）。
  * - 写路径（`register()`）先解析再登记：新路径形态只记别名、不新建条目（不允许
  *   隐式合并两个 stableId 的记忆）；登记时 best-effort 记录 realpath 归一化变体
  *   为别名（自动统一符号链接 / `..` / 大小写规范的路径形态）。
+ * - 升级兼容：注册表尚未建立且 realpath 改变哈希时，仅当 canonical 新目录不存在、
+ *   legacy normalized-cwd 哈希目录确实存在，才回填旧 id + realpath 别名。
  * - 降级：读路径 fail-open（注册表损坏/缺失 → 按 cwd 直接哈希寻址）；写路径遇
  *   歧义（同一条路径命中多个条目的别名）fail-closed —— 不猜测、不覆盖，按现行为。
  * - 写入原子（tmp + rename，同 migration ledger 惯例）；多写串行单飞。
@@ -22,6 +25,7 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { createHash } from 'crypto'
+import { getProcessPathLock } from './domain/processLock.ts'
 
 export interface WorkspaceRegistryLogger {
   warn(message: string): void
@@ -94,7 +98,7 @@ function isDocument(value: unknown): value is WorkspaceRegistryDocument {
   if (typeof value !== 'object' || value === null) return false
   const doc = value as Partial<WorkspaceRegistryDocument>
   if (doc.version !== REGISTRY_VERSION) return false
-  if (typeof doc.entries !== 'object' || doc.entries === null) return false
+  if (typeof doc.entries !== 'object' || doc.entries === null || Array.isArray(doc.entries)) return false
   for (const entry of Object.values(doc.entries)) {
     if (typeof entry !== 'object' || entry === null) return false
     const e = entry as Partial<WorkspaceRegistryEntry>
@@ -115,13 +119,12 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
 export class WorkspaceRegistry {
   private readonly dataRoot: string
   private readonly logger: WorkspaceRegistryLogger
-  private doc: WorkspaceRegistryDocument | null = null
-  private loadPromise: Promise<WorkspaceRegistryDocument> | null = null
-  private writeChain: Promise<void> = Promise.resolve()
+  private readonly lock: ReturnType<typeof getProcessPathLock>
 
   constructor(dataRoot: string, logger: WorkspaceRegistryLogger = consoleLogger) {
     this.dataRoot = dataRoot
     this.logger = logger
+    this.lock = getProcessPathLock('workspace-registry', this.filePath())
   }
 
   /** <dataRoot>/workspaces/registry.json */
@@ -129,49 +132,50 @@ export class WorkspaceRegistry {
     return path.join(this.dataRoot, 'workspaces', REGISTRY_FILENAME)
   }
 
-  /** Lazy load with a cached document; any failure degrades to an empty doc. */
-  private async load(): Promise<WorkspaceRegistryDocument> {
-    if (this.doc) return this.doc
-    if (!this.loadPromise) {
-      this.loadPromise = (async () => {
-        try {
-          const raw = await fs.readFile(this.filePath(), 'utf-8')
-          const parsed: unknown = JSON.parse(raw)
-          if (!isDocument(parsed)) {
-            this.logger.warn(`registry is corrupt (unexpected shape); treating as empty: ${this.filePath()}`)
-            this.doc = emptyDocument()
-          } else {
-            this.doc = parsed
-          }
-        } catch (error: unknown) {
-          if (!(isNodeError(error) && error.code === 'ENOENT')) {
-            this.logger.warn(`registry unreadable (${error instanceof Error ? error.message : String(error)}); treating as empty`)
-          }
-          this.doc = emptyDocument()
-        }
-        return this.doc
-      })()
-    }
-    return this.loadPromise
+  private workspaceStorePath(stableId: string): string {
+    return path.join(this.dataRoot, 'memory-workspaces', stableId)
   }
 
-  /** 串行化写入：前一个 persist 完成后才执行下一个（单进程内原子合并）。 */
+  private async workspaceStoreExists(stableId: string): Promise<boolean> {
+    try {
+      return (await fs.stat(this.workspaceStorePath(stableId))).isDirectory()
+    } catch {
+      return false
+    }
+  }
+
+  /** Fresh load; any failure degrades to an empty doc. */
+  private async load(): Promise<WorkspaceRegistryDocument> {
+    try {
+      const raw = await fs.readFile(this.filePath(), 'utf-8')
+      const parsed: unknown = JSON.parse(raw)
+      if (!isDocument(parsed)) {
+        this.logger.warn(`registry is corrupt (unexpected shape); treating as empty: ${this.filePath()}`)
+        return emptyDocument()
+      }
+      return parsed
+    } catch (error: unknown) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        this.logger.warn(`registry unreadable (${error instanceof Error ? error.message : String(error)}); treating as empty`)
+      }
+      return emptyDocument()
+    }
+  }
+
+  /** 进程内按文件串行，并在锁内重读最新文档，避免跨实例 lost update。 */
   private async mutate(mutateDoc: (doc: WorkspaceRegistryDocument) => void): Promise<void> {
-    const previous = this.writeChain
-    this.writeChain = previous
-      .catch(() => undefined)
-      .then(async () => {
-        const doc = await this.load()
-        mutateDoc(doc)
-        try {
-          await this.persist(doc)
-          this.doc = doc
-        } catch (error: unknown) {
-          // 写失败 fail-open：内存状态保持，下次 mutate 重试整份文档。
-          this.logger.warn(`registry write failed (${error instanceof Error ? error.message : String(error)})`)
-        }
-      })
-    return this.writeChain
+    const release = await this.lock.acquire()
+    try {
+      const doc = await this.load()
+      mutateDoc(doc)
+      try {
+        await this.persist(doc)
+      } catch (error: unknown) {
+        this.logger.warn(`registry write failed (${error instanceof Error ? error.message : String(error)})`)
+      }
+    } finally {
+      release()
+    }
   }
 
   /** Atomic persist: tmp + rename (同 migration ledger 惯例)。 */
@@ -188,6 +192,11 @@ export class WorkspaceRegistry {
     return normalizeWorkspaceKey(entry.cwd)
   }
 
+  private static entryMatches(entry: WorkspaceRegistryEntry, keys: ReadonlySet<string>): boolean {
+    if (keys.has(WorkspaceRegistry.keyOfEntry(entry))) return true
+    return entry.aliases.some(alias => keys.has(normalizeWorkspaceKey(alias)))
+  }
+
   /**
    * 解析一个 cwd 的稳定身份：直接命中 → 权威键；别名/旧 cwd 命中 → 解析为
    * 权威键；未命中 → 原键（按现行为）。读路径 fail-open：任何异常均退化为
@@ -198,37 +207,86 @@ export class WorkspaceRegistry {
     if (!incomingKey) {
       return { key: '', id: '', matched: 'none', cwd }
     }
-    const incomingId = stableIdOfScopeKey(incomingKey)
-    const doc = await this.load()
-    const entry = doc.entries[incomingId]
-    if (entry && WorkspaceRegistry.keyOfEntry(entry) === incomingKey) {
-      return { key: incomingKey, id: incomingId, matched: 'direct', cwd: entry.cwd }
-    }
-    const hits: Array<{ id: string; entry: WorkspaceRegistryEntry }> = []
-    for (const [id, candidate] of Object.entries(doc.entries)) {
-      if (id === incomingId) continue
-      if (WorkspaceRegistry.keyOfEntry(candidate) === incomingKey) {
-        hits.push({ id, entry: candidate })
-        continue
+    const realpath = await this.realpathIdentity(cwd)
+    const realpathKey = realpath?.key ?? null
+    const fallbackKey = realpathKey ?? incomingKey
+    const incomingId = stableIdOfScopeKey(fallbackKey)
+    const matchKeys = new Set([incomingKey, ...(realpathKey ? [realpathKey] : [])])
+    const release = await this.lock.acquire()
+    try {
+      const doc = await this.load()
+      const entry = doc.entries[incomingId]
+      if (entry && WorkspaceRegistry.entryMatches(entry, matchKeys)) {
+        return {
+          key: WorkspaceRegistry.keyOfEntry(entry),
+          id: incomingId,
+          matched: WorkspaceRegistry.keyOfEntry(entry) === incomingKey ? 'direct' : 'alias',
+          cwd: entry.cwd,
+        }
       }
-      if (candidate.aliases.some(alias => normalizeWorkspaceKey(alias) === incomingKey)) {
-        hits.push({ id, entry: candidate })
+      const hits: Array<{ id: string; entry: WorkspaceRegistryEntry }> = []
+      for (const [id, candidate] of Object.entries(doc.entries)) {
+        if (id === incomingId) continue
+        if (WorkspaceRegistry.entryMatches(candidate, matchKeys)) {
+          hits.push({ id, entry: candidate })
+        }
       }
-    }
-    if (hits.length === 1) {
-      const hit = hits[0]!
+      if (hits.length === 1) {
+        const hit = hits[0]!
+        return {
+          key: WorkspaceRegistry.keyOfEntry(hit.entry),
+          id: hit.id,
+          matched: 'alias',
+          cwd: hit.entry.cwd,
+        }
+      }
+      if (hits.length > 1) {
+        // 歧义（同路径多个权威条目）：不猜测 —— fail-open 于读取，按现行为。
+        this.logger.warn(`registry alias ambiguity for "${incomingKey}": ${hits.length} entries match; falling back to direct addressing`)
+      }
+
+      // v0/早期版本按 raw normalized cwd 哈希。realpath-first 上线后，同一个
+      // symlink/`..` cwd 会得到 canonical 新哈希；注册表尚未存在时需找回旧目录。
+      // 仅在 canonical 目录不存在且 legacy 目录存在时回填，绝不把两个已有 store
+      // 隐式合并或猜测哪一个更权威。
+      const legacyId = stableIdOfScopeKey(incomingKey)
+      if (
+        hits.length === 0
+        && entry === undefined
+        && doc.entries[legacyId] === undefined
+        && realpathKey !== null
+        && legacyId !== incomingId
+        && !(await this.workspaceStoreExists(incomingId))
+        && await this.workspaceStoreExists(legacyId)
+      ) {
+        const timestamp = nowIso()
+        doc.entries[legacyId] = {
+          cwd,
+          aliases: [realpathKey],
+          firstSeenAt: timestamp,
+          updatedAt: timestamp,
+        }
+        try {
+          await this.persist(doc)
+        } catch (error: unknown) {
+          this.logger.warn(`legacy workspace registry backfill failed (${error instanceof Error ? error.message : String(error)})`)
+        }
+        return {
+          key: incomingKey,
+          id: legacyId,
+          matched: 'direct',
+          cwd,
+        }
+      }
       return {
-        key: WorkspaceRegistry.keyOfEntry(hit.entry),
-        id: hit.id,
-        matched: 'alias',
-        cwd: hit.entry.cwd,
+        key: fallbackKey,
+        id: stableIdOfScopeKey(fallbackKey),
+        matched: 'none',
+        cwd: realpath?.cwd ?? cwd,
       }
+    } finally {
+      release()
     }
-    if (hits.length > 1) {
-      // 歧义（同路径多个权威条目）：不猜测 —— fail-open 于读取，按现行为。
-      this.logger.warn(`registry alias ambiguity for "${incomingKey}": ${hits.length} entries match; falling back to direct addressing`)
-    }
-    return { key: incomingKey, id: incomingId, matched: 'none', cwd }
   }
 
   /**
@@ -239,8 +297,11 @@ export class WorkspaceRegistry {
   async register(cwd: string): Promise<void> {
     const incomingKey = cwdToScopeKey(cwd)
     if (!incomingKey) return
-    const incomingId = stableIdOfScopeKey(incomingKey)
-    const realpathKey = await this.realpathKey(cwd)
+    const realpath = await this.realpathIdentity(cwd)
+    const realpathKey = realpath?.key ?? null
+    const authoritativeKey = realpathKey ?? incomingKey
+    const incomingId = stableIdOfScopeKey(authoritativeKey)
+    const matchKeys = new Set([incomingKey, ...(realpathKey ? [realpathKey] : [])])
     await this.mutate((doc) => {
       const entry = doc.entries[incomingId]
       if (entry) {
@@ -253,8 +314,7 @@ export class WorkspaceRegistry {
       for (const [id, candidate] of Object.entries(doc.entries)) {
         if (id === incomingId) continue
         if (
-          WorkspaceRegistry.keyOfEntry(candidate) === incomingKey ||
-          candidate.aliases.some(alias => normalizeWorkspaceKey(alias) === incomingKey)
+          WorkspaceRegistry.entryMatches(candidate, matchKeys)
         ) {
           hits.push({ id, entry: candidate })
         }
@@ -272,8 +332,8 @@ export class WorkspaceRegistry {
         return
       }
       doc.entries[incomingId] = {
-        cwd,
-        aliases: realpathKey && realpathKey !== incomingKey ? [realpathKey] : [],
+        cwd: realpath?.cwd ?? cwd,
+        aliases: authoritativeKey !== incomingKey ? [incomingKey] : [],
         firstSeenAt: nowIso(),
         updatedAt: nowIso(),
       }
@@ -298,12 +358,17 @@ export class WorkspaceRegistry {
 
   /** 当前注册表快照（调试/管理面；读路径 fail-open）。 */
   async snapshot(): Promise<WorkspaceRegistryDocument> {
-    const doc = await this.load()
-    return {
-      version: doc.version,
-      entries: Object.fromEntries(
-        Object.entries(doc.entries).map(([id, entry]) => [id, { ...entry, aliases: [...entry.aliases] }]),
-      ),
+    const release = await this.lock.acquire()
+    try {
+      const doc = await this.load()
+      return {
+        version: doc.version,
+        entries: Object.fromEntries(
+          Object.entries(doc.entries).map(([id, entry]) => [id, { ...entry, aliases: [...entry.aliases] }]),
+        ),
+      }
+    } finally {
+      release()
     }
   }
 
@@ -311,21 +376,22 @@ export class WorkspaceRegistry {
    * realpath 归一化变体 key（best-effort）：统一符号链接 / `..` / 大小写规范
    * 的路径形态。与入参同键或解析失败 → null。
    */
-  private async realpathKey(cwd: string): Promise<string | null> {
+  private async realpathIdentity(cwd: string): Promise<{ cwd: string; key: string } | null> {
     try {
       const real = await fs.realpath(cwd)
       const realKey = cwdToScopeKey(real)
-      const incomingKey = cwdToScopeKey(cwd)
-      if (!realKey || !incomingKey || realKey === incomingKey) return null
-      return realKey
+      if (!realKey) return null
+      return { cwd: real, key: realKey }
     } catch {
       return null
     }
   }
 
   private static appendAlias(entry: WorkspaceRegistryEntry, ...aliasKeys: Array<string | null>): void {
+    const entryKey = WorkspaceRegistry.keyOfEntry(entry)
     for (const aliasKey of aliasKeys) {
       if (!aliasKey) continue
+      if (normalizeWorkspaceKey(aliasKey) === entryKey) continue
       if (entry.aliases.some(a => normalizeWorkspaceKey(a) === aliasKey)) continue
       entry.aliases.push(aliasKey)
     }

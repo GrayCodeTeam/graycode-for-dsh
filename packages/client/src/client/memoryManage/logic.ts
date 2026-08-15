@@ -37,9 +37,18 @@ import {
 export interface MemoryQueryState {
   readonly text: string
   readonly scope: GrayMemoryScope
-  readonly cursor?: number
+  readonly cursor?: string
   readonly workspace?: string
   readonly limit?: number
+}
+
+/** Stable identity for every list/action response owned by one visible view. */
+export function memoryRequestContextKey(state: Pick<MemoryQueryState, 'text' | 'scope' | 'workspace'>): string {
+  return JSON.stringify([
+    state.scope,
+    state.scope === 'workspace' ? state.workspace?.trim() ?? '' : '',
+    state.text,
+  ])
 }
 
 /**
@@ -55,23 +64,18 @@ export function normalizeMemoryLimit(
 }
 
 /**
- * Parse the host `nextCursor` string into a paging cursor.
- *
- * Returns null for anything that is not a positive safe integer. The panel
- * must not forward a malformed cursor: `buildMemoryListParams` would drop it
- * and the host would re-serve page 1, duplicating items on every "load more"
- * click. Callers stop paginating (and surface a hint) on null.
+ * Validate an opaque host-issued `nextCursor` without interpreting it.
+ * Clients must return valid tokens byte-for-byte: the host binds their
+ * snapshot hash and offset to scope/workspace/search.
  */
-export function parseMemoryNextCursor(value: string | undefined): number | null {
-  if (value === undefined) return null
-  const cursor = Number(value)
-  return Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null
+export function parseMemoryNextCursor(value: string | undefined): string | null {
+  return value !== undefined && value.trim().length > 0 ? value : null
 }
 
 /**
  * Build wire params for `memory/list` from the panel query state:
  * - search is trimmed and omitted when empty;
- * - cursor is dropped unless it is a positive safe integer;
+ * - an opaque cursor is included verbatim when non-empty;
  * - limit is normalized to the host contract;
  * - scope always travels explicitly (default 'global' is host-side).
  */
@@ -81,7 +85,7 @@ export function buildMemoryListParams(state: MemoryQueryState): GrayMemoryListPa
     scope: state.scope,
     ...(state.workspace !== undefined && state.workspace.length > 0 ? { workspace: state.workspace } : {}),
     ...(search.length > 0 ? { search } : {}),
-    ...(state.cursor !== undefined && Number.isSafeInteger(state.cursor) && state.cursor > 0
+    ...(state.cursor !== undefined && state.cursor.trim().length > 0
       ? { cursor: state.cursor }
       : {}),
     limit: normalizeMemoryLimit(state.limit),
@@ -129,6 +133,8 @@ export interface MemoryEntryViewModel {
   readonly id: number
   readonly date: string
   readonly text: string
+  /** Full-store revision captured with this row; required for mutation CAS. */
+  readonly revision: string
   /** Source marker: which scope the entry was listed under. */
   readonly scope: GrayMemoryScope
   readonly workspace?: string
@@ -140,11 +146,13 @@ export interface MemoryEntryViewModel {
 export function buildMemoryEntryView(
   entry: GrayMemoryEntryView,
   ctx: MemoryEntryViewContext,
+  revision: string,
 ): MemoryEntryViewModel {
   return {
     id: entry.id,
     date: entry.date,
     text: entry.text,
+    revision,
     scope: ctx.scope,
     ...(ctx.workspace !== undefined ? { workspace: ctx.workspace } : {}),
     highlight: ctx.query !== undefined ? findMatchRanges(entry.text, ctx.query) : [],
@@ -155,6 +163,7 @@ export function buildMemoryEntryView(
 export interface MemoryListViewModel {
   readonly items: readonly MemoryEntryViewModel[]
   readonly total: number
+  readonly revision: string
   readonly nextCursor?: string
   readonly hasMore: boolean
 }
@@ -165,8 +174,9 @@ export function buildMemoryListViewModel(
   ctx: MemoryEntryViewContext,
 ): MemoryListViewModel {
   return {
-    items: result.items.map(entry => buildMemoryEntryView(entry, ctx)),
+    items: result.items.map(entry => buildMemoryEntryView(entry, ctx, result.revision)),
     total: result.total,
+    revision: result.revision,
     ...(result.nextCursor !== undefined ? { nextCursor: result.nextCursor } : {}),
     hasMore: result.nextCursor !== undefined,
   }
@@ -184,6 +194,7 @@ export function appendMemoryListPage(
   return {
     items: [...prev.items, ...next.items],
     total: next.total,
+    revision: next.revision,
     ...(next.nextCursor !== undefined ? { nextCursor: next.nextCursor } : {}),
     hasMore: next.hasMore,
   }
@@ -338,6 +349,7 @@ export type ForgetPhase = 'idle' | 'confirming' | 'submitting' | 'done' | 'error
 /** Entry-level forget target (this surface only forgets single entries). */
 export interface ForgetTarget {
   readonly id: number
+  readonly revision: string
   readonly scope: GrayMemoryScope
   readonly workspace?: string
 }
@@ -428,6 +440,7 @@ export type MemoryErrorLocaleKey =
   | 'error.cancelled'
   | 'error.storageCorrupt'
   | 'error.notFound'
+  | 'error.workspaceNotInitialized'
   | 'error.endpointNotFound'
   | 'error.internal'
 
@@ -507,7 +520,123 @@ const UNKNOWN_ERROR_VIEW: MemoryErrorView = {
  */
 export function mapMemoryFailure(failure: GrayRemoteFailure | null | undefined): MemoryErrorView {
   if (failure === null || failure === undefined) return UNKNOWN_ERROR_VIEW
+  // The host uses the stable NOT_FOUND code for both an absent workspace
+  // store and an absent entry. Its structured details disambiguate them;
+  // never parse the human message.
+  if (isWorkspaceStoreMissingFailure(failure)) {
+    return {
+      code: failure.code,
+      localeKey: 'error.workspaceNotInitialized',
+      tone: 'info',
+      retryable: false,
+    }
+  }
   return ERROR_VIEWS[failure.code] ?? UNKNOWN_ERROR_VIEW
+}
+
+/** Exact structured discriminator for a never-initialized workspace store. */
+export function isWorkspaceStoreMissingFailure(failure: GrayRemoteFailure): boolean {
+  return failure.code === GRAY_REMOTE_ERROR_CODES.NOT_FOUND
+    && failure.details.kind === 'workspace-store'
+}
+
+/** Whether a failed load-more cursor is bound to an obsolete host snapshot. */
+export function isStaleMemoryCursorFailure(failure: GrayRemoteFailure): boolean {
+  return failure.code === GRAY_REMOTE_ERROR_CODES.CONFLICT
+    && failure.details.kind === 'memory-cursor'
+    && failure.details.reason === 'stale'
+}
+
+/** A write was based on a list snapshot invalidated by another mutation. */
+export function isStaleMemoryRevisionFailure(failure: GrayRemoteFailure): boolean {
+  return failure.code === GRAY_REMOTE_ERROR_CODES.CONFLICT
+    && failure.details.kind === 'memory-revision'
+    && failure.details.reason === 'stale'
+}
+
+/** Accept only a usable `entryChars` byte limit; malformed values fall back. */
+export function normalizeMemoryEntryChars(value: unknown): number | undefined {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 1
+    && value <= 1_000
+    ? value
+    : undefined
+}
+
+/** Stable local validation failure matching the host's over-limit response. */
+export function memoryEntryCharsExceededFailure(actualBytes: number, limit: number): GrayRemoteFailure {
+  return {
+    code: GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+    message: 'memory text exceeds entryChars',
+    details: { field: 'text', actualBytes, limit },
+  }
+}
+
+/** Pure ownership check used before an async config response may update UI. */
+export function isCurrentMemoryConfigResponse(input: {
+  readonly mounted: boolean
+  readonly requestId: number
+  readonly latestRequestId: number
+  readonly requestContextKey: string
+  readonly currentContextKey: string
+  readonly requestTransport: unknown
+  readonly currentTransport: unknown
+}): boolean {
+  return input.mounted
+    && input.requestId === input.latestRequestId
+    && input.requestContextKey === input.currentContextKey
+    && input.requestTransport === input.currentTransport
+}
+
+/**
+ * View-independent mutex for `memory/note`.
+ *
+ * Search/scope/workspace generations may invalidate how a response is
+ * rendered, but the host write itself is not cancellable. Only the holder's
+ * `finally` may release its lease; view changes must never unlock it early.
+ */
+export class MemoryAddInFlightGate {
+  private sequence = 0
+  private activeLease: number | null = null
+
+  tryAcquire(): number | null {
+    if (this.activeLease !== null) return null
+    const lease = ++this.sequence
+    this.activeLease = lease
+    return lease
+  }
+
+  release(lease: number): void {
+    if (this.activeLease === lease) this.activeLease = null
+  }
+
+  isInFlight(): boolean {
+    return this.activeLease !== null
+  }
+}
+
+export type MemoryAddRequestStart<T> =
+  | { readonly started: false }
+  | { readonly started: true; readonly completion: Promise<T> }
+
+/** Acquire once, invoke the host call once, and release only on settlement. */
+export function startMemoryAddRequest<T>(
+  gate: MemoryAddInFlightGate,
+  request: () => Promise<T>,
+): MemoryAddRequestStart<T> {
+  const lease = gate.tryAcquire()
+  if (lease === null) return { started: false }
+  return {
+    started: true,
+    completion: (async () => {
+      try {
+        return await request()
+      } finally {
+        gate.release(lease)
+      }
+    })(),
+  }
 }
 
 function isFailureLike(value: unknown): value is GrayRemoteFailure {

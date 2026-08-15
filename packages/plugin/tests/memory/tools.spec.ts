@@ -29,7 +29,14 @@ interface NoteToolResult {
 /** memory_wake 返回值（workspace 仅在工作区有记忆时出现） */
 interface WakeToolResult {
   text: string
+  blocks: Array<{ lo: number; hi: number; text: string; isRaw: boolean }>
+  part: number
+  totalParts: number
   totalMemories: number
+  awake: boolean
+  snapshots?: { global?: number; workspace?: number }
+  pendingCompression?: { blockId: string; prompt: string; scope?: 'global' | 'workspace' }
+  pendingCompressions?: Array<{ blockId: string; prompt: string; scope?: 'global' | 'workspace' }>
   workspace?: { cwd: string; totalMemories: number }
 }
 
@@ -347,6 +354,81 @@ describe('memory 工具（经 service 闭包）', () => {
       expect(hit.text).toContain('global-kept')
       expect(hit.text).toContain('--- Workspace memory (')
       expect(hit.text).toContain('workspace-added')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_wake 双作用域分页按同一 part 对齐，并用独立 snapshot 稳定续页', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-dual-pages-'))
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-dual-pages-ws-'))
+    const service = new MemoryService({ dataRoot, partLines: 1 })
+    const wake = new Map(createMemoryTools(service).map(tool => [tool.name, tool])).get('memory_wake')!
+    try {
+      const global = await service.getGlobal()
+      const workspace = await service.getWorkspace(wsDir, true)
+      await global.note('g0')
+      await global.note('g1')
+      await global.note('g2')
+      await workspace!.note('w0')
+      await workspace!.note('w1')
+
+      const first = (await wake.execute({}, fakeExec(wsDir))) as WakeToolResult
+      expect(first).toMatchObject({ part: 1, totalParts: 3, totalMemories: 5, awake: false })
+      expect(first.snapshots).toEqual({ global: 3, workspace: 2 })
+      expect(first.blocks.map(block => block.text.split(' ').at(-1))).toEqual(['g0', 'w0'])
+      expect(first.text).toContain('part=2 globalSnapshotT=3 workspaceSnapshotT=2')
+      await expect(wake.execute({ part: 2 }, fakeExec(wsDir))).rejects.toThrow(
+        'requires both globalSnapshotT and workspaceSnapshotT',
+      )
+
+      // 快照建立后继续追加；后续 part 仍只读原先 2+3 条。
+      await global.note('g-after-snapshot')
+      await workspace!.note('w-after-snapshot')
+      const second = (await wake.execute(
+        { part: 2, globalSnapshotT: 3, workspaceSnapshotT: 2 },
+        fakeExec(wsDir),
+      )) as WakeToolResult
+      expect(second).toMatchObject({ part: 2, totalParts: 3, totalMemories: 5, awake: false })
+      expect(second.blocks.map(block => block.text.split(' ').at(-1))).toEqual(['g1', 'w1'])
+      expect(second.text).toContain('part=3 globalSnapshotT=3 workspaceSnapshotT=2')
+
+      const third = (await wake.execute(
+        { part: 3, globalSnapshotT: 3, workspaceSnapshotT: 2 },
+        fakeExec(wsDir),
+      )) as WakeToolResult
+      expect(third).toMatchObject({ part: 3, totalParts: 3, totalMemories: 5, awake: true })
+      expect(third.workspace).toEqual({ cwd: wsDir, totalMemories: 2 })
+      expect(third.blocks.map(block => block.text.split(' ').at(-1))).toEqual(['g2'])
+      expect(third.text).not.toContain('after-snapshot')
+      expect(third.text).toContain('You are awake.')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_wake 双作用域压缩提示携带明确 scope，不再用一个无作用域 blockId 指代两边', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-dual-nap-'))
+    try {
+      const global = await service.getGlobal()
+      const workspace = await service.getWorkspace(wsDir, true)
+      await global.note('g0')
+      await global.note('g1')
+      await workspace!.note('w0')
+      await workspace!.note('w1')
+
+      const woke = (await tools.get('memory_wake')!.execute({}, fakeExec(wsDir))) as WakeToolResult
+      expect(woke.awake).toBe(true)
+      expect(woke.pendingCompression).toBeUndefined()
+      expect(woke.pendingCompressions).toHaveLength(2)
+      expect(woke.pendingCompressions!.map(prompt => prompt.scope)).toEqual(['global', 'workspace'])
+      expect(woke.pendingCompressions![0]!.prompt).toContain('scope="global"')
+      expect(woke.pendingCompressions![1]!.prompt).toContain('scope="workspace"')
+      expect(woke.text).toContain('scope="global"')
+      expect(woke.text).toContain('scope="workspace"')
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
       fs.rmSync(wsDir, { recursive: true, force: true })

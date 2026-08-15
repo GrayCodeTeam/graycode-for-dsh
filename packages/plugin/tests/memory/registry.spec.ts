@@ -14,6 +14,7 @@ import {
   type WorkspaceRegistryLogger,
 } from '../../src/memory/registry.ts'
 import { MemoryService } from '../../src/memory/service.ts'
+import { MemoryManager } from '../../src/memory/domain/MemoryManager.ts'
 
 function makeRegistry(): { registry: WorkspaceRegistry; dataRoot: string; warns: string[] } {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-registry-'))
@@ -137,15 +138,15 @@ describe('WorkspaceRegistry（ADR-0004 稳定 workspaceId 注册表）', () => {
       const convoluted = `${projDir}${path.sep}..${path.sep}proj`
       await registry.register(convoluted)
       const snap = await registry.snapshot()
-      const id = stableIdOfScopeKey(cwdToScopeKey(convoluted)!)
+      const realKey = cwdToScopeKey(fs.realpathSync(projDir))!
+      const id = stableIdOfScopeKey(realKey)
       const entry = snap.entries[id]!
-      // aliases 含 realpath 归一化键（== base/proj 的键）
-      const realKey = cwdToScopeKey(projDir)!
-      expect(entry.aliases).toContain(realKey)
-      // 以规范路径解析 → 别名命中，回到登记路径的权威键
+      // realpath 是权威键；未归一化的 `..` 形态只作为别名。
+      expect(entry.aliases).toContain(cwdToScopeKey(convoluted))
+      // 以规范路径解析 → 直接命中同一权威键
       const hit = await registry.resolve(projDir)
-      expect(hit.matched).toBe('alias')
-      expect(hit.key).toBe(cwdToScopeKey(convoluted)!)
+      expect(hit.matched).toBe('direct')
+      expect(hit.key).toBe(realKey)
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
       fs.rmSync(base, { recursive: true, force: true })
@@ -165,6 +166,37 @@ describe('WorkspaceRegistry（ADR-0004 稳定 workspaceId 注册表）', () => {
       const raw = JSON.parse(fs.readFileSync(registryPath(dataRoot), 'utf-8'))
       expect(Object.keys(raw.entries)).toHaveLength(1)
       expect((await registry.resolve('C:/ws/x')).matched).toBe('direct')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('entries 数组不是合法文档：拒绝后按空注册表重建', async () => {
+    const { registry, dataRoot, warns } = makeRegistry()
+    try {
+      fs.mkdirSync(path.join(dataRoot, 'workspaces'), { recursive: true })
+      fs.writeFileSync(registryPath(dataRoot), JSON.stringify({ version: 1, entries: [] }), 'utf-8')
+      expect((await registry.resolve('C:/ws/x')).matched).toBe('none')
+      expect(warns.some(w => w.includes('unexpected shape'))).toBe(true)
+      await registry.register('C:/ws/x')
+      const raw = JSON.parse(fs.readFileSync(registryPath(dataRoot), 'utf-8'))
+      expect(Array.isArray(raw.entries)).toBe(false)
+      expect(Object.keys(raw.entries)).toHaveLength(1)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('多个 Registry 实例并发登记不会覆盖彼此条目', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-concurrent-'))
+    try {
+      const a = new WorkspaceRegistry(dataRoot)
+      const b = new WorkspaceRegistry(dataRoot)
+      await Promise.all(
+        Array.from({ length: 40 }, (_, i) => (i % 2 === 0 ? a : b).register(`C:/ws/project-${i}`)),
+      )
+      const snap = await a.snapshot()
+      expect(Object.keys(snap.entries)).toHaveLength(40)
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
@@ -195,6 +227,97 @@ describe('WorkspaceRegistry（ADR-0004 稳定 workspaceId 注册表）', () => {
 })
 
 describe('WorkspaceRegistry × MemoryService 集成（工作区绑定记忆）', () => {
+  test('升级兼容：registry 缺失时找回 normalized-cwd 旧哈希目录并回填 canonical 别名', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-legacy-store-'))
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-legacy-ws-'))
+    try {
+      const workspace = path.join(base, 'project')
+      fs.mkdirSync(workspace)
+      const legacyCwd = `${workspace}${path.sep}..${path.sep}project`
+      const legacyKey = cwdToScopeKey(legacyCwd)!
+      const canonicalKey = cwdToScopeKey(fs.realpathSync(workspace))!
+      const legacyId = stableIdOfScopeKey(legacyKey)
+      const canonicalId = stableIdOfScopeKey(canonicalKey)
+      expect(legacyId).not.toBe(canonicalId)
+
+      // 模拟旧版本：只有 raw normalized-cwd 哈希目录，没有 workspace registry。
+      const legacyDir = path.join(dataRoot, 'memory-workspaces', legacyId)
+      const oldManager = new MemoryManager(legacyDir)
+      await oldManager.init()
+      await oldManager.note('legacy-memory-visible-after-upgrade')
+      expect(fs.existsSync(registryPath(dataRoot))).toBe(false)
+      expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces', canonicalId))).toBe(false)
+
+      const service = new MemoryService({ dataRoot })
+      const viaLegacyShape = await service.getWorkspace(legacyCwd, false)
+      expect(viaLegacyShape).not.toBeNull()
+      expect((await viaLegacyShape!.listEntries()).map(entry => entry.text)).toEqual([
+        'legacy-memory-visible-after-upgrade',
+      ])
+
+      const snap = await service.registry.snapshot()
+      expect(Object.keys(snap.entries)).toEqual([legacyId])
+      expect(snap.entries[legacyId]).toMatchObject({ cwd: legacyCwd })
+      expect(snap.entries[legacyId]!.aliases).toContain(canonicalKey)
+
+      // canonical 后续读取命中回填别名，且与旧形态共享同一 manager/store。
+      const viaCanonical = await service.getWorkspace(workspace, false)
+      expect(viaCanonical).toBe(viaLegacyShape)
+      expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces', canonicalId))).toBe(false)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  test('升级兼容：canonical 与 legacy 目录都存在时选择 canonical，不隐式合并', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-dual-store-'))
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-dual-ws-'))
+    try {
+      const workspace = path.join(base, 'project')
+      fs.mkdirSync(workspace)
+      const legacyCwd = `${workspace}${path.sep}..${path.sep}project`
+      const legacyId = stableIdOfScopeKey(cwdToScopeKey(legacyCwd)!)
+      const canonicalId = stableIdOfScopeKey(cwdToScopeKey(fs.realpathSync(workspace))!)
+
+      const legacyManager = new MemoryManager(path.join(dataRoot, 'memory-workspaces', legacyId))
+      await legacyManager.init()
+      await legacyManager.note('legacy-copy')
+      const canonicalManager = new MemoryManager(path.join(dataRoot, 'memory-workspaces', canonicalId))
+      await canonicalManager.init()
+      await canonicalManager.note('canonical-copy')
+
+      const service = new MemoryService({ dataRoot })
+      const manager = await service.getWorkspace(legacyCwd, false)
+      expect((await manager!.listEntries()).map(entry => entry.text)).toEqual(['canonical-copy'])
+      expect(Object.keys((await service.registry.snapshot()).entries)).toHaveLength(0)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  test('先用规范路径再用含 .. 的等价路径，不分裂 manager 或存储目录', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-canonical-first-'))
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-canonical-ws-'))
+    try {
+      const workspace = path.join(base, 'project')
+      fs.mkdirSync(workspace)
+      const alias = `${workspace}${path.sep}..${path.sep}project`
+      const service = new MemoryService({ dataRoot })
+      const canonicalManager = await service.getWorkspace(workspace, true)
+      await canonicalManager!.note('canonical-first')
+      const aliasManager = await service.getWorkspace(alias, true)
+      expect(aliasManager).toBe(canonicalManager)
+      expect((await aliasManager!.listEntries()).map(entry => entry.text)).toEqual(['canonical-first'])
+      expect(fs.readdirSync(path.join(dataRoot, 'memory-workspaces'))).toHaveLength(1)
+      expect(Object.keys((await service.registry.snapshot()).entries)).toHaveLength(1)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
   test('别名路径与权威路径共享同一工作区记忆存储（漂移找回）', async () => {
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-reg-int-'))
     try {
