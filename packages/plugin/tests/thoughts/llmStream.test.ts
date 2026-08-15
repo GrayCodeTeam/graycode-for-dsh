@@ -89,7 +89,7 @@ function makeCtx(): FakeCtx {
   return ctx
 }
 
-const injections: PresetInjection[] = [{ role: 'user', text: 'preset-entry' }]
+const injections: PresetInjection[] = [{ role: 'user', text: 'preset-entry', entryOrder: 1 }]
 
 function stateOf(overrides: Partial<ThoughtsAdapterState> = {}): ThoughtsAdapterState {
   return {

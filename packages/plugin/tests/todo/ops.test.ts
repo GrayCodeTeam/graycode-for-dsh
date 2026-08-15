@@ -58,6 +58,23 @@ describe('fromDshTodos', () => {
     expect(fromDshTodos(undefined)).toEqual([])
     expect(fromDshTodos({})).toEqual([])
   })
+
+  it('重复内容条目合成可独立寻址的不同 id（首条稳定，后续带序号后缀，3.15-M5）', () => {
+    const items = fromDshTodos([
+      { content: 'repeat', status: 'pending' },
+      { content: 'repeat', status: 'in_progress' },
+      { content: 'other', status: 'pending' },
+    ])
+    const base = synthesizeTodoId('repeat')
+    expect(items.map(t => t.id)).toEqual([base, `${base}-2`, synthesizeTodoId('other')])
+    // 跨读取稳定：同一列表再读一次，id 分配一致（模型可在同一会话内引用）
+    const again = fromDshTodos([
+      { content: 'repeat', status: 'pending' },
+      { content: 'repeat', status: 'in_progress' },
+      { content: 'other', status: 'pending' },
+    ])
+    expect(again.map(t => t.id)).toEqual([base, `${base}-2`, synthesizeTodoId('other')])
+  })
 })
 
 describe('toDshTodos', () => {

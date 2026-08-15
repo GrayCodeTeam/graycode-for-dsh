@@ -133,6 +133,26 @@ try {
     $texts.Item(1).AppendChild($template.CreateTextNode($message)) | Out-Null
   }
   $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
+  # silent / level 后端处理（3.15-M4）：best-effort，增强失败不影响主投递。
+  try {
+    $silent = [string]$env:GRAYCODE_NOTIFY_SILENT
+    if ($silent -eq 'true') {
+      $audio = $template.SelectSingleNode('//audio')
+      if ($null -eq $audio) {
+        $audio = $template.CreateElement('audio')
+        [void]$template.DocumentElement.AppendChild($audio)
+      }
+      $audio.SetAttribute('silent', 'true')
+    }
+    $level = [string]$env:GRAYCODE_NOTIFY_LEVEL
+    if ($level -eq 'error') {
+      # error 级别映射为高优先级 toast（ToastNotificationPriority::High，Windows 10
+      # 1809+；不支持时降级为普通 toast，不影响投递）
+      $toast.Priority = [Windows.UI.Notifications.ToastNotificationPriority]::High
+    }
+  } catch {
+    # 增强失败（旧系统无 Priority / 模板 XML 结构差异）→ 以默认行为投递
+  }
   $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('GrayCode')
   $notifier.Show($toast)
 } catch {
@@ -176,6 +196,8 @@ export class PowerShellToastBackend implements ToastBackend {
         env: {
           GRAYCODE_NOTIFY_TITLE: request.title,
           GRAYCODE_NOTIFY_MESSAGE: request.message ?? '',
+          GRAYCODE_NOTIFY_SILENT: request.silent ? 'true' : 'false',
+          GRAYCODE_NOTIFY_LEVEL: request.level,
         },
       })
       if (!result.ok) {

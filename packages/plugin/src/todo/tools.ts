@@ -50,7 +50,12 @@ export async function executeTodoUpdate(
   return withTodoWriteLock(sessionKey, async () => {
     const existing = fromDshTodos(port.readTodos())
     const { todos, stats } = applyOps(existing, rawOps)
-    await port.writeTodos(toDshTodos(todos))
+    // 4.15-L4：空 ops / 全无效 / 全部 not-found 时没有任何实际变更——跳过整表写回，
+    // 避免产生冗余的 todo/write 快照事件（last-write-wins 全表重写）。
+    const changed = stats.added + stats.updated + stats.cancelled + stats.removed > 0
+    if (changed) {
+      await port.writeTodos(toDshTodos(todos))
+    }
     return buildTodoUpdateResult(todos, stats)
   })
 }

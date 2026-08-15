@@ -75,16 +75,26 @@ export function synthesizeTodoId(content: string): string {
   return `t-${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
-/** 把 DSH 条目映射为内部四态模型（无 id → 内容 hash 合成） */
+/** 把 DSH 条目映射为内部四态模型（无 id → 内容 hash 合成；同内容多条带序号后缀） */
 export function fromDshTodos(raw: unknown): TodoItem[] {
   if (!Array.isArray(raw)) return []
   const out: TodoItem[] = []
+  const usedIds = new Set<string>()
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue
     const content = (item as Record<string, unknown>).content
     const status = (item as Record<string, unknown>).status
     if (typeof content !== 'string' || !isDshTodoStatus(status)) continue
-    out.push({ id: synthesizeTodoId(content), content, status })
+    // 3.15-M5：DSH 允许重复内容条目，内容 hash 会合成相同 id → 后续 id 寻址只作用于
+    // 最后一条、另一条不可寻址。重复内容按出现次序追加 `-2`/`-3`… 后缀，保证每条
+    // 可独立寻址（首条 id 仍稳定，跨读写不变）。
+    const baseId = synthesizeTodoId(content)
+    let id = baseId
+    for (let suffix = 2; usedIds.has(id); suffix += 1) {
+      id = `${baseId}-${suffix}`
+    }
+    usedIds.add(id)
+    out.push({ id, content, status })
   }
   return out
 }

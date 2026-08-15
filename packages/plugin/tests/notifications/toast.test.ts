@@ -83,6 +83,30 @@ describe('PowerShellToastBackend', () => {
     expect(captured!.env.GRAYCODE_NOTIFY_MESSAGE).toBe('')
   })
 
+  test('silent/level 透传至脚本环境变量；脚本含静音与优先级处理（3.15-M4）', async () => {
+    const captured: PowerShellRunRequest[] = []
+    const backend = new PowerShellToastBackend({
+      platform: 'win32',
+      runner: {
+        run: async (r) => {
+          captured.push(r)
+          return { ok: true, code: 0, error: null }
+        },
+      },
+    })
+    await backend.show(request({ silent: true, level: 'error' }))
+    await backend.show(request({ silent: false, level: 'info' }))
+
+    expect(captured[0]!.env.GRAYCODE_NOTIFY_SILENT).toBe('true')
+    expect(captured[0]!.env.GRAYCODE_NOTIFY_LEVEL).toBe('error')
+    expect(captured[1]!.env.GRAYCODE_NOTIFY_SILENT).toBe('false')
+    expect(captured[1]!.env.GRAYCODE_NOTIFY_LEVEL).toBe('info')
+    // 脚本包含：静音 audio 属性 + error → High 优先级映射（均为 best-effort，旧系统降级）
+    expect(captured[0]!.script).toContain('GRAYCODE_NOTIFY_SILENT')
+    expect(captured[0]!.script).toContain("$audio.SetAttribute('silent', 'true')")
+    expect(captured[0]!.script).toContain('ToastNotificationPriority')
+  })
+
   test('runner 返回 !ok → failed（reason 带 stderr）', async () => {
     const backend = new PowerShellToastBackend({
       platform: 'win32',

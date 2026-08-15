@@ -147,7 +147,7 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
       ctx as never,
       { enabled: true, sendHistoryThoughts: false },
       () => ({
-        injections: [{ role: 'user', text: 'fixed' }],
+        injections: [{ role: 'user', text: 'fixed', entryOrder: 1 }],
         blockOrders: [{ role: 'user', order: 1 }, { role: 'chat_history', order: 2 }],
       }),
     )

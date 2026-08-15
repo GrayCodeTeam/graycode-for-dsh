@@ -72,6 +72,30 @@ describe('scanTurns', () => {
     expect(turns[0]).toMatchObject({ turn: 1, startSeq: 0, closed: false })
     expect(turns[0]!.endSeq).toBeUndefined()
   })
+
+  it('attributes user messages before the first turn/start to the first turn (4.15-L6)', () => {
+    // 会话开头、轮次尚未建立时先落地的真实用户消息：必须归集到第一个轮次，
+    // 否则首轮 reroll 会误报 NO_USER_MESSAGE（消息存在但不归属任何轮次）
+    const events: BranchEventView[] = [
+      ev('user/message', 0, { source: { kind: 'user' } }),
+      ev('request/header', 1),
+      ev('turn/start', 2, { turn: 1 }),
+      ev('user/message', 3, { source: { kind: 'user' } }),
+      ev('turn/end', 4, { turn: 1 }),
+    ]
+    const turns = scanTurns(events)
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.userMessageSeqs).toEqual([0, 3])
+    expect(directUserMessageSeqOfTurn(events, 1)).toBe(0)
+  })
+
+  it('pre-turn user messages stay unassigned when no turn ever starts', () => {
+    const events: BranchEventView[] = [
+      ev('user/message', 0, { source: { kind: 'user' } }),
+      ev('request/header', 1),
+    ]
+    expect(scanTurns(events)).toEqual([])
+  })
 })
 
 describe('forkBoundaryBeforeTurn', () => {

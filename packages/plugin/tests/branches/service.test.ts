@@ -501,6 +501,9 @@ describe('BranchCoordinatorService reroll', () => {
     const candidate = env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === 'fail-send')!
     expect(candidate.kind).toBe('reroll')
     expect(env.adapter.sentMessages).toHaveLength(0)
+    // 3.15-M2：消息未送达 → 不自动激活；激活指针保持原候选（新候选仍在组内）
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
   })
 
   it('reroll auto-activates the new candidate in memory and in the sidecar (D-2)', async () => {
@@ -543,6 +546,9 @@ describe('BranchCoordinatorService reroll', () => {
     expect(result.messageSent).toBe(false)
     expect(result.orphan).toBe(false)
     expect(env.adapter.sentMessages).toHaveLength(0)
+    // 3.15-M2：无 live agent 未投递 → 不自动激活，激活指针保持原候选
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
   })
 
   it('forks through the correct events when seqs are not contiguous (boundary by seq, not index)', async () => {
@@ -597,6 +603,9 @@ describe('BranchCoordinatorService editRetry', () => {
 
     expect(result.messageSent).toBe(false)
     expect(env.adapter.sentMessages).toHaveLength(0)
+    // 3.15-M2：无 live agent 未投递 → 不自动激活，激活指针保持原候选
+    expect(result.activeSessionId).toBe(ROOT_SESSION)
+    expect(env.service.getGroup(group.id)!.activeSessionId).toBe(ROOT_SESSION)
   })
 })
 

@@ -153,12 +153,22 @@ describe('loadDay 损坏容错', () => {
     }
   })
 
-  test('过滤非数值并按窗口去重、排序', async () => {
+  test('含非数值条目的文件按坏文件处理：返回空并删除（4.15-L3，避免残留反复解析）', async () => {
     const { store, dir } = makeStore(60_000)
     try {
-      writeDayFile(dir, '2026-01-05', '{"date":"2026-01-05","samples":[200100, null, "x", 100, 100]}')
-      const samples = await store.loadDay('2026-01-05')
-      expect(samples).toEqual([100, 200100])
+      const filePath = writeDayFile(dir, '2026-01-05', '{"date":"2026-01-05","samples":[200100, null, "x", 100, 100]}')
+      expect(await store.loadDay('2026-01-05')).toEqual([])
+      expect(fs.existsSync(filePath)).toBe(false)
+    } finally {
+      cleanup(dir)
+    }
+  })
+
+  test('纯数值采样按窗口去重、排序', async () => {
+    const { store, dir } = makeStore(60_000)
+    try {
+      writeDayFile(dir, '2026-01-05', '{"date":"2026-01-05","samples":[200100, 100, 100]}')
+      expect(await store.loadDay('2026-01-05')).toEqual([100, 200100])
     } finally {
       cleanup(dir)
     }

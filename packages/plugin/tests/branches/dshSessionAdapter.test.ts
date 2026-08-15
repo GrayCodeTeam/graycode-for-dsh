@@ -90,10 +90,11 @@ describe('reroll through the real adapter', () => {
       const result = await service.reroll({ groupId: group.id, sessionId: 'root-session', turn: 2 })
       expect(result.messageSent).toBe(false)
       expect(result.orphan).toBe(false)
-      // 候选已记录且（D-2）自动激活；followup 恰好被调用一次
+      // 候选已记录，但消息未送达（3.15-M2）→ 不自动激活，激活指针保持原候选
       const current = service.getGroup(group.id)!
       expect(current.candidates.some(c => c.sessionId === result.sessionId && c.kind === 'reroll')).toBe(true)
-      expect(current.activeSessionId).toBe(result.sessionId)
+      expect(result.activeSessionId).toBe('root-session')
+      expect(current.activeSessionId).toBe('root-session')
       expect(followup).toHaveBeenCalledTimes(1)
     } finally {
       service.dispose()
@@ -142,9 +143,11 @@ describe('reroll through the real adapter', () => {
       expect(result.messageSent).toBe(false)
       expect(result.agentAttached).toBe(false)
       expect(result.orphan).toBe(false)
-      // 会话已建并记录候选，只是没有 agent 可驱动
+      // 会话已建并记录候选，只是没有 agent 可驱动；未投递（3.15-M2）→ 不自动激活
       const current = service.getGroup(group.id)!
       expect(current.candidates.some(c => c.sessionId === result.sessionId && c.kind === 'reroll')).toBe(true)
+      expect(result.activeSessionId).toBe('root-session')
+      expect(current.activeSessionId).toBe('root-session')
     } finally {
       service.dispose()
     }

@@ -66,8 +66,8 @@ describe('presetEntriesToInjections', () => {
     ]
     const out = presetEntriesToInjections(entries, false)
     expect(out).toEqual([
-      { role: 'user', text: 'U1' },
-      { role: 'assistant', text: 'A2' },
+      { role: 'user', text: 'U1', entryOrder: 1 },
+      { role: 'assistant', text: 'A2', entryOrder: 2 },
     ])
   })
 
@@ -79,7 +79,7 @@ describe('presetEntriesToInjections', () => {
       ],
       false,
     )
-    expect(out).toEqual([{ role: 'assistant', text: 'ok' }])
+    expect(out).toEqual([{ role: 'assistant', text: 'ok', entryOrder: 1 }])
   })
 
   it('fakeThought：仅 assistant + sendHistoryThoughts 开 + trim 后非空才携带', () => {
@@ -89,14 +89,14 @@ describe('presetEntriesToInjections', () => {
       entry({ id: 'a2', role: 'assistant', order: 2, content: 'A2', fakeThought: '   ' }),
     ]
     expect(presetEntriesToInjections(entries, false)).toEqual([
-      { role: 'assistant', text: 'A1' },
-      { role: 'user', text: 'U' },
-      { role: 'assistant', text: 'A2' },
+      { role: 'assistant', text: 'A1', entryOrder: 0 },
+      { role: 'user', text: 'U', entryOrder: 1 },
+      { role: 'assistant', text: 'A2', entryOrder: 2 },
     ])
     expect(presetEntriesToInjections(entries, true)).toEqual([
-      { role: 'assistant', text: 'A1', thought: 'think-1' },
-      { role: 'user', text: 'U' },
-      { role: 'assistant', text: 'A2' },
+      { role: 'assistant', text: 'A1', thought: 'think-1', entryOrder: 0 },
+      { role: 'user', text: 'U', entryOrder: 1 },
+      { role: 'assistant', text: 'A2', entryOrder: 2 },
     ])
   })
 })
@@ -131,15 +131,39 @@ describe('placementOf / placeInjections', () => {
       { role: 'assistant', order: 3 },
     ]
     expect(placeInjections(injections, blocks)).toEqual([
-      { injection: { role: 'user', text: 'U' }, placement: 'before-history' },
-      { injection: { role: 'assistant', text: 'A' }, placement: 'after-history' },
+      { injection: { role: 'user', text: 'U', entryOrder: 1 }, placement: 'before-history' },
+      { injection: { role: 'assistant', text: 'A', entryOrder: 3 }, placement: 'after-history' },
+    ])
+  })
+
+  it('disabled 条目不再让注入与块按下标配对错位（3.15-M3）', () => {
+    // chat_history marker 在 order 3；order 2 的 user 条目 disabled（不投影、但占一个
+    // user/assistant 块位）。旧实现按下标配对：A（order 4）会被错配到 order 2 的块 →
+    // 误放 before-history；新实现用注入自带 entryOrder 4 直接对照 marker → after-history。
+    const injections = presetEntriesToInjections(
+      [
+        entry({ id: 'u1', role: 'user', order: 1, content: 'U1' }),
+        entry({ id: 'd1', role: 'user', order: 2, content: 'skip me', enabled: false }),
+        entry({ id: 'a1', role: 'assistant', order: 4, content: 'A1' }),
+      ],
+      false,
+    )
+    const blocks = [
+      { role: 'user', order: 1 },
+      { role: 'user', order: 2 },
+      { role: 'chat_history', order: 3 },
+      { role: 'assistant', order: 4 },
+    ]
+    expect(placeInjections(injections, blocks)).toEqual([
+      { injection: { role: 'user', text: 'U1', entryOrder: 1 }, placement: 'before-history' },
+      { injection: { role: 'assistant', text: 'A1', entryOrder: 4 }, placement: 'after-history' },
     ])
   })
 })
 
 describe('injectionMessage', () => {
   it('user → 单 text 块 + plugin source', () => {
-    const message = injectionMessage({ role: 'user', text: 'hello' }, 'p', 'm') as Message & {
+    const message = injectionMessage({ role: 'user', text: 'hello', entryOrder: 0 }, 'p', 'm') as Message & {
       source: { kind: string; plugin: string }
     }
     expect(message.role).toBe('user')
@@ -148,7 +172,7 @@ describe('injectionMessage', () => {
   })
 
   it('assistant + thought → reasoning 块前置 + text 块；source 取请求 provider/model', () => {
-    const message = injectionMessage({ role: 'assistant', text: 'body', thought: 'think' }, 'p', 'm')
+    const message = injectionMessage({ role: 'assistant', text: 'body', thought: 'think', entryOrder: 0 }, 'p', 'm')
     expect(message.role).toBe('assistant')
     expect(message.content).toEqual([
       { type: 'reasoning', text: 'think' },
@@ -158,7 +182,7 @@ describe('injectionMessage', () => {
   })
 
   it('assistant 无 thought → 单 text 块', () => {
-    const message = injectionMessage({ role: 'assistant', text: 'body' }, 'p', 'm')
+    const message = injectionMessage({ role: 'assistant', text: 'body', entryOrder: 0 }, 'p', 'm')
     expect(message.content).toEqual([{ type: 'text', text: 'body' }])
   })
 })
@@ -174,8 +198,8 @@ describe('rewriteLoopRequest', () => {
   it('构造新 options（非同一引用）+ 新 messages：before 前插、after 插在最后 user-source user 消息之前', () => {
     const options = richLoopOptions()
     const injections: ReadonlyArray<{ injection: PresetInjection; placement: InjectionPlacement }> = [
-      { injection: { role: 'user', text: 'pre' }, placement: 'before-history' },
-      { injection: { role: 'assistant', text: 'post', thought: 't' }, placement: 'after-history' },
+      { injection: { role: 'user', text: 'pre', entryOrder: 0 }, placement: 'before-history' },
+      { injection: { role: 'assistant', text: 'post', thought: 't', entryOrder: 1 }, placement: 'after-history' },
     ]
     const result = rewriteLoopRequest(options, injections)
 
@@ -226,7 +250,7 @@ describe('rewriteLoopRequest', () => {
     const options = loopOptions()
     const originalMessages = options.messages
     rewriteLoopRequest(options, [
-      { injection: { role: 'user', text: 'x' }, placement: 'before-history' },
+      { injection: { role: 'user', text: 'x', entryOrder: 0 }, placement: 'before-history' },
     ])
     expect(options.messages).toBe(originalMessages)
     expect(options.messages).toHaveLength(2)
@@ -238,7 +262,7 @@ describe('rewriteLoopRequest', () => {
   it('scalar 字段透传（provider/model/sessionId 等保留）', () => {
     const options = loopOptions({ sessionId: 'sess-1' as never })
     const result = rewriteLoopRequest(options, [
-      { injection: { role: 'user', text: 'x' }, placement: 'after-history' },
+      { injection: { role: 'user', text: 'x', entryOrder: 0 }, placement: 'after-history' },
     ])
     expect(result.options.provider).toBe('deepseek')
     expect(result.options.model).toBe('deepseek-chat')

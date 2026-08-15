@@ -38,21 +38,30 @@ export interface TurnLocatorInfo {
 export function scanTurns(events: readonly BranchEventView[]): TurnLocatorInfo[] {
     const turns: TurnLocatorInfo[] = [];
     let current: TurnLocatorInfo | undefined;
+    // 4.15-L6：turn/start 之前的真实用户消息（会话开头、轮次尚未建立时先落地的
+    // user/message）缓冲起来，归集到随后出现的第一个轮次——否则这些消息不归属任何
+    // 轮次，首轮 reroll 会误报 NO_USER_MESSAGE（消息明明存在却找不到）。
+    const preTurnUserSeqs: number[] = [];
     for (const event of events) {
         if (event.type === 'turn/start') {
             current = {
                 turn: event.data.turn ?? -1,
                 startSeq: event.seq,
-                userMessageSeqs: [],
+                userMessageSeqs: preTurnUserSeqs.length > 0 ? [...preTurnUserSeqs] : [],
                 closed: false,
             };
+            preTurnUserSeqs.length = 0;
             turns.push(current);
         } else if (event.type === 'turn/end' && current) {
             current.endSeq = event.seq;
             current.closed = true;
-        } else if (event.type === 'user/message' && current) {
+        } else if (event.type === 'user/message') {
             if (event.data.source?.kind === 'user') {
-                current.userMessageSeqs.push(event.seq);
+                if (current) {
+                    current.userMessageSeqs.push(event.seq);
+                } else {
+                    preTurnUserSeqs.push(event.seq);
+                }
             }
         }
     }

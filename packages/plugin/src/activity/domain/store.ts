@@ -137,11 +137,19 @@ export class ActivityStore {
         // 合法 JSON 但结构不符（samples 缺失/非数组）：同样视为坏文件，走下方删除重建路径
         throw new Error('day activity file has invalid structure')
       }
-      // Array.isArray 只收窄到 any[]：显式转 unknown[] 保留元素类型，损坏项在 filter 中剔除
+      // Array.isArray 只收窄到 any[]：显式转 unknown[] 保留元素类型，逐项判定数值性
       const rawSamples: unknown[] = parsed.samples
-      samples = rawSamples
-        .filter((t): t is number => typeof t === 'number' && Number.isFinite(t))
-        .sort((a, b) => a - b)
+      // 4.15-L3：文件本应只含数值采样；混入非数值条目（手工编辑/部分写入损坏）时
+      // 整文件按坏文件处理——抛错走下方 catch 删除并返回空，避免残留文件每次统计
+      // 反复解析（旧实现只 filter 保留数值项但文件残留）。
+      const numeric: number[] = []
+      for (const t of rawSamples) {
+        if (typeof t !== 'number' || !Number.isFinite(t)) {
+          throw new Error('day activity file contains non-numeric samples')
+        }
+        numeric.push(t)
+      }
+      samples = numeric.sort((a, b) => a - b)
       // 加载时按去重窗口去重：磁盘文件可能来自并发写/手工编辑，
       // 间隔小于窗口的重复采样会高估时长，与 appendSample 的窗口语义一致
       const deduped: number[] = []
