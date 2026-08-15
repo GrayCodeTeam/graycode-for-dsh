@@ -8,6 +8,9 @@
  * - `memory/edit`：原地编辑单条原始记忆（保留 id/date；expectedRevision CAS）；
  * - `memory/forget`：forget 命令（blockId 语义与 memory_forget 工具一致；
  *   raw 删除使用 expectedRevision CAS；`confirm: true` 缺失 → GRAY_APPROVAL_REQUIRED）；
+ * - `memory/scopes`：枚举全部记忆作用域（global 恒在 + memory-workspaces/ 扫描）；
+ * - `memory/forgetBatch`：按 id 列表批量删除原始记忆（expectedRevision CAS +
+ *   confirm 门闸；返回 removed/notFound）；
  * - `memory/configGet` / `memory/configUpdate`：共享记忆配置读写（P4-07 settings 贡献）。
  *
  * 作用域语义与工具层一致：缺省 global；workspace 需要显式 workspace 路径。
@@ -317,6 +320,74 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
           throw GrayRemoteError.notFound(message, { kind: 'memory-summary', blockId })
         }
         throw mapStoreFailure(err, 'memory.forget')
+      }
+    },
+
+    'memory/scopes': async () => {
+      try {
+        return { items: await service.listScopes() }
+      } catch (err) {
+        throw mapStoreFailure(err, 'memory.scopes')
+      }
+    },
+
+    /**
+     * 批量删除原始记忆：ids 非空非负安全整数去重列表 + expectedRevision CAS +
+     * confirm 门闸。先读 listEntriesSnapshot 校验 revision 与全量 ids 存在性
+     * （不存在 → notFound 列表），再单次扫描删除（deleteEntries 按位置 id 集合
+     * 一次重编号，避免逐条 deleteEntry 的重编号错删）。
+     */
+    'memory/forgetBatch': async (args: GrayRemoteArgs) => {
+      const rawIds = args.ids
+      if (!Array.isArray(rawIds) || rawIds.length === 0) {
+        throw GrayRemoteError.invalidInput('ids must be a non-empty array of integers', { field: 'ids' })
+      }
+      if (rawIds.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id < 0)) {
+        throw GrayRemoteError.invalidInput('ids must contain only non-negative safe integers', { field: 'ids' })
+      }
+      // 去重（保留首个出现顺序）。
+      const ids = Array.from(new Set(rawIds as number[]))
+      // 确认门闸：与 forget 同语义（缺失/非布尔按未确认处理；类型错误仍报 INVALID_INPUT）。
+      const confirm = args.confirm === undefined || args.confirm === null ? false : requireBoolean(args, 'confirm')
+      if (!confirm) {
+        throw GrayRemoteError.approvalRequired('memory.forgetBatch is destructive; pass confirm: true', { ids })
+      }
+      const expectedRevision = requireString(args, 'expectedRevision')
+      const { manager } = await resolveManager(service, args, false)
+      try {
+        const snapshot = await manager.listEntriesSnapshot()
+        if (snapshot.revision !== expectedRevision) {
+          throw new MemoryRevisionConflictError(expectedRevision, snapshot.revision)
+        }
+        const present = new Set(snapshot.entries.map(entry => entry.id))
+        const toDelete = ids.filter(id => present.has(id))
+        const notFound = ids.filter(id => !present.has(id))
+        if (toDelete.length === 0) {
+          return { removed: 0, notFound }
+        }
+        try {
+          const result = await manager.deleteEntries(toDelete)
+          return { removed: result.removed, notFound }
+        } catch (err) {
+          // 快照与删除之间的并发收缩：deleteEntries 的 maxId 校验抛
+          // "No memory at index N."——吞掉，按最新快照重算仍存在的 id 再删
+          //（位置 id 语义，重算后为当前正确位置），丢失的并入 notFound。
+          const message = err instanceof Error ? err.message : String(err)
+          if (!/No memory at index/i.test(message)) {
+            throw mapStoreFailure(err, 'memory.forgetBatch')
+          }
+          const retrySnapshot = await manager.listEntriesSnapshot()
+          const stillPresent = new Set(retrySnapshot.entries.map(entry => entry.id))
+          const lost = toDelete.filter(id => !stillPresent.has(id))
+          const stillToDelete = toDelete.filter(id => stillPresent.has(id))
+          if (stillToDelete.length === 0) {
+            return { removed: 0, notFound: [...notFound, ...lost] }
+          }
+          const retry = await manager.deleteEntries(stillToDelete)
+          return { removed: retry.removed, notFound: [...notFound, ...lost] }
+        }
+      } catch (err) {
+        throw mapStoreFailure(err, 'memory.forgetBatch')
       }
     },
 

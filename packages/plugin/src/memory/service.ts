@@ -42,6 +42,20 @@ export interface MemoryServiceOptions {
 
 export type MemoryScope = 'global' | 'workspace'
 
+/** 记忆作用域清单项（memory/scopes 端点返回）。 */
+export interface MemoryScopeDescriptor {
+  /** 'global' 恒在；workspace 来自 memory-workspaces/ 子目录扫描。 */
+  scope: MemoryScope
+  /** global 恒为 'global'；workspace 为目录名（stableId）。 */
+  id: string
+  /** 展示名：global 'Global'；workspace 取 scope.json.name（缺失时兜底目录名）。 */
+  name: string
+  /** 存储目录路径（scope.json.fsPath，缺失时兜底目录绝对路径）。 */
+  path: string
+  /** workspace 记忆的原始 cwd（scope.json 可得时）。 */
+  cwd?: string
+}
+
 export class MemoryService {
   private readonly dataRoot: string
   private readonly configDefaults: Partial<MemoryConfig>
@@ -264,6 +278,54 @@ export class MemoryService {
   /** Whether a cwd resolves to a workspace scope key. */
   isResolvableCwd(cwd: string): boolean {
     return cwdToScopeKey(cwd) !== null
+  }
+
+  /**
+   * 全部记忆作用域清单（memory/scopes 端点）：global 恒在；workspace 扫描
+   * <dataRoot>/memory-workspaces/ 下每个子目录（目录名 = stableId，目录内
+   * scope.json 元数据 { fsPath, name, cwd }）。scope.json 缺失/损坏时容错
+   * （兜底 name=目录名、path=目录绝对路径），不抛错——管理面板仍应能浏览/删除
+   * 该工作区记忆。顺序：global 在前，workspace 按目录名排序。
+   */
+  async listScopes(): Promise<MemoryScopeDescriptor[]> {
+    const items: MemoryScopeDescriptor[] = [
+      { scope: 'global', id: 'global', name: 'Global', path: this.memoryPath() },
+    ]
+    let dirs: string[]
+    try {
+      const entries = await fs.readdir(this.workspaceBaseDir(), { withFileTypes: true })
+      dirs = entries
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name)
+        .sort()
+    } catch (error: unknown) {
+      // memory-workspaces/ 尚不存在 → 只有 global（不抛错）。
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return items
+      throw error
+    }
+    for (const name of dirs) {
+      const dir = path.join(this.workspaceBaseDir(), name)
+      let fsPath: string | undefined
+      let metaName: string | undefined
+      let cwd: string | undefined
+      try {
+        const raw = await fs.readFile(path.join(dir, 'scope.json'), 'utf-8')
+        const parsed = JSON.parse(raw) as Record<string, unknown>
+        if (typeof parsed.fsPath === 'string' && parsed.fsPath.length > 0) fsPath = parsed.fsPath
+        if (typeof parsed.name === 'string' && parsed.name.length > 0) metaName = parsed.name
+        if (typeof parsed.cwd === 'string' && parsed.cwd.length > 0) cwd = parsed.cwd
+      } catch {
+        // scope.json 缺失/损坏：兜底展示（不跳过、不抛错）。
+      }
+      items.push({
+        scope: 'workspace',
+        id: name,
+        name: metaName ?? name,
+        path: fsPath ?? dir,
+        ...(cwd !== undefined ? { cwd } : {}),
+      })
+    }
+    return items
   }
 
   /** Plugin-level config knobs (seeded defaults for a fresh config file). */

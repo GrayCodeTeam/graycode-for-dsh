@@ -32,9 +32,11 @@ export interface Config {
   /** Tool install scope: roots (default), all agents, or disabled (no registration). */
   agentScope: AgentScopeMode
   /**
-   * Master switch for the MEMORY prompt section (default true). `false` →
-   * the prompt domain injects an empty MEMORY value (legacy parity with
-   * contextSections.generateMemorySection: enabled === false → '').
+   * Master switch (default true). `false` → 不注入 MEMORY 提示词（prompt 域注入
+   * 空 MEMORY 值，legacy parity with contextSections.generateMemorySection:
+   * enabled === false → ''）+ 7 个记忆工具不注册（M-01：对齐原插件「关闭 =
+   * 不提供记忆工具」；工具不可见即不可用）。Remote 管理端点不受影响，仍注册
+   * （enabled=false 时管理面板仍可浏览/删除记忆）。
    */
   enabled?: boolean
   /**
@@ -64,6 +66,14 @@ export const Config: z<Config> = z.object({
  */
 export const MEMORY_PROMPT_SERVICE = 'graycode.memoryPrompt'
 
+/**
+ * M-01 工具门控（纯函数，便于装配测试）：`enabled !== false` 时注册记忆工具。
+ * enabled=false → 工具不注册（不可见即不可用）；Remote 管理端点不受此开关影响。
+ */
+export function memoryToolsEnabled(config: Pick<Config, 'enabled'>): boolean {
+  return config.enabled !== false
+}
+
 /** Cross-domain service shape consumed by the prompt domain. */
 export interface MemoryPromptService {
   /** Trimmed custom system prompt; '' means the built-in note is used. */
@@ -82,8 +92,12 @@ export function apply(ctx: Context, config: Config): void {
   })
   // Memory tools install per agent scope (roots by default); the fiber
   // unloads the registrations on dispose (service keeps no timers/handles).
+  // M-01: enabled=false → 工具不注册（对齐 agentScope=disabled 语义：工具不可见
+  // 即不可用）；Remote 管理端点保持注册（管理面板仍可浏览/删除记忆）。
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
-  registrar.register(createMemoryTools(service))
+  if (memoryToolsEnabled(config)) {
+    registrar.register(createMemoryTools(service))
+  }
   // Phase 4 host 侧 Remote 查询/命令层（memory 管理）：注册端点；grayRemote 是可选
   // 依赖——用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后自动补注册（修复
   // 组合根 LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。注销随 inject

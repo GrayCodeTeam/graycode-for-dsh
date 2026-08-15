@@ -27,6 +27,8 @@ const CONTRACT_ENDPOINTS: readonly string[] = [
   'memory/note',
   'memory/edit',
   'memory/forget',
+  'memory/forgetBatch',
+  'memory/scopes',
   'memory/configGet',
   'memory/configUpdate',
   'checkpoints/list',
