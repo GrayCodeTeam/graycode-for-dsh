@@ -7,7 +7,8 @@
     "timeBase": 1700000000000,
     "deterministic": true,
     "sizeBudgetKB": 200,
-    "fixtureIndexFile": "每类目下 fixture.json（kind: fixture-index）说明用途/构造/预期行为；F14 的 fixture.json 内含 subCases 明细。"
+    "fixtureIndexFile": "每类目下 fixture.json（kind: fixture-index）说明用途/构造/预期行为；F14 的 fixture.json 内含 subCases 明细。",
+    "consumedBy": "每个 fixture 的 consumedBy 字段记录接线测试文件（4.20-L2）。值为 null 的 fixture 为文档/回归参考：语义已由对应测试文件的内联最小样本覆盖，不作为自动化测试输入，勿误删。"
   },
   "fixtures": [
     {
@@ -16,6 +17,7 @@
       "title": "空库：空目录结构",
       "path": "F01-empty",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "模拟 ensureDirectories 产物：各存储子目录存在但为空，验证迁移器空跑初始化。",
       "expectedBehavior": "正常：迁移器空跑成功、0 条记录、不报错。",
       "specSections": [
@@ -29,6 +31,7 @@
       "title": "单会话 legacy 单文件历史",
       "path": "F02-conv-legacy",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "最简迁移路径：legacy 单文件历史 + 元数据完整导入，消息字段逐项可核对。",
       "expectedBehavior": "正常导入：历史与元数据完整迁移，消息字段可逐项断言。",
       "specSections": [
@@ -43,6 +46,7 @@
       "title": "多页 segmented 会话",
       "path": "F03-conv-segmented",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "分段索引、跨段分页：421 条消息（200+200+21），覆盖满段与尾段。",
       "expectedBehavior": "正常导入：索引一致性校验通过（Σcount===totalMessages）、跨段读取正确。",
       "specSections": [
@@ -56,6 +60,7 @@
       "title": "分支/子代理会话",
       "path": "F04-conv-branch",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "branches.json、subagents/、usage.json 随会话迁移。",
       "expectedBehavior": "正常导入：子代理 transcript 与分支图随会话迁移；usage.json 为可重建数据，可选迁移。",
       "specSections": [
@@ -71,8 +76,9 @@
       "title": "快照库",
       "path": "F05-snapshots",
       "dataRoot": "dataRoot",
-      "purpose": "快照 ID 解析（含下划线）与 snapshotBelongsToConversation 归属校验。",
-      "expectedBehavior": "正常导入归属校验通过的快照；孤儿快照跳过（不匹配既有会话）。",
+      "consumedBy": "tests/migration/snapshotSeed.test.ts",
+      "purpose": "快照 ID 解析（含下划线）与孤儿快照数据保留语义（3.20-M1：快照按 DSH session 导入，无既有会话的外键要求）。",
+      "expectedBehavior": "全部 3 个快照（含孤儿快照）导入为独立 DSH 会话（数据保留优先）；孤儿快照 header 记录确定性 parentSession 谱系 id（父会话未导入也能独立存在）。",
       "specSections": [
         "legacy-format.md §1.6"
       ]
@@ -83,6 +89,7 @@
       "title": "checkpoint v1（files 内联 manifest）",
       "path": "F06-checkpoint-v1",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "旧 manifest 读取：version:1，files 内联，无 files.json/filesRevision。",
       "expectedBehavior": "正常导入：v1 读取 + 懒加载回填 + best-effort 拆分迁移（如实现）。",
       "specSections": [
@@ -96,6 +103,7 @@
       "title": "checkpoint v2（manifest.json + files.json + filesRevision）",
       "path": "F07-checkpoint-v2",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "新 manifest、filesRevision 配对：v2 读取与 ATOMIC-PAIR 配对校验通过路径。",
       "expectedBehavior": "正常导入：v2 读取、配对校验通过。",
       "specSections": [
@@ -108,6 +116,7 @@
       "title": "checkpoint 增量链",
       "path": "F08-checkpoint-incremental",
       "dataRoot": "dataRoot",
+      "consumedBy": "tests/migration/checkpointChain.test.ts",
       "purpose": "baseCheckpointId、backupSourceCheckpointId、删除语义与链回溯。",
       "expectedBehavior": "正常导入：链回溯、缺失文件回退前置节点、删除语义、contentHash 可校验。",
       "specSections": [
@@ -121,6 +130,7 @@
       "title": "memory 新格式（LOG_REC=1024）",
       "path": "F09-memory-new",
       "dataRoot": "dataRoot",
+      "consumedBy": "tests/migration/workspaceScope.test.ts",
       "purpose": "固定宽度解析、UTF-8 多字节边界、TREE 槽位定位。",
       "expectedBehavior": "正常导入：按 1024 宽度解析全部记录；TREE 按 288 槽位读取。",
       "specSections": [
@@ -136,6 +146,7 @@
       "title": "memory 旧格式（OLD_LOG_REC=320）",
       "path": "F10-memory-old",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "320 格式探测与 320→1024 无损迁移。",
       "expectedBehavior": "正常导入：格式探测（前两条 320 切片 id=0/1 + ISO 日期）→ 320→1024 无损迁移，迁移后 id 保持连续。",
       "specSections": [
@@ -148,6 +159,7 @@
       "title": "memory 工作区作用域",
       "path": "F11-memory-workspace",
       "dataRoot": "dataRoot",
+      "consumedBy": "tests/migration/workspaceScope.test.ts + tests/migration/scopeOverrides.test.ts",
       "purpose": "hash 目录名映射、scope.json 读取、hasData 判定。",
       "expectedBehavior": "正常导入：按 hash 目录映射 scope，读取 scope.json，hasData 判定正确。",
       "specSections": [
@@ -161,6 +173,7 @@
       "title": "设置导出（旧 LimCode 格式）",
       "path": "F12-settings-limcode",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "limcodeVersion 迁移路径：无前缀键、machine 键、source 映射。",
       "expectedBehavior": "正常导入：识别 limcodeVersion 并映射键/source 后导入（无前缀键原样消费）。",
       "specSections": [
@@ -178,6 +191,7 @@
       "title": "设置导出（新 GrayCode 格式）",
       "path": "F13-settings-graycode",
       "dataRoot": "dataRoot",
+      "consumedBy": null,
       "purpose": "新格式直接导入、machine 键过滤、version 校验失败分支。",
       "expectedBehavior": "正常导入新格式；F13b 变体被拒绝（version 校验失败），不影响其他导入。",
       "specSections": [
@@ -191,6 +205,7 @@
       "title": "损坏样本集",
       "path": "F14-corrupt",
       "dataRoot": "dataRoot",
+      "consumedBy": "tests/migration/workspaceScope.test.ts + tests/migration/scopeOverrides.test.ts（F14k 子项）",
       "purpose": "验证单文件损坏不影响整体迁移：隔离损坏项而非全库失败（每个子项均含健康控制样本）。",
       "expectedBehavior": "按 subCases 表隔离：跳过/告警/拒绝，控制样本照常导入。",
       "specSections": [
@@ -275,7 +290,7 @@
           "dir": "F14k-scope-corrupt",
           "target": "memory-workspaces/<hash>/scope.json",
           "damage": "非法 JSON `{broken`",
-          "expected": "该工作区目录跳过（不视为 scope）；健康工作区照常导入"
+          "expected": "该工作区目录跳过（不视为 scope）；健康工作区照常导入；无路径/损坏同语义 unmapped（3.14-M1），apply 可用 scopeOverrides 恢复"
         },
         {
           "id": "F14l",

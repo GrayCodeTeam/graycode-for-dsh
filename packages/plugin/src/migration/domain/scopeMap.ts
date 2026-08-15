@@ -100,21 +100,11 @@ export type ResolvedScopeOverride =
   | { kind: 'workspace'; cwd: string } // 覆盖为绝对路径 → 目标工作区
 
 /**
- * 从 legacy workspaceUri（file:// 形式）派生 DSH header.cwd（绝对路径）。
- * 仅在派生结果对当前宿主是绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
- * undefined（调用方省略 cwd，避免单个坏 URI 使整个会话创建失败）。
- * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（Windows 宿主）。
+ * 解码本地 file workspace URI（纯函数，跨平台，4.20-L4 导出供测试确定性覆盖）：
+ * file:///c%3A/Users/demo/proj → c:/Users/demo/proj（Windows 盘符形态，任何宿主都可解码）。
+ * 按 URI 自身语法接受 POSIX/Windows 绝对路径；无法解码/非绝对路径 → undefined。
  */
-export function deriveWorkspaceUriCwd(uri: string | undefined): string | undefined {
-  const candidate = deriveWorkspaceUriPath(uri)
-  return candidate !== undefined && path.isAbsolute(candidate) ? candidate : undefined
-}
-
-/**
- * 解码本地 file workspace URI，并按 URI 自身语法接受 POSIX/Windows 绝对路径。
- * 报告层用它区分“异平台但有效”和“确实无法映射”的旧工作区标识。
- */
-function deriveWorkspaceUriPath(uri: string | undefined): string | undefined {
+export function decodeFileWorkspaceUri(uri: string | undefined): string | undefined {
   if (!uri || !uri.startsWith('file://')) return undefined
   let decoded: string
   try {
@@ -127,6 +117,17 @@ function deriveWorkspaceUriPath(uri: string | undefined): string | undefined {
   const drive = decoded.match(/^\/[A-Za-z]:\//)
   const candidate = drive ? decoded.slice(1) : decoded
   return isAbsoluteScopeOverridePath(candidate) ? candidate : undefined
+}
+
+/**
+ * 从 legacy workspaceUri（file:// 形式）派生 DSH header.cwd（绝对路径）。
+ * 仅在派生结果对当前宿主是绝对路径时返回（DSH 校验绝对 cwd）；无法派生返回
+ * undefined（调用方省略 cwd，避免单个坏 URI 使整个会话创建失败）。
+ * 例：file:///c%3A/Users/demo/proj → c:/Users/demo/proj（Windows 宿主）。
+ */
+export function deriveWorkspaceUriCwd(uri: string | undefined): string | undefined {
+  const candidate = decodeFileWorkspaceUri(uri)
+  return candidate !== undefined && path.isAbsolute(candidate) ? candidate : undefined
 }
 
 /**
@@ -188,7 +189,7 @@ export function buildConversationCwdIssues(objects: readonly PlannedObject[]): C
     const data = obj.data as { workspaceUri?: unknown } | undefined
     const uri = data?.workspaceUri
     if (typeof uri !== 'string' || uri.length === 0) continue
-    if (deriveWorkspaceUriPath(uri) !== undefined) continue
+    if (decodeFileWorkspaceUri(uri) !== undefined) continue
     out.push({ legacyId: obj.legacyId, workspaceUri: uri })
   }
   return out.sort((a, b) => a.legacyId.localeCompare(b.legacyId))

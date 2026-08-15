@@ -185,6 +185,116 @@ describe('渠道解析与 provider 支持', () => {
   })
 })
 
+describe('3.14-M2 / 4.14-L6 / 4.14-L8 回归', () => {
+  test('M2：非字符串敏感值（数值/布尔/null）同样脱敏，不得因类型绕过“默认不迁移”', () => {
+    const parsed = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        vscodeSettings: {
+          'graycode.llm': {
+            apiKey: 123456,
+            enabled: true,
+            headers: { token: false },
+            secretRef: null,
+            models: [{ id: 'm1', contextWindow: 8192 }],
+          },
+        },
+      }),
+      'graycode-settings.json',
+    )
+    expect(parsed.ok).toBe(true)
+    const llm = parsed.vscodeSettings['graycode.llm'] as Record<string, unknown>
+    // 数值/布尔/null 敏感键 → 占位符（不再原样透传）
+    expect(llm.apiKey).toBe(REDACTED_PLACEHOLDER)
+    expect(llm.secretRef).toBe(REDACTED_PLACEHOLDER)
+    const headers = llm.headers as Record<string, unknown>
+    expect(headers.token).toBe(REDACTED_PLACEHOLDER)
+    // 非敏感键不受影响（models 不匹配 secret 语义；数值配置原样保留）
+    expect(llm.enabled).toBe(true)
+    expect(llm.models).toEqual([{ id: 'm1', contextWindow: 8192 }])
+    expect(JSON.stringify(parsed)).not.toContain('123456')
+  })
+
+  test('M2：vscodeSettings 内 env 的非字符串敏感值同样脱敏（空字符串保留；env 值一律不迁移）', () => {
+    const parsed = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        vscodeSettings: {
+          'graycode.mcpServers': [
+            {
+              id: 'm1',
+              transport: {
+                type: 'stdio',
+                env: {
+                  TOKEN: 123456, // 数值敏感值 → 占位符
+                  SECRET: false, // 布尔敏感值 → 占位符
+                  REF: null, // null → 占位符
+                  EMPTY: '', // 空字符串保留（= 无密钥，不制造重录噪音）
+                  PORT: 8080, // 非空非字符串配置值同样脱敏（env 值一律不迁移）
+                },
+              },
+            },
+          ],
+        },
+      }),
+      'graycode-settings.json',
+    )
+    expect(parsed.ok).toBe(true)
+    const mcp = parsed.vscodeSettings['graycode.mcpServers'] as Array<Record<string, unknown>>
+    const env = (mcp[0]!.transport as Record<string, unknown>).env as Record<string, unknown>
+    expect(env.TOKEN).toBe(REDACTED_PLACEHOLDER)
+    expect(env.SECRET).toBe(REDACTED_PLACEHOLDER)
+    expect(env.REF).toBe(REDACTED_PLACEHOLDER)
+    expect(env.EMPTY).toBe('')
+    expect(env.PORT).toBe(REDACTED_PLACEHOLDER)
+    // 数值/布尔密钥明文不进入输出（不得因类型绕过「默认不迁移」承诺）
+    const json = JSON.stringify(parsed)
+    expect(json).not.toContain('123456')
+    expect(json).not.toContain('8080')
+  })
+
+  test('L6：同一渠道 apiKey+url+敏感头多次命中重录判定 → 列表去重', () => {
+    const parsed = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        channelConfigs: [
+          {
+            id: 'ch-dupe',
+            type: 'gemini',
+            apiKey: 'sk-abc',
+            url: 'https://example.invalid/v1?apiKey=sk-live-1',
+            customHeaders: { Authorization: 'Bearer sk-xyz' },
+          },
+        ],
+      }),
+      'x.json',
+    )
+    expect(parsed.credentialReentryRequired).toEqual(['ch-dupe'])
+  })
+
+  test('L8：env 只有空值/无值时不标红（envRedacted=false、不进重录清单）；有非空值才标红', () => {
+    const empty = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        mcpServers: [{ id: 'm-empty', transport: { type: 'stdio', command: 'node', env: { TOKEN: '', PORT: 8080 } } }],
+      }),
+      'x.json',
+    )
+    expect(empty.mcpServers[0]?.envRedacted).toBe(false)
+    expect(empty.credentialReentryRequired).not.toContain('mcp:m-empty')
+
+    const withSecret = parseSettingsExport(
+      JSON.stringify({
+        version: '1.0',
+        mcpServers: [{ id: 'm-sec', transport: { type: 'stdio', command: 'node', env: { TOKEN: 'sk-abc' } } }],
+      }),
+      'x.json',
+    )
+    expect(withSecret.mcpServers[0]?.envRedacted).toBe(true)
+    expect(withSecret.credentialReentryRequired).toContain('mcp:m-sec')
+  })
+})
+
 describe('B1 凭据一键迁移：collectSecrets 授权模式', () => {
   const RAW = JSON.stringify({
     version: '1.0',

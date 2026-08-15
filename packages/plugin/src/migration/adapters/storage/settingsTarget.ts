@@ -2,8 +2,10 @@
  * GrayCode - migration settings 写入侧适配
  *
  * settings 域「双轨写入」：
- * 1. 建议配置（保留，永远产出）：`<dataRoot>/migration/imports/<runId>/settings.suggested.json`
+ * 1. 建议配置（保留，永远产出）：`<dataRoot>/migration/imports/<runId>/settings/<legacyId>`
  *    —— 已脱敏摘要 + 渠道 → DSH llm-pi-ai provider profile 映射 + 凭据引用 + 直写结果；
+ *    按 legacy 文件名键控（4.14-L3：同一 run 多个 settings 导出文件各自落独立文件，
+ *    避免后者覆盖前者、台账多条目同 targetRef）；
  * 2. DSH 直写（尽力而为）：宿主挂载了 settings 服务且 `llm-pi-ai` 命名空间已注册
  *    （= @deepseek-ai/dsh-llm-pi-ai 已加载，其 apply 经 installSettingsSection 注册）时，
  *    用 `ctx.settings.mutate('llm-pi-ai', [{op:'set', path:['providers', route], value: profile}])`
@@ -70,6 +72,12 @@ export interface SettingsTargetWriterOptions {
   importsRoot: string
   /** DSH 宿主上下文（可选）：提供 ctx.settings / ctx.credentials；缺省 = 只出建议文件 */
   ctx?: DshHostContextLike
+  /**
+   * runId 段校验模式（3.14-M5）：缺省 `run_[A-Za-z0-9_-]+`（与缺省 runIdFactory 对齐）。
+   * 注入自定义 runIdFactory 时必须传入与其产物匹配的模式，否则 probe 会把合法
+   * targetRef 误判为不可达（settings 校验误报）。
+   */
+  runIdPattern?: RegExp
 }
 
 /** DSH 直写结果（写入建议文件 + notes） */
@@ -94,6 +102,10 @@ export interface DshWriteOutcome {
 
 export function createSettingsTargetWriter(options: SettingsTargetWriterOptions): TargetWriterPort {
   const { importsRoot, ctx } = options
+  // 3.14-M5：probe 的 runId 段可配置（非捕获组包裹，避免调用方模式内的捕获组
+  // 影响路径段捕获）；文件段收窄到安全字符（无 '/'、无 '..' 穿越）。
+  const runIdSource = options.runIdPattern?.source ?? 'run_[A-Za-z0-9_-]+'
+  const ARTIFACT_REF_RE = new RegExp(`^artifact://settings/((?:${runIdSource})/settings/[A-Za-z0-9_.-]+)$`)
   return {
     kind: 'settings',
     async write(input: WriteTargetInput): Promise<WriteTargetResult> {
@@ -169,15 +181,18 @@ export function createSettingsTargetWriter(options: SettingsTargetWriterOptions)
       }
 
       const dir = path.join(importsRoot, input.runId)
-      await fs.mkdir(dir, { recursive: true })
-      const target = path.join(dir, 'settings.suggested.json')
+      // 4.14-L3：按 legacy 文件名键控建议文件（safeId 收窄到安全字符），
+      // 同一 run 的多个 settings 导出（graycode/limcode/settings.json）不再互相覆盖
+      const safeId = input.object.legacyId.replace(/[^A-Za-z0-9_.-]/g, '_')
+      const target = path.join(dir, 'settings', safeId)
+      await fs.mkdir(path.dirname(target), { recursive: true })
       const tmp = `${target}.tmp`
       await fs.writeFile(tmp, JSON.stringify(suggested, null, 2), 'utf-8')
       await fs.rename(tmp, target)
 
-      const notes = buildNotes(parsed, dsh, mapped)
+      const notes = buildNotes(parsed, dsh, mapped, `settings/${safeId}`)
       return {
-        targetRef: `artifact://settings/${input.runId}/settings.suggested.json`,
+        targetRef: `artifact://settings/${input.runId}/settings/${safeId}`,
         notes,
         // B2：写时结果（脱敏）供最终报告合流到 settingsSummary.writeResult
         summary: {
@@ -196,9 +211,10 @@ export function createSettingsTargetWriter(options: SettingsTargetWriterOptions)
       }
     },
     async probe(targetRef: string): Promise<boolean> {
-      // 只允许 runId 格式的路径段（防越界读：runId 段仅 [A-Za-z0-9_-]，
-      // 不含 '.'/'..'；再做 resolved 路径包含性校验兜底）
-      const match = targetRef.match(/^artifact:\/\/settings\/(run_[A-Za-z0-9_-]+\/settings\.suggested\.json)$/)
+      // 只允许 runId 格式的路径段 + settings/<文件>（防越界读：runId 段仅
+      // [A-Za-z0-9_-]，文件段仅安全字符，不含 '.'/'..' 穿越；再做 resolved 路径
+      // 包含性校验兜底）
+      const match = targetRef.match(ARTIFACT_REF_RE)
       if (!match?.[1]) return false
       try {
         const root = path.resolve(importsRoot)
@@ -401,6 +417,7 @@ function buildNotes(
   parsed: ParsedSettingsExport,
   dsh: DshWriteOutcome,
   mapped: ChannelMappingResult[],
+  artifactName: string,
 ): string[] {
   const notes: string[] = []
   if (dsh.mode === 'direct') {
@@ -443,7 +460,7 @@ function buildNotes(
   }
   notes.push(
     `需重新录入凭据: ${parsed.credentialReentryRequired.join(', ') || '无'}`,
-    '建议配置已落盘供人工核对: settings.suggested.json',
+    `建议配置已落盘供人工核对: ${artifactName}`,
   )
   return notes
 }

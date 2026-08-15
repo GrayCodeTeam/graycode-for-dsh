@@ -4,9 +4,9 @@
   "name": "F05-snapshots",
   "title": "快照库",
   "dataRoot": "dataRoot",
-  "purpose": "快照 ID 解析（含下划线）与 snapshotBelongsToConversation 归属校验。",
+  "purpose": "快照 ID 解析（含下划线）与孤儿快照数据保留语义（3.20-M1：快照按 DSH session 导入，无既有会话的外键要求）。",
   "construction": "3 个快照：2 个属于 conv_1700000000000_aaaaaa（不同 timestamp），1 个孤儿快照（conversationId=conv_1700000000000_zzzzzz，所属会话不存在）；快照内容为 F02 历史的早期子集；紧凑 JSON。",
-  "expectedBehavior": "正常导入归属校验通过的快照；孤儿快照跳过（不匹配既有会话）。",
+  "expectedBehavior": "全部 3 个快照（含孤儿快照）导入为独立 DSH 会话（数据保留优先）；孤儿快照 header 记录确定性 parentSession 谱系 id（父会话未导入也能独立存在）。",
   "specSections": [
     "legacy-format.md §1.6"
   ],

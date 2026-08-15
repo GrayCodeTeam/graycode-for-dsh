@@ -7,7 +7,7 @@
  */
 
 import { shortHash } from './idempotency.ts'
-import type { MigrationReport, PlanOutcome } from './types.ts'
+import { domainOfObjectType, type MigrationReport, type PlanOutcome } from './types.ts'
 import type { ScopeMapEntry } from './scopeMap.ts'
 
 const OUTCOME_LABEL: Record<PlanOutcome, string> = {
@@ -61,7 +61,7 @@ export function renderMarkdownReport(report: MigrationReport): string {
 
   const byDomain = new Map<string, MigrationReport['objects']>()
   for (const obj of report.objects) {
-    const domain = domainOf(obj.objectType)
+    const domain = domainOfObjectType(obj.objectType)
     const list = byDomain.get(domain) ?? []
     list.push(obj)
     byDomain.set(domain, list)
@@ -168,23 +168,4 @@ export function renderMarkdownReport(report: MigrationReport): string {
   lines.push('---')
   lines.push('> 源目录只读，未被修改。apply 需提供上方 planToken 二次确认；重复 apply 幂等。')
   return lines.join('\n')
-}
-
-/** objectType → 目标域（报告分组用） */
-function domainOf(objectType: string): string {
-  switch (objectType) {
-    case 'conversation':
-      return 'conversations'
-    case 'snapshot':
-      return 'snapshots'
-    case 'checkpoint':
-      return 'checkpoints'
-    case 'memory-global':
-    case 'memory-workspace':
-      return 'memory'
-    case 'settings':
-      return 'settings'
-    default:
-      return objectType
-  }
 }

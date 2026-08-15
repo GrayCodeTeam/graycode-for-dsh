@@ -39,8 +39,12 @@ import type {
 } from '@deepseek-ai/dsh-session'
 import { deriveWorkspaceUriCwd as deriveCwdFromWorkspaceUri } from '../../domain/scopeMap.ts'
 
-// 兼容导出：cwd 派生逻辑已下沉到 domain/scopeMap.ts（纯函数，供报告事实复用）
-export { deriveWorkspaceUriCwd as deriveCwdFromWorkspaceUri } from '../../domain/scopeMap.ts'
+// 兼容导出：cwd 派生逻辑已下沉到 domain/scopeMap.ts（纯函数，供报告事实复用）；
+// decodeFileWorkspaceUri 为跨平台纯函数（4.20-L4：测试可确定性覆盖 Windows 盘符 URI 解码）
+export {
+  deriveWorkspaceUriCwd as deriveCwdFromWorkspaceUri,
+  decodeFileWorkspaceUri,
+} from '../../domain/scopeMap.ts'
 
 // ─── 输入视图（validator 规范化负载的宽松视图） ─────────────
 
@@ -178,7 +182,10 @@ export function buildConversationSeed(data: unknown, options: { legacyId: string
       }
       if (fnResponses.length > 0) {
         openTurn(time)
-        for (const part of fnResponses) {
+        // 4.14-L7：同一条 user 消息同时含 text 与 functionResponse 时，tool/result
+        // 消息不得复用 user 文本消息的 MessageId（DSH 强制消息 id 唯一）——按 part
+        // 序号派生独立 id（确定性；同一 Content 内多个 functionResponse 也不冲突）。
+        for (const [partIndex, part] of fnResponses.entries()) {
           const id = typeof part.id === 'string' && part.id.length > 0 ? part.id : undefined
           if (!id) {
             unmapped.push({ index, reason: 'functionResponse 缺少 id，无法与调用配对', content: part })
@@ -190,7 +197,7 @@ export function buildConversationSeed(data: unknown, options: { legacyId: string
             content: toolResultBlocksOf(part.response),
           }
           const message = freezeMessage<ToolResultMessage>({
-            id: MessageId(messageIdOf(content, index, options.legacyId)),
+            id: MessageId(`${messageIdOf(content, index, options.legacyId)}::tool-result-${partIndex}`),
             role: 'user',
             content: [resultBlock],
             source: { kind: 'tool', callId: CallId(id) },

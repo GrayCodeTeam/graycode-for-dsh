@@ -164,11 +164,12 @@ export function createMigrationTools(
     name: 'migration_apply',
     description:
       '把旧 Gray Code 数据目录导入 DSH（需 confirmToken 二次确认）。' +
-      '按模块提交点逐模块提交（conversations → checkpoints → memory → settings），' +
-      '每模块完成后记录提交点；幂等：同输入重复 apply 第二次全部 already-imported，' +
+      '按域提交点逐域提交（conversations → snapshots → checkpoints → memory → settings），' +
+      '每域完成后记录提交点；幂等：同输入重复 apply 第二次全部 already-imported，' +
       '不生成副本。源目录只读。凭据默认不迁移（settings 生成建议配置 + 重新录入清单）；' +
       '设置 migrateCredentials=true 可在用户显式授权后把旧渠道 apiKey 一键写入 DSH credentials。' +
-      'apply 全程持跨进程文件锁，并发 apply 会等待或超时。',
+      'apply 全程持跨进程文件锁，并发 apply 会等待或超时。注意：源目录变化或需要再次 apply 时，' +
+      '必须先重新运行 migration_scan 拿到新的 planToken 再传回本工具的 confirmToken。',
     parameters: applyParameters,
     output: {
       schema: outputSchema,

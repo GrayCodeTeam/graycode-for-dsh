@@ -38,6 +38,7 @@ import {
   buildConversationSeed,
   conversationSessionId,
   deriveCwdFromWorkspaceUri,
+  decodeFileWorkspaceUri,
 } from '../../src/migration/adapters/storage/conversationSeed.ts'
 import { MemoryService } from '../../src/memory/service.ts'
 import type { PlannedObject } from '../../src/migration/domain/types.ts'
@@ -205,14 +206,11 @@ describe('conversationSeed（确定性映射）', () => {
       totalEvents: 11,
     })
 
-    // header meta
+    // header meta（4.20-L4：cwd 派生跟随宿主——cwd 直接等于 deriveCwdFromWorkspaceUri
+    // 对同一 workspaceUri 的返回值，不再用 if/else 复刻实现逻辑）
     expect(seed.meta.createdAt).toBe(FIXED_TS)
     expect(seed.meta.seedLength).toBe(11)
-    if (path.isAbsolute('c:/demo')) {
-      expect(seed.meta.cwd).toBe('c:/demo')
-    } else {
-      expect(seed.meta.cwd).toBeUndefined()
-    }
+    expect(seed.meta.cwd).toBe(deriveCwdFromWorkspaceUri('file:///c%3A/demo'))
   })
 
   test('缺失 id/timestamp 的 Content：合成确定性 id、时间回退 createdAt', () => {
@@ -229,6 +227,46 @@ describe('conversationSeed（确定性映射）', () => {
     expect(userMsg!.data.id).toBe('migrated-conv_x-0')
     expect(userMsg!.time).toBe(FIXED_TS)
     expect(seed.unmapped).toHaveLength(0)
+  })
+
+  test('4.14-L7：同一 user 消息含 text + functionResponse → tool/result 消息 id 独立（不复用 user 文本消息 id，多个 functionResponse 也不互相冲突）', () => {
+    const build = (): ReturnType<typeof buildConversationSeed> =>
+      buildConversationSeed(
+        {
+          conversationId: 'conv_l7',
+          createdAt: FIXED_TS,
+          history: [
+            {
+              role: 'user',
+              parts: [
+                { type: 'text', text: 'run it' },
+                { type: 'functionResponse', id: 'fc_1', name: 'run', response: { content: 'ok' } },
+                { type: 'functionResponse', id: 'fc_2', name: 'run', response: { content: 'again' } },
+              ],
+              index: 0,
+              id: 'msg_user',
+              timestamp: FIXED_TS,
+            },
+          ],
+          historyFormat: 'legacy',
+        },
+        { legacyId: 'conv_l7' },
+      )
+    const seed = build()
+    const userMsg = seed.events.find((e): e is SessionEvent<'user/message'> => e.type === 'user/message')
+    const results = seed.events.filter((e): e is SessionEvent<'tool/result'> => e.type === 'tool/result')
+    // 两条 functionResponse → 两条 tool/result；callId 与 functionCall id 配对
+    expect(results).toHaveLength(2)
+    expect(String(results[0]!.data.message.source.callId)).toBe('fc_1')
+    expect(String(results[1]!.data.message.source.callId)).toBe('fc_2')
+    // 消息 id 全唯一：tool/result 不复用 user 文本消息 id（DSH 强制消息 id 唯一）
+    const ids = [String(userMsg!.data.id), ...results.map(r => String(r.data.message.id))]
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(String(userMsg!.data.id)).toBe('msg_user')
+    // 确定性：同输入重跑事件流逐字节一致
+    const again = build()
+    expect(again.events.map(e => `${e.seq}:${e.type}`)).toEqual(seed.events.map(e => `${e.seq}:${e.type}`))
+    expect(again.stats.toolResults).toBe(2)
   })
 
   test('空历史：seed 为空、meta 无 seedLength，不产生事件', () => {
@@ -248,6 +286,13 @@ describe('conversationSeed（确定性映射）', () => {
   test('deriveCwdFromWorkspaceUri：file:// 解码 + 绝对路径门控', () => {
     expect(deriveCwdFromWorkspaceUri(undefined)).toBeUndefined()
     expect(deriveCwdFromWorkspaceUri('not-a-uri')).toBeUndefined()
+    // 解码层为跨平台纯函数（4.20-L4）：Windows 盘符 URI 在任何宿主上都确定性解码
+    expect(decodeFileWorkspaceUri('file:///c%3A/Users/demo/proj')).toBe('c:/Users/demo/proj')
+    expect(decodeFileWorkspaceUri('file:///home/user/proj')).toBe('/home/user/proj')
+    expect(decodeFileWorkspaceUri('file://relative/path')).toBeUndefined() // 相对路径 → undefined
+    // 宿主门控：POSIX 根路径在 win32 同样视为绝对（全平台确定性返回）
+    expect(deriveCwdFromWorkspaceUri('file:///home/user/proj')).toBe('/home/user/proj')
+    // Windows 盘符路径只在对当前宿主绝对时返回（Windows 宿主才返回 c:/...）
     expect(deriveCwdFromWorkspaceUri('file:///c%3A/Users/demo/proj')).toBe(
       path.isAbsolute('c:/Users/demo/proj') ? 'c:/Users/demo/proj' : undefined,
     )
@@ -270,7 +315,8 @@ describe('SessionStore 公开 API seed 接受', () => {
       expect(session.header.id).toBe(SessionId('migrated-conv_demo'))
       expect(session.header.createdAt).toBe(FIXED_TS)
       expect(session.header.seedLength).toBe(11)
-      if (path.isAbsolute('c:/demo')) expect(session.header.cwd).toBe('c:/demo')
+      // 4.20-L4：跟随宿主的确定性期望（与 deriveCwdFromWorkspaceUri 返回值一致）
+      expect(session.header.cwd).toBe(deriveCwdFromWorkspaceUri('file:///c%3A/demo'))
 
       // seed 之后自动追加 session/end-seed 边界
       expect(session.firstLiveSeq).toBe(11)

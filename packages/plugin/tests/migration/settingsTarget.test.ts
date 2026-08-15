@@ -110,7 +110,8 @@ function readSuggested(importsRoot: string, runId: string): {
   channels: Array<{ id: string; route?: string; credentialRef?: string; unmigratedFields?: string[] }>
   [k: string]: unknown
 } {
-  const raw = fs.readFileSync(path.join(importsRoot, runId, 'settings.suggested.json'), 'utf-8')
+  // 4.14-L3：建议文件按 legacy 文件名键控（settings/<legacyId>）
+  const raw = fs.readFileSync(path.join(importsRoot, runId, 'settings', 'graycode-settings.json'), 'utf-8')
   return JSON.parse(raw) as ReturnType<typeof readSuggested>
 }
 
@@ -146,7 +147,7 @@ describe('DSH 直写（merge 语义）', () => {
       expect(notes.join('\n')).toContain('llm-pi-ai.providers')
       expect(notes.join('\n')).toContain('不覆盖用户已有渠道')
       expect(notes.join('\n')).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
-      expect(result.targetRef).toBe('artifact://settings/run_1/settings.suggested.json')
+      expect(result.targetRef).toBe('artifact://settings/run_1/settings/graycode-settings.json')
     } finally {
       fs.rmSync(importsRoot, { recursive: true, force: true })
     }
@@ -232,13 +233,16 @@ describe('probe 路径校验', () => {
       const probe = writer.probe!
       expect(await probe('artifact://settings/../secret.txt')).toBe(false)
       expect(await probe('artifact://settings/..')).toBe(false)
-      expect(await probe('artifact://settings/run_1/..%2Fevil/settings.suggested.json')).toBe(false)
-      expect(await probe('artifact://settings/other/settings.suggested.json')).toBe(false)
+      // 越界 / 布局不匹配一律 false
+      expect(await probe('artifact://settings/run_1/..%2Fevil/settings/graycode-settings.json')).toBe(false)
+      expect(await probe('artifact://settings/other/settings/graycode-settings.json')).toBe(false)
       expect(await probe('artifact://settings/run_1/settings.suggested.json')).toBe(false)
+      expect(await probe('artifact://settings/run_1/settings/nonexistent.json')).toBe(false)
 
       await writer.write(makeInput())
-      expect(await probe('artifact://settings/run_1/settings.suggested.json')).toBe(true)
-      expect(await probe('artifact://settings/run_2/settings.suggested.json')).toBe(false)
+      // 新布局 settings/<legacyId>
+      expect(await probe('artifact://settings/run_1/settings/graycode-settings.json')).toBe(true)
+      expect(await probe('artifact://settings/run_2/settings/graycode-settings.json')).toBe(false)
     } finally {
       fs.rmSync(importsRoot, { recursive: true, force: true })
     }
@@ -349,7 +353,10 @@ describe('B1 凭据一键迁移（ctx.credentials.set）', () => {
       const suggested = readSuggested(importsRoot, 'run_1')
       expect(suggested.dshWrite.migratedCredentialRefs).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
       // 明文绝不进入建议文件
-      const suggestedRaw = fs.readFileSync(path.join(importsRoot, 'run_1', 'settings.suggested.json'), 'utf-8')
+      const suggestedRaw = fs.readFileSync(
+        path.join(importsRoot, 'run_1', 'settings', 'graycode-settings.json'),
+        'utf-8',
+      )
       expect(suggestedRaw).not.toContain('sk-secret')
       expect(suggestedRaw).not.toContain('credentialSecrets')
 
