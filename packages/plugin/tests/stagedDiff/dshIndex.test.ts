@@ -10,7 +10,7 @@
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SessionStore } from '@deepseek-ai/dsh-session'
@@ -52,10 +52,8 @@ describe('staged-diff 子插件 service 提供面', () => {
     expect(handle!.enabled).toBe(true)
     // workspaceId 派生与工具层同口径
     expect(handle!.workspaceIdOf(workspace)).toMatch(/^ws_[0-9a-f]{16}$/)
-    // service 初始化（sidecar 恢复异步；listEntries 在 loaded 前抛错）
-    await vi.waitFor(() => {
-      expect(handle!.service.listEntries().length).toBe(0)
-    })
+    // await ctx.plugin 后 sidecar 恢复已经完成，不再暴露半初始化 handle。
+    expect(handle!.service.listEntries()).toEqual([])
     // createEntry 可用（写意图入库，不落盘）
     const entry = await handle!.service.createEntry({
       workspaceId: handle!.workspaceIdOf(workspace),
@@ -85,10 +83,30 @@ describe('staged-diff 子插件 service 提供面', () => {
     const handle = ctx.get(stagedDiff.STAGED_DIFF_SERVICE_KEY) as stagedDiff.StagedDiffServiceHandle | undefined
     expect(handle).toBeDefined()
     expect(handle!.enabled).toBe(false)
-    await vi.waitFor(() => {
-      expect(handle!.service.listEntries().length).toBe(0)
+    expect(handle!.service.listEntries()).toEqual([])
+
+    for (const f of mounted.reverse()) {
+      await f.dispose()
+    }
+  })
+
+  it('sidecar 初始化拒绝由 Cordis fiber 上报，且不会暴露未初始化 handle', async () => {
+    // 把 entries.json 占成目录，readFile 必然以非 ENOENT 失败。
+    await fs.mkdir(path.join(dataRoot, 'staged-diff', 'entries.json'), { recursive: true })
+    const ctx = new Context()
+    const mounted: Array<{ dispose(): Promise<void> }> = []
+    mounted.push(await ctx.plugin(LocalFileSystem, { cwd: workspace }))
+    mounted.push(await ctx.plugin(SessionStore))
+    mounted.push(await ctx.plugin(AgentRegistry))
+    const fiber = ctx.plugin(stagedDiff, {
+      dataRoot,
+      enabled: true,
+      agentScope: 'disabled',
     })
 
+    await expect(Promise.resolve(fiber)).rejects.toThrow()
+    expect(ctx.reflect._getImpl(stagedDiff.STAGED_DIFF_SERVICE_KEY)).toBeUndefined()
+    await fiber.dispose()
     for (const f of mounted.reverse()) {
       await f.dispose()
     }

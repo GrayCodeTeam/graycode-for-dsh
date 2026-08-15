@@ -27,6 +27,15 @@ import { assertSafeEntryPath } from '../domain/pathSafety.ts';
 import { buildReviewBatch, type ReviewBatchView } from '../domain/reviewBatch.ts';
 import type { ApplyFilePort, EntryStorePort } from './ports.ts';
 
+/** Stable workspace identity shared by staging, tools and browser decisions. */
+export function createStagedWorkspaceId(cwd: string): string {
+  const normalized = cwd.trim().replace(/\\/g, '/').replace(/\/+$/g, '');
+  const key = process.platform === 'win32' || process.platform === 'darwin'
+    ? normalized.toLowerCase()
+    : normalized;
+  return `ws_${crypto.createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
+}
+
 export interface CreateEntryInput {
   workspaceId: string;
   sessionId: string;
@@ -57,10 +66,10 @@ export interface RejectEntryInput {
   entryId: string;
   expectedRevision?: number;
   /**
-   * 工作区根；提供且 entry.before 存在时做冲突检测（目标文件已被其他流程修改 →
-   * GRAY_STAGED_REJECT_CONFLICT）。缺省（headless/UI 路径）跳过检测，拒绝仍不落盘。
+   * 工作区根；必须与 entry.workspaceId 匹配。entry.before 存在时还会做冲突检测
+   * （目标文件已被其他流程修改 → GRAY_STAGED_REJECT_CONFLICT）。
    */
-  workspaceRoot?: string;
+  workspaceRoot: string;
 }
 
 export interface ListEntriesInput {
@@ -248,6 +257,7 @@ export class StagedDiffService {
     return this.mutate(async () => {
       this.requireLoaded();
       const entry = this.requireEntry(input.entryId);
+      this.assertWorkspace(entry, input.workspaceRoot);
       this.assertRevision(entry, input.expectedRevision);
       if (entry.status === 'done') return { ...entry };
       if (entry.status === 'rejected') {
@@ -301,6 +311,7 @@ export class StagedDiffService {
     return this.mutate(async () => {
       this.requireLoaded();
       const entry = this.requireEntry(input.entryId);
+      this.assertWorkspace(entry, input.workspaceRoot);
       this.assertRevision(entry, input.expectedRevision);
       if (entry.status === 'rejected') return { ...entry };
       if (entry.status === 'done') {
@@ -310,7 +321,7 @@ export class StagedDiffService {
           { entry }
         );
       }
-      if (entry.before !== null && input.workspaceRoot !== undefined) {
+      if (entry.before !== null) {
         const destination = path.join(input.workspaceRoot, entry.path);
         // undefined = 读盘失败（权限/IO）无法比对：拒绝本身不写盘，跳过冲突检测；
         // null = 目标确实不存在（被删除）——与 before 快照（存在）不一致，属冲突
@@ -362,6 +373,18 @@ export class StagedDiffService {
       throw new StagedDiffError(
         `staged entry "${entry.id}" changed since expectedRevision ${expectedRevision} (current ${entry.revision})`,
         StagedDiffErrorCode.REVISION_CONFLICT,
+        { entry }
+      );
+    }
+  }
+
+  /** Never apply or conflict-check an entry against a different workspace. */
+  private assertWorkspace(entry: StagedEntry, workspaceRoot: string): void {
+    const actualWorkspaceId = createStagedWorkspaceId(workspaceRoot);
+    if (entry.workspaceId !== actualWorkspaceId) {
+      throw new StagedDiffError(
+        `staged entry "${entry.id}" belongs to workspace ${entry.workspaceId}, not ${actualWorkspaceId}`,
+        StagedDiffErrorCode.WORKSPACE_CONFLICT,
         { entry }
       );
     }

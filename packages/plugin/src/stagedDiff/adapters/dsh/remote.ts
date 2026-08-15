@@ -19,9 +19,9 @@ import {
   normalizeLimit,
   optionalString,
   optionalStringArray,
-  optionalWorkspace,
   requireInt,
   requireString,
+  requireWorkspace,
   slicePage,
 } from '../../../remote/validate.ts'
 import type {
@@ -53,14 +53,14 @@ export function createStagedDiffRemoteHandlers(service: StagedDiffService): Gray
     'stagedDiff/accept': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
       const entryId = requireString(args, 'entryId')
       const expectedRevision = requireInt(args, 'expectedRevision')
-      const workspace = optionalWorkspace(args) ?? process.cwd()
+      const workspace = requireWorkspace(args)
       return service.acceptEntry({ entryId, expectedRevision, workspaceRoot: workspace, signal })
     },
 
     'stagedDiff/reject': async (args: GrayRemoteArgs) => {
       const entryId = requireString(args, 'entryId')
       const expectedRevision = requireInt(args, 'expectedRevision')
-      const workspace = optionalWorkspace(args) ?? process.cwd()
+      const workspace = requireWorkspace(args)
       return service.rejectEntry({ entryId, expectedRevision, workspaceRoot: workspace })
     },
   }

@@ -12,9 +12,8 @@
  *   classified by `mapStagedDiffFailure`;
  * - the entry `revision` read at click time is passed as the CAS
  *   `expectedRevision` (the host rejects stale calls with GRAY_CONFLICT);
- * - the decision `workspace` field is intentionally omitted: the client
- *   carries `workspaceId`, not an absolute root; the host defaults to
- *   process.cwd() and a future host adapter may inject the absolute root.
+ * - every decision carries an explicit absolute workspace root. Browser
+ *   remotes have no safe host-cwd fallback.
  */
 import type { GrayRemoteFailure, StagedEntry } from './contract.ts'
 import type { StagedDiffDataSource } from './dataSource.ts'
@@ -62,7 +61,9 @@ function internalOutcome(): StagedDiffDecisionOutcome {
 }
 
 /** Wrap a data source into idempotent, error-mapped decision actions. */
-export function createStagedDiffActions(dataSource: StagedDiffDataSource): StagedDiffActions {
+export function createStagedDiffActions(dataSource: StagedDiffDataSource, workspace: string): StagedDiffActions {
+  const workspaceRoot = workspace.trim()
+  if (workspaceRoot.length === 0) throw new Error('stagedDiff: workspace is required')
   const tracker: StagedDiffOperationTracker<StagedDiffDecisionOutcome> =
     createStagedDiffOperationTracker<StagedDiffDecisionOutcome>()
   const inFlight = new Map<string, Promise<StagedDiffDecisionOutcome>>()
@@ -82,8 +83,8 @@ export function createStagedDiffActions(dataSource: StagedDiffDataSource): Stage
     }
 
     const call = kind === 'accept'
-      ? dataSource.accept({ entryId: entry.id, expectedRevision: entry.revision })
-      : dataSource.reject({ entryId: entry.id, expectedRevision: entry.revision })
+      ? dataSource.accept({ entryId: entry.id, expectedRevision: entry.revision, workspace: workspaceRoot })
+      : dataSource.reject({ entryId: entry.id, expectedRevision: entry.revision, workspace: workspaceRoot })
 
     /**
      * Record a settled outcome. Only successes are cached: a failed decision

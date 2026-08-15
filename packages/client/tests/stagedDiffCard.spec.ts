@@ -418,6 +418,7 @@ describe('operation-id tracker', () => {
 })
 
 describe('decision actions (assembly)', () => {
+  const decisionWorkspace = 'C:\\dev\\alpha'
   function spyDataSource(overrides: Partial<StagedDiffDataSource> = {}): StagedDiffDataSource {
     return {
       list: vi.fn(async () => ({ ok: true, value: { items: [], total: 0 } })),
@@ -430,18 +431,18 @@ describe('decision actions (assembly)', () => {
 
   it('dedupes same-entry clicks through the derived operation id', async () => {
     const dataSource = spyDataSource()
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const entry = makeEntry()
     const [a, b] = await Promise.all([actions.accept(entry), actions.accept(entry)])
     expect(a.ok && b.ok).toBe(true)
     // Two clicks, one data-source call.
     expect(dataSource.accept).toHaveBeenCalledTimes(1)
-    expect(dataSource.accept).toHaveBeenCalledWith({ entryId: entry.id, expectedRevision: entry.revision })
+    expect(dataSource.accept).toHaveBeenCalledWith({ entryId: entry.id, expectedRevision: entry.revision, workspace: decisionWorkspace })
   })
 
   it('repeating an explicit operation id returns the recorded outcome without re-invoking', async () => {
     const dataSource = spyDataSource()
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const entry = makeEntry()
     const first = await actions.acceptWithOperationId(entry, 'op-stable')
     const second = await actions.acceptWithOperationId(entry, 'op-stable')
@@ -451,7 +452,7 @@ describe('decision actions (assembly)', () => {
 
   it('different entries are independent operations', async () => {
     const dataSource = spyDataSource()
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     await Promise.all([actions.accept(makeEntry()), actions.accept(makeEntry())])
     expect(dataSource.accept).toHaveBeenCalledTimes(2)
   })
@@ -464,7 +465,7 @@ describe('decision actions (assembly)', () => {
         details: { causeCode: GRAY_STAGED_CAUSE_CODES.APPLY_FAILED, entry },
       }))),
     })
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const outcome: StagedDiffDecisionOutcome = await actions.accept(entry)
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) {
@@ -476,18 +477,18 @@ describe('decision actions (assembly)', () => {
 
   it('reject goes through the reject endpoint with the CAS revision', async () => {
     const dataSource = spyDataSource()
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const entry = makeEntry({ revision: 7 })
     const outcome = await actions.reject(entry)
     expect(outcome.ok).toBe(true)
-    expect(dataSource.reject).toHaveBeenCalledWith({ entryId: entry.id, expectedRevision: 7 })
+    expect(dataSource.reject).toHaveBeenCalledWith({ entryId: entry.id, expectedRevision: 7, workspace: decisionWorkspace })
   })
 
   it('never throws: an unexpected data-source rejection becomes an internal outcome', async () => {
     const dataSource = spyDataSource({
       accept: vi.fn(async () => { throw new Error('transport broke') }),
     })
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const outcome = await actions.accept(makeEntry())
     expect(outcome.ok).toBe(false)
     if (!outcome.ok) expect(outcome.error.kind).toBe('internal')
@@ -501,7 +502,7 @@ describe('decision actions (assembly)', () => {
         details: { causeCode: GRAY_STAGED_CAUSE_CODES.APPLY_FAILED, entry },
       }))),
     })
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const first = await actions.accept(entry)
     expect(first.ok).toBe(false)
     if (!first.ok) expect(first.error.retryable).toBe(true)
@@ -514,7 +515,7 @@ describe('decision actions (assembly)', () => {
 
   it('successful outcomes stay cached (same-entry double click stays deduped)', async () => {
     const dataSource = spyDataSource()
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     const entry = makeEntry()
     await actions.accept(entry)
     await actions.accept(entry)
@@ -526,10 +527,17 @@ describe('decision actions (assembly)', () => {
     const dataSource = spyDataSource({
       accept: vi.fn(async () => envelopeError(failure({ code: GRAY_REMOTE_ERROR_CODES.ENDPOINT_NOT_FOUND }))),
     })
-    const actions = createStagedDiffActions(dataSource)
+    const actions = createStagedDiffActions(dataSource, decisionWorkspace)
     await actions.accept(entry)
     await actions.accept(entry)
     expect(dataSource.accept).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a blank workspace before invoking the data source', () => {
+    const dataSource = spyDataSource()
+    expect(() => createStagedDiffActions(dataSource, '   ')).toThrow('workspace is required')
+    expect(dataSource.accept).not.toHaveBeenCalled()
+    expect(dataSource.reject).not.toHaveBeenCalled()
   })
 })
 
@@ -538,10 +546,11 @@ describe('decision actions (assembly)', () => {
 // ---------------------------------------------------------------------------
 
 describe('mock data source (host-consistent semantics)', () => {
+  const decisionWorkspace = 'C:\\dev\\alpha'
   it('accept runs pending → accepted → done with revision +2', async () => {
     const entry = makeEntry({ id: 'm1', status: 'pending', revision: 1 })
     const dataSource = createMockStagedDiffDataSource([entry])
-    const result = await dataSource.accept({ entryId: 'm1', expectedRevision: 1 })
+    const result = await dataSource.accept({ entryId: 'm1', expectedRevision: 1, workspace: decisionWorkspace })
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.value.status).toBe('done')
@@ -555,14 +564,14 @@ describe('mock data source (host-consistent semantics)', () => {
   it('accept accepts needs-reapply entries (crash-recovery decision)', async () => {
     const entry = makeEntry({ id: 'm2', status: 'needs-reapply', revision: 4 })
     const dataSource = createMockStagedDiffDataSource([entry])
-    const result = await dataSource.accept({ entryId: 'm2', expectedRevision: 4 })
+    const result = await dataSource.accept({ entryId: 'm2', expectedRevision: 4, workspace: decisionWorkspace })
     expect(result.ok && result.value.status).toBe('done')
   })
 
   it('stale CAS revision → GRAY_CONFLICT with causeCode + authoritative entry', async () => {
     const entry = makeEntry({ id: 'm3', status: 'pending', revision: 2 })
     const dataSource = createMockStagedDiffDataSource([entry])
-    const result = await dataSource.accept({ entryId: 'm3', expectedRevision: 1 })
+    const result = await dataSource.accept({ entryId: 'm3', expectedRevision: 1, workspace: decisionWorkspace })
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.CONFLICT)
@@ -574,7 +583,7 @@ describe('mock data source (host-consistent semantics)', () => {
   it('applyFailures keeps the entry accepted (retryable) instead of faking done, then succeeds', async () => {
     const entry = makeEntry({ id: 'm4', status: 'pending', revision: 1 })
     const dataSource = createMockStagedDiffDataSource([entry], { applyFailures: 1 })
-    const result = await dataSource.accept({ entryId: 'm4', expectedRevision: 1 })
+    const result = await dataSource.accept({ entryId: 'm4', expectedRevision: 1, workspace: decisionWorkspace })
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error.details.causeCode).toBe(GRAY_STAGED_CAUSE_CODES.APPLY_FAILED)
@@ -582,7 +591,7 @@ describe('mock data source (host-consistent semantics)', () => {
       expect(result.error.details.entry).toMatchObject({ status: 'accepted', revision: 2 })
     }
     // Retrying with the refreshed revision succeeds once the write recovers.
-    const retry = await dataSource.accept({ entryId: 'm4', expectedRevision: 2 })
+    const retry = await dataSource.accept({ entryId: 'm4', expectedRevision: 2, workspace: decisionWorkspace })
     expect(retry.ok && retry.value.status).toBe('done')
     if (retry.ok) expect(retry.value.revision).toBe(3)
   })
@@ -590,8 +599,8 @@ describe('mock data source (host-consistent semantics)', () => {
   it('repeated apply failures never fake done and do not bump the revision further', async () => {
     const entry = makeEntry({ id: 'm4b', status: 'pending', revision: 1 })
     const dataSource = createMockStagedDiffDataSource([entry], { applyFailures: 10 })
-    await dataSource.accept({ entryId: 'm4b', expectedRevision: 1 })
-    const again = await dataSource.accept({ entryId: 'm4b', expectedRevision: 2 })
+    await dataSource.accept({ entryId: 'm4b', expectedRevision: 1, workspace: decisionWorkspace })
+    const again = await dataSource.accept({ entryId: 'm4b', expectedRevision: 2, workspace: decisionWorkspace })
     expect(again.ok).toBe(false)
     if (!again.ok) {
       expect(again.error.details.entry).toMatchObject({ status: 'accepted', revision: 2 })
@@ -601,18 +610,18 @@ describe('mock data source (host-consistent semantics)', () => {
   it('reject transitions to rejected (revision +1) and is idempotent afterwards', async () => {
     const entry = makeEntry({ id: 'm5', status: 'reviewing', revision: 1 })
     const dataSource = createMockStagedDiffDataSource([entry])
-    const result = await dataSource.reject({ entryId: 'm5', expectedRevision: 1 })
+    const result = await dataSource.reject({ entryId: 'm5', expectedRevision: 1, workspace: decisionWorkspace })
     expect(result.ok && result.value.status).toBe('rejected')
     if (result.ok) expect(result.value.revision).toBe(2)
     // Rejecting again with the matching revision is an idempotent success.
-    const again = await dataSource.reject({ entryId: 'm5', expectedRevision: 2 })
+    const again = await dataSource.reject({ entryId: 'm5', expectedRevision: 2, workspace: decisionWorkspace })
     expect(again.ok && again.value.status).toBe('rejected')
   })
 
   it('rejectConflict returns GRAY_STAGED_REJECT_CONFLICT', async () => {
     const entry = makeEntry({ id: 'm6', status: 'pending', before: 'snapshot' })
     const dataSource = createMockStagedDiffDataSource([entry], { rejectConflict: true })
-    const result = await dataSource.reject({ entryId: 'm6', expectedRevision: 1 })
+    const result = await dataSource.reject({ entryId: 'm6', expectedRevision: 1, workspace: decisionWorkspace })
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error.details.causeCode).toBe(GRAY_STAGED_CAUSE_CODES.REJECT_CONFLICT)
@@ -623,12 +632,12 @@ describe('mock data source (host-consistent semantics)', () => {
     const done = makeEntry({ id: 'm7', status: 'done', revision: 1 })
     const rejected = makeEntry({ id: 'm8', status: 'rejected', revision: 1 })
     const dataSource = createMockStagedDiffDataSource([done, rejected])
-    const rejectDone = await dataSource.reject({ entryId: 'm7', expectedRevision: 1 })
+    const rejectDone = await dataSource.reject({ entryId: 'm7', expectedRevision: 1, workspace: decisionWorkspace })
     expect(rejectDone.ok).toBe(false)
     if (!rejectDone.ok) {
       expect(rejectDone.error.details.causeCode).toBe(GRAY_STAGED_CAUSE_CODES.ILLEGAL_TRANSITION)
     }
-    const acceptRejected = await dataSource.accept({ entryId: 'm8', expectedRevision: 1 })
+    const acceptRejected = await dataSource.accept({ entryId: 'm8', expectedRevision: 1, workspace: decisionWorkspace })
     expect(acceptRejected.ok).toBe(false)
     if (!acceptRejected.ok) {
       expect(acceptRejected.error.details.causeCode).toBe(GRAY_STAGED_CAUSE_CODES.ILLEGAL_TRANSITION)
@@ -638,7 +647,7 @@ describe('mock data source (host-consistent semantics)', () => {
   it('accept of an already-done entry with matching revision is idempotent', async () => {
     const done = makeEntry({ id: 'm9', status: 'done', revision: 3 })
     const dataSource = createMockStagedDiffDataSource([done])
-    const result = await dataSource.accept({ entryId: 'm9', expectedRevision: 3 })
+    const result = await dataSource.accept({ entryId: 'm9', expectedRevision: 3, workspace: decisionWorkspace })
     expect(result.ok && result.value.status).toBe('done')
   })
 
@@ -679,9 +688,9 @@ describe('mock data source (host-consistent semantics)', () => {
     const entry = makeEntry({ id: 'm11' })
     const envelope = envelopeError(failure({ code: GRAY_REMOTE_ERROR_CODES.ENDPOINT_NOT_FOUND }))
     const dataSource = createMockStagedDiffDataSource([entry], { failMutationsWith: envelope.error })
-    const accept = await dataSource.accept({ entryId: 'm11', expectedRevision: 1 })
+    const accept = await dataSource.accept({ entryId: 'm11', expectedRevision: 1, workspace: decisionWorkspace })
     expect(accept.ok).toBe(false)
-    const reject = await dataSource.reject({ entryId: 'm11', expectedRevision: 1 })
+    const reject = await dataSource.reject({ entryId: 'm11', expectedRevision: 1, workspace: decisionWorkspace })
     expect(reject.ok).toBe(false)
     if (!reject.ok) expect(reject.error.code).toBe(GRAY_REMOTE_ERROR_CODES.ENDPOINT_NOT_FOUND)
   })

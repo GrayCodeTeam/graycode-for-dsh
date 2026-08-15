@@ -13,19 +13,11 @@
  * - 所有变更支持 expectedRevision 乐观并发控制；冲突返回权威条目。
  * - 错误返回稳定机器码（StagedDiffErrorCode），UI/模型不解析错误文案。
  */
-import * as crypto from 'crypto';
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { StagedDiffService } from '../../application/service.ts'
+import { StagedDiffService, createStagedWorkspaceId } from '../../application/service.ts'
 import { StagedDiffError, type StagedEntry } from '../../domain/types.ts'
 
-/** workspace id：与 branches/checkpoints 同口径（cwd sha256 前 16 位） */
-export function createStagedWorkspaceId(cwd: string): string {
-  const normalized = cwd.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
-  const key = process.platform === 'win32' || process.platform === 'darwin'
-    ? normalized.toLowerCase()
-    : normalized
-  return `ws_${crypto.createHash('sha256').update(key).digest('hex').slice(0, 16)}`
-}
+export { createStagedWorkspaceId } from '../../application/service.ts'
 
 function sessionIdOf(exec: ToolRunContext): string {
   return exec.agent?.session?.id ?? ''

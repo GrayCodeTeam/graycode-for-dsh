@@ -71,12 +71,14 @@ export function createStagedDiffServiceHandle(
   return { enabled, service, workspaceIdOf: createStagedWorkspaceId }
 }
 
-export function apply(ctx: Context, config: Config): () => void {
+export async function apply(ctx: Context, config: Config): Promise<() => void> {
   const service = new StagedDiffService(
     new EntrySidecarStore({ dataRoot: config.dataRoot }),
     createDshFsApplyFilePort(ctx.fs)
   )
-  void service.initialize()
+  // sidecar 恢复完成后才提供 service/工具/Remote，消除启动窗口里的
+  // "service is not initialized"；拒绝由 Cordis fiber 正常收敛。
+  await service.initialize()
   // 跨域共享：service 出现时 workflows 的 ctx.inject 回调被唤醒并安装写前钩子；
   // 本 fiber 卸载时 disposeService 使消费者侧钩子随 inject 纤维回收而移除。
   const handle = createStagedDiffServiceHandle(service, config.enabled)

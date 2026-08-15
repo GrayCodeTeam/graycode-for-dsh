@@ -7,13 +7,14 @@
  */
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { StagedDiffService } from '../../src/stagedDiff/application/service.ts'
+import { StagedDiffService, createStagedWorkspaceId } from '../../src/stagedDiff/application/service.ts'
 import type { ApplyFilePort, EntryStorePort } from '../../src/stagedDiff/application/ports.ts'
 import { StagedDiffError, StagedDiffErrorCode, type StagedEntry } from '../../src/stagedDiff/domain/types.ts'
 
-const WS = 'ws-test'
 const SESSION = 's1'
 const ROOT = path.join('tmp', 'workspace')
+const WS = createStagedWorkspaceId(ROOT)
+const OTHER_ROOT = path.join('tmp', 'other-workspace')
 
 class FakeStore implements EntryStorePort {
   entries: StagedEntry[] = []
@@ -217,6 +218,23 @@ describe('listEntries / reviewBatch', () => {
 })
 
 describe('acceptEntry', () => {
+  it('workspace 错配时不推进状态也不调用落盘端口', async () => {
+    const { applier, service, store } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x' })
+    const savesBefore = store.saves
+
+    const error = await expectRejectCode(
+      service.acceptEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: OTHER_ROOT }),
+      StagedDiffErrorCode.WORKSPACE_CONFLICT,
+    )
+
+    expect(error.entry).toMatchObject({ id: entry.id, status: 'pending', revision: 1 })
+    expect(service.previewEntry(entry.id)).toMatchObject({ status: 'pending', revision: 1 })
+    expect(applier.applyCalls).toBe(0)
+    expect(store.saves).toBe(savesBefore)
+  })
+
   it('快乐路径：pending → accepted → 落盘 → done；落盘端口收到内容与目标', async () => {
     const { applier, service } = setup()
     await service.initialize()
@@ -310,6 +328,30 @@ describe('acceptEntry', () => {
 })
 
 describe('rejectEntry', () => {
+  it('workspace 错配时不读取目标、不推进条目状态', async () => {
+    const { applier, service, store } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({
+      workspaceId: WS,
+      sessionId: SESSION,
+      path: 'a.md',
+      before: 'original',
+      after: 'new',
+    })
+    const savesBefore = store.saves
+    applier.disk.set(path.join(OTHER_ROOT, 'a.md'), 'original')
+
+    const error = await expectRejectCode(
+      service.rejectEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: OTHER_ROOT }),
+      StagedDiffErrorCode.WORKSPACE_CONFLICT,
+    )
+
+    expect(error.entry).toMatchObject({ id: entry.id, status: 'pending', revision: 1 })
+    expect(service.previewEntry(entry.id)).toMatchObject({ status: 'pending', revision: 1 })
+    expect(applier.applyCalls).toBe(0)
+    expect(store.saves).toBe(savesBefore)
+  })
+
   it('拒绝不落盘：applier.applyFile 从未被调用，磁盘无内容', async () => {
     const { applier, service } = setup()
     await service.initialize()
@@ -369,7 +411,7 @@ describe('rejectEntry', () => {
     expect(rejected.status).toBe('rejected')
   })
 
-  it('无 workspaceRoot（headless）时跳过冲突检测，拒绝仍不落盘', async () => {
+  it('空 workspaceRoot 不能绕过工作区绑定', async () => {
     const { applier, service } = setup()
     await service.initialize()
     const entry = await service.createEntry({
@@ -380,8 +422,11 @@ describe('rejectEntry', () => {
       before: 'original',
     })
     applier.disk.set(path.join(ROOT, 'a.md'), 'diverged')
-    const rejected = await service.rejectEntry({ entryId: entry.id })
-    expect(rejected.status).toBe('rejected')
+    await expectRejectCode(
+      service.rejectEntry({ entryId: entry.id, workspaceRoot: '' }),
+      StagedDiffErrorCode.WORKSPACE_CONFLICT,
+    )
+    expect(service.previewEntry(entry.id).status).toBe('pending')
     expect(applier.applyCalls).toBe(0)
   })
 
@@ -389,14 +434,14 @@ describe('rejectEntry', () => {
     const { service } = setup()
     await service.initialize()
     const entry = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x' })
-    await service.rejectEntry({ entryId: entry.id })
-    const again = await service.rejectEntry({ entryId: entry.id, expectedRevision: 2 })
+    await service.rejectEntry({ entryId: entry.id, workspaceRoot: ROOT })
+    const again = await service.rejectEntry({ entryId: entry.id, expectedRevision: 2, workspaceRoot: ROOT })
     expect(again.status).toBe('rejected')
 
     const doneEntry = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'b.md', after: 'x' })
     await service.acceptEntry({ entryId: doneEntry.id, workspaceRoot: ROOT })
     await expectRejectCode(
-      service.rejectEntry({ entryId: doneEntry.id }),
+      service.rejectEntry({ entryId: doneEntry.id, workspaceRoot: ROOT }),
       StagedDiffErrorCode.ILLEGAL_TRANSITION
     )
   })

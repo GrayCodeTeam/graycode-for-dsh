@@ -85,8 +85,8 @@ export interface StagedDiffDecisionParams {
   readonly entryId: string
   /** CAS optimistic lock: the revision read from the entry, echoed back. */
   readonly expectedRevision: number
-  /** Target workspace root (accept needs it to write); host defaults to process.cwd(). */
-  readonly workspace?: string
+  /** Explicit target workspace root (the host never falls back to its process cwd). */
+  readonly workspace: string
 }
 
 /** Stable Remote error codes — mirrors host `GRAY_REMOTE_ERROR_CODES`. */

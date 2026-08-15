@@ -6,7 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { StagedDiffService } from '../../src/stagedDiff/application/service.ts'
+import { StagedDiffService, createStagedWorkspaceId } from '../../src/stagedDiff/application/service.ts'
 import { EntrySidecarStore } from '../../src/stagedDiff/adapters/storage.ts'
 import type { ApplyFilePort } from '../../src/stagedDiff/application/ports.ts'
 import { createStagedDiffRemoteHandlers } from '../../src/stagedDiff/adapters/dsh/remote.ts'
@@ -71,10 +71,10 @@ function expectFailure(result: GrayRemoteResult<unknown>, code: string): void {
 
 async function stage(
   env: Env,
-  overrides: Partial<{ path: string; after: string; before: string | null; entryId: string }> = {}
+  overrides: Partial<{ path: string; after: string; before: string | null; entryId: string; workspaceId: string }> = {}
 ): Promise<string> {
   const entry = await env.service.createEntry({
-    workspaceId: 'ws-test',
+    workspaceId: overrides.workspaceId ?? createStagedWorkspaceId(env.workspace),
     sessionId: 's1',
     path: overrides.path ?? 'src/a.ts',
     before: overrides.before === undefined ? null : overrides.before,
@@ -124,7 +124,10 @@ describe('stagedDiff/list / preview', () => {
       path: 'c.ts',
       after: 'x',
     })
-    const filtered = await env.invoke('stagedDiff', 'list', { workspaceId: 'ws-test', sessionId: 's1' })
+    const filtered = await env.invoke('stagedDiff', 'list', {
+      workspaceId: createStagedWorkspaceId(env.workspace),
+      sessionId: 's1',
+    })
     if (filtered.ok) {
       const value = filtered.value as GrayStagedDiffListResult
       expect(value.items.map(e => e.id)).not.toContain(other.id)
@@ -149,6 +152,55 @@ describe('stagedDiff/list / preview', () => {
 })
 
 describe('stagedDiff/accept / reject', () => {
+  it('A 条目不能用 B workspace 接受或拒绝，B 不落盘且 A 状态不变', async () => {
+    const env = await makeEnv()
+    const otherWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-remote-sd-other-ws-'))
+    tempDirs.push(otherWorkspace)
+    const acceptId = await stage(env, { entryId: 'wrong-workspace-accept', path: 'accept.txt' })
+    const rejectId = await stage(env, {
+      entryId: 'wrong-workspace-reject',
+      path: 'reject.txt',
+      before: 'original',
+      after: 'replacement',
+    })
+
+    expectFailure(
+      await env.invoke('stagedDiff', 'accept', {
+        entryId: acceptId,
+        expectedRevision: 1,
+        workspace: otherWorkspace,
+      }),
+      GRAY_REMOTE_ERROR_CODES.CONFLICT,
+    )
+    expectFailure(
+      await env.invoke('stagedDiff', 'reject', {
+        entryId: rejectId,
+        expectedRevision: 1,
+        workspace: otherWorkspace,
+      }),
+      GRAY_REMOTE_ERROR_CODES.CONFLICT,
+    )
+
+    await expect(fs.access(path.join(otherWorkspace, 'accept.txt'))).rejects.toThrow()
+    expect(env.service.previewEntry(acceptId)).toMatchObject({ status: 'pending', revision: 1 })
+    expect(env.service.previewEntry(rejectId)).toMatchObject({ status: 'pending', revision: 1 })
+  })
+
+  it('workspace 缺失或空白 → GRAY_INVALID_INPUT（不得回退宿主 cwd）', async () => {
+    const env = await makeEnv()
+    const acceptId = await stage(env, { entryId: 'missing-workspace-accept' })
+    const rejectId = await stage(env, { entryId: 'missing-workspace-reject', path: 'other.ts' })
+
+    expectFailure(
+      await env.invoke('stagedDiff', 'accept', { entryId: acceptId, expectedRevision: 1 }),
+      GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+    )
+    expectFailure(
+      await env.invoke('stagedDiff', 'reject', { entryId: rejectId, expectedRevision: 1, workspace: '  ' }),
+      GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+    )
+  })
+
   it('accept 落盘并返回 done 条目（ADR §4：accepted → 落盘 → done）', async () => {
     const env = await makeEnv()
     const id = await stage(env, { entryId: 'e1', path: 'out.txt', after: 'written-content' })

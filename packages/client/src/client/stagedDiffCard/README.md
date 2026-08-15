@@ -30,7 +30,7 @@ the host endpoints:
 | `reject(params)` | `stagedDiff/reject` | never writes; `GRAY_STAGED_REJECT_CONFLICT` when the target moved |
 
 Methods return the host `GrayRemoteResult` envelope verbatim — business
-failures never throw. `createStagedDiffActions(dataSource)` (actions.ts)
+failures never throw. `createStagedDiffActions(dataSource, workspace)` (actions.ts)
 wraps the port into idempotent, error-mapped decision actions for the UI.
 
 ### Mock mode
@@ -67,7 +67,7 @@ ctx.locale.register(GRAYCODE_STAGED_DIFF_CARD_NS, 'ja', graycodeStagedDiffCardJa
 const batch = await loadReviewBatch(dataSource, { workspaceId, sessionId })
 <StagedDiffBatchList t={ctx.locale.bind(GRAYCODE_STAGED_DIFF_CARD_NS)}
                      batch={batch}
-                     actions={createStagedDiffActions(dataSource)}
+                     actions={createStagedDiffActions(dataSource, workspaceRoot)}
                      onEntriesChanged={(updated) => { /* host refreshes its projection */ }} />
 ```
 
@@ -102,7 +102,8 @@ const batch = await loadReviewBatch(dataSource, { workspaceId, sessionId })
   only invoke injected callbacks; they never load, never write, never touch
   the workspace. With no `actions` (history replay, unwired host) buttons
   render disabled with the `replayOnly` hint.
-- **Mutations carry operation ids** and are idempotent at the UI layer.
+- **Mutations carry operation ids and an explicit absolute workspace** and
+  are idempotent at the UI layer; no browser request falls back to host cwd.
 - **In-memory state is never a write success**: after a successful decision
   the component forwards the updated entry to `onEntriesChanged`; the host
   refreshes its projection. The badge always reflects the projected entry

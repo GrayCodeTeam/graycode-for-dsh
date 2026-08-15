@@ -317,8 +317,8 @@ export interface GrayStagedDiffListResult extends GrayPage<StagedEntry> {}
 export interface GrayStagedDiffDecisionParams {
   readonly entryId: string
   readonly expectedRevision: number
-  /** 目标 workspace 根（accept 落盘需要；缺省 process.cwd()）。 */
-  readonly workspace?: string
+  /** 目标 workspace 根（绝对路径）；Browser Remote 必须显式提供。 */
+  readonly workspace: string
 }
 
 export type {
