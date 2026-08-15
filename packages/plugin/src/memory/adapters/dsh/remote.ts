@@ -3,6 +3,8 @@
  *
  * 端点（命名空间 `memory`）：
  * - `memory/list`：条目查询（search 子串 + 作用域过滤 + 游标分页）；
+ * - `memory/note`：手动新增一条原始记忆（等价 memory_note 工具写入路径；
+ *   返回新建条目的 id/date/text；单行 + entryChars 字节约束）；
  * - `memory/edit`：原地编辑单条原始记忆（保留 id/date；长度受 entryChars 约束）；
  * - `memory/forget`：forget 命令（blockId 语义与 memory_forget 工具一致；
  *   `confirm: true` 缺失 → GRAY_APPROVAL_REQUIRED）；
@@ -100,6 +102,21 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
       entries.sort((a, b) => b.id - a.id) // 最新在前（id 单调）
       const { page, nextCursor } = slicePage(entries, cursor, limit)
       return { items: page, total: entries.length, nextCursor }
+    },
+
+    'memory/note': async (args: GrayRemoteArgs) => {
+      const text = requireString(args, 'text')
+      const { manager } = await resolveManager(service, args, true)
+
+      let id: number
+      try {
+        const result = await manager.note(text)
+        id = result.id
+      } catch (err) {
+        throw mapStoreFailure(err, 'memory.note')
+      }
+      // 与工具层写入路径一致：note 内部 trim 后落盘，date 取本地自然日
+      return { id, date: new Date().toISOString().slice(0, 10), text: text.trim() }
     },
 
     'memory/edit': async (args: GrayRemoteArgs) => {

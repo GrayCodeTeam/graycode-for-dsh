@@ -20,6 +20,7 @@ const CONTRACT_ENDPOINTS: readonly string[] = [
   'workflows/list',
   'workflows/get',
   'memory/list',
+  'memory/note',
   'memory/edit',
   'memory/forget',
   'memory/configGet',

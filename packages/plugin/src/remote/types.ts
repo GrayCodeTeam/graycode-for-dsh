@@ -176,6 +176,14 @@ export interface GrayMemoryListResult extends GrayPage<GrayMemoryEntryView> {
   /** 过滤后总条目数（total 同义，兼容旧客户端）。 */
 }
 
+/** memory/note 入参：手动新增一条原始记忆（等价 memory_note 工具写入路径）。 */
+export interface GrayMemoryNoteParams {
+  readonly scope?: GrayMemoryScope
+  readonly workspace?: string
+  /** 单行文本；trim 后落盘，受 entryChars 字节上限约束。 */
+  readonly text: string
+}
+
 /** memory/edit 入参：原地覆写单条原始记忆（保留 id/date）。 */
 export interface GrayMemoryEditParams {
   readonly scope?: GrayMemoryScope

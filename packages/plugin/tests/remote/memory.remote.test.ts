@@ -12,6 +12,7 @@ import { createMemoryRemoteHandlers } from '../../src/memory/adapters/dsh/remote
 import { GrayRemoteService } from '../../src/remote/service.ts'
 import {
   GRAY_REMOTE_ERROR_CODES,
+  type GrayMemoryEntryView,
   type GrayMemoryListResult,
   type GrayRemoteResult,
 } from '../../src/remote/types.ts'
@@ -112,6 +113,49 @@ describe('memory/list', () => {
     const result = await invoke('memory', 'list', { limit: 10_000 })
     expect(result.ok).toBe(true)
     if (result.ok) expect((result.value as GrayMemoryListResult).items.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('memory/note', () => {
+  it('手动新增一条 global 记忆，返回 id/date/text', async () => {
+    const { invoke } = await makeEnv()
+    const result = await invoke('memory', 'note', { scope: 'global', text: '  manual note  ' })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const value = result.value as GrayMemoryEntryView
+      expect(value.id).toBe(0)
+      expect(value.text).toBe('manual note')
+      expect(value.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    }
+    const list = await invoke('memory', 'list', { scope: 'global' })
+    if (list.ok) {
+      expect((list.value as GrayMemoryListResult).items[0]!.text).toBe('manual note')
+    }
+  })
+
+  it('workspace scope 写入路径创建缺失存储（与只读 list 不同）', async () => {
+    const { invoke } = await makeEnv()
+    const cwd = path.join(os.tmpdir(), 'note-created-ws')
+    const result = await invoke('memory', 'note', { scope: 'workspace', workspace: cwd, text: 'ws note' })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.value).toMatchObject({ text: 'ws note' })
+    }
+    const list = await invoke('memory', 'list', { scope: 'workspace', workspace: cwd })
+    if (list.ok) {
+      expect((list.value as GrayMemoryListResult).items[0]!.text).toBe('ws note')
+    }
+  })
+
+  it('缺 text / 空文本 / 多行 / 超长 → GRAY_INVALID_INPUT', async () => {
+    const { invoke } = await makeEnv()
+    expectFailure(await invoke('memory', 'note', { scope: 'global' }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+    expectFailure(await invoke('memory', 'note', { scope: 'global', text: '   ' }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+    expectFailure(await invoke('memory', 'note', { scope: 'global', text: 'two\nlines' }), GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+    expectFailure(
+      await invoke('memory', 'note', { scope: 'global', text: '长'.repeat(1000) }),
+      GRAY_REMOTE_ERROR_CODES.INVALID_INPUT
+    )
   })
 })
 
