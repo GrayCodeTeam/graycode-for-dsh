@@ -1,6 +1,9 @@
 /** Standalone defaults used by settings-domain unit tests. */
 
 import type { GrayCodeConfig } from './types.ts'
+import { DEFAULT_MAJOR_CHANGE_TOOLS } from '../autoCheckpoints/index.ts'
+import { DEFAULT_IMAGE_API_URL, DEFAULT_IMAGE_MODEL } from '../images/domain/types.ts'
+import { DEFAULT_KEEP_RECENT_ROUNDS, DEFAULT_KEEP_RECENT_TOKENS } from '../summary/policy.ts'
 
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },
@@ -37,4 +40,29 @@ export const DEFAULTS: GrayCodeConfig = {
   subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
   notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
   thoughts: { enabled: true, sendHistoryThoughts: true },
+  autoCheckpoints: {
+    enabled: false,
+    beforeUserMessage: false,
+    beforeMajorChange: false,
+    majorChangeTools: [...DEFAULT_MAJOR_CHANGE_TOOLS],
+  },
+  images: {
+    enabled: false,
+    agentScope: 'roots',
+    url: DEFAULT_IMAGE_API_URL,
+    apiKey: '',
+    model: DEFAULT_IMAGE_MODEL,
+    enableAspectRatio: false,
+    defaultAspectRatio: undefined,
+    enableImageSize: false,
+    defaultImageSize: undefined,
+    maxBatchTasks: 5,
+    maxImagesPerTask: 1,
+  },
+  summary: {
+    enabled: true,
+    keepRecentRounds: DEFAULT_KEEP_RECENT_ROUNDS,
+    keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+    summarizePrompt: '',
+  },
 }

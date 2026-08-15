@@ -22,6 +22,9 @@ import type * as todo from '../todo/index.ts'
 import type * as subagents from '../subagents/index.ts'
 import type * as notifications from '../notifications/index.ts'
 import type * as thoughts from '../thoughts/index.ts'
+import type * as autoCheckpoints from '../autoCheckpoints/index.ts'
+import type * as images from '../images/index.ts'
+import type * as summary from '../summary/index.ts'
 
 /** Exact live configuration controlled by the GrayCode native settings page. */
 export interface GrayCodeConfig {
@@ -40,6 +43,9 @@ export interface GrayCodeConfig {
   subagents: subagents.Config
   notifications: notifications.Config
   thoughts: thoughts.Config
+  autoCheckpoints: autoCheckpoints.Config
+  images: images.Config
+  summary: summary.Config
 }
 
 /** Settings updates are top-level replacements of one or more module configs. */

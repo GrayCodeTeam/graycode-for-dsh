@@ -17,6 +17,9 @@ import * as todo from './todo/index.ts'
 import * as subagents from './subagents/index.ts'
 import * as notifications from './notifications/index.ts'
 import * as thoughts from './thoughts/index.ts'
+import * as autoCheckpoints from './autoCheckpoints/index.ts'
+import * as images from './images/index.ts'
+import * as summary from './summary/index.ts'
 import * as settings from './settings/index.ts'
 import { GrayRemoteService } from './remote/index.ts'
 
@@ -54,6 +57,12 @@ export interface Config {
   notifications: notifications.Config
   /** Thoughts request layer (A1): llm/stream rewrite, off by default. */
   thoughts: thoughts.Config
+  /** Auto checkpoints: checkpoint before user messages / major tool changes. */
+  autoCheckpoints: autoCheckpoints.Config
+  /** Images domain: generate_image tool (generation + editing via referenceImages). */
+  images: images.Config
+  /** Summary domain: manual conversation summarization via summary/generate. */
+  summary: summary.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -73,6 +82,9 @@ export const Config: z<Config> = z.object({
   subagents: subagents.Config,
   notifications: notifications.Config,
   thoughts: thoughts.Config,
+  autoCheckpoints: autoCheckpoints.Config,
+  images: images.Config,
+  summary: summary.Config,
 })
 
 export type LiveConfigFibers = {
@@ -131,6 +143,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       ...config.thoughts,
       enabled: config.thoughts.enabled && config.prompt.requestLayer,
     },
+    autoCheckpoints: config.autoCheckpoints,
+    images: config.images,
+    summary: config.summary,
   }
   // Phase 4 host 侧 Remote API（T8）：注册 `ctx.grayRemote` 分发服务并默认启用
   // 可回放投影日志（<dataRoot>/remote/projections.jsonl）。各域子插件在各自
@@ -208,6 +223,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // ADR-0002 §4b). Actual activation is AND-paired with prompt.requestLayer
   // (see the shared-ref wrappers above) to prevent unsourced/double injection.
     thoughts: liveThoughts,
+  // Auto checkpoints: subscribes to session/tool events and delegates to the
+  // checkpoints domain via CHECKPOINTS_SERVICE_KEY (mounted above).
+    autoCheckpoints: ctx.plugin(autoCheckpoints, liveConfig.autoCheckpoints),
+  // Images: generate_image tool (default off); mounts after media so its
+  // real implementation supersedes the media domain's fail-closed placeholder.
+    images: ctx.plugin(images, liveConfig.images),
+  // Summary: manual summarization endpoint `summary/generate` registered on
+  // ctx.grayRemote (GrayRemoteService mounted above); mount returns a disposer.
+    summary: ctx.plugin(summary, liveConfig.summary),
   }
 
   const applyLiveConfig = createLiveConfigUpdater(fibers, liveConfig)

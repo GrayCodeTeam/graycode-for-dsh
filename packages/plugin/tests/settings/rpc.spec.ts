@@ -19,6 +19,16 @@ function makeScopeStub() {
   return { scope: { get: () => current, update, replace } as ConfigScope, update, replace }
 }
 
+/**
+ * config.get 的通道值：images.apiKey 是 write-only 字段（schema role('secret')），
+ * redactSecrets 会把它从线上文档中移除。
+ */
+function wireDefaults(): GrayCodeConfig {
+  const wire = structuredClone(DEFAULTS)
+  delete (wire.images as { apiKey?: string }).apiKey
+  return wire
+}
+
 function makeConnectionStub(): {
   connection: GrayCodeConnection
   handle: ReturnType<typeof vi.fn>
@@ -37,7 +47,7 @@ describe('/graycode browser bridge', () => {
   it('reads the live native-settings value', async () => {
     const { scope } = makeScopeStub()
     const result = await createGrayCodeConfigHandler(scope, GrayCodeSchema)('config.get', undefined)
-    expect(result).toEqual({ ok: true, value: DEFAULTS })
+    expect(result).toEqual({ ok: true, value: wireDefaults() })
   })
 
   it('accepts the documented { patch } payload and retains direct-patch compatibility', async () => {
@@ -70,7 +80,7 @@ describe('/graycode browser bridge', () => {
     const { scope, replace } = makeScopeStub()
     const result = await createGrayCodeConfigHandler(scope, GrayCodeSchema)('config.reset', {})
     expect(replace).toHaveBeenCalledWith({})
-    expect(result).toEqual({ ok: true, value: DEFAULTS })
+    expect(result).toEqual({ ok: true, value: wireDefaults() })
   })
 
   it('bridges Gray Remote while preserving its nested result envelope', async () => {
@@ -134,7 +144,7 @@ describe('registerGrayCodeChannel', () => {
     const { scope } = makeScopeStub()
     const disposer = registerGrayCodeChannel(ctx, scope, GrayCodeSchema)
     expect(handle).toHaveBeenCalledWith(GRAYCODE_CHANNEL, expect.any(Function), { authority: 'trusted-host' })
-    expect(await captured.handler!('config.get', {})).toEqual({ ok: true, value: DEFAULTS })
+    expect(await captured.handler!('config.get', {})).toEqual({ ok: true, value: wireDefaults() })
     await disposer()
   })
 

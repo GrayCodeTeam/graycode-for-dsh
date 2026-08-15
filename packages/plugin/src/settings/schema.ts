@@ -18,6 +18,9 @@ import * as todo from '../todo/index.ts'
 import * as subagents from '../subagents/index.ts'
 import * as notifications from '../notifications/index.ts'
 import * as thoughts from '../thoughts/index.ts'
+import * as autoCheckpoints from '../autoCheckpoints/index.ts'
+import * as images from '../images/index.ts'
+import * as summary from '../summary/index.ts'
 import type { GrayCodeConfig } from './types.ts'
 
 export const GRAYCODE_SETTINGS_NAMESPACE: SettingsNamespace = settingsNamespace('graycode')
@@ -39,4 +42,7 @@ export const GrayCodeSchema: z<GrayCodeConfig> = z.object({
   subagents: subagents.Config,
   notifications: notifications.Config,
   thoughts: thoughts.Config,
+  autoCheckpoints: autoCheckpoints.Config,
+  images: images.Config,
+  summary: summary.Config,
 })
