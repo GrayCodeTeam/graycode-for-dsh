@@ -199,9 +199,81 @@
    与插件端同源契约）；每个启用的子代理注册为委托宿主 `spawn` 的 provider
    （`graycode-custom-<id>`）与模型可见工具（身份 = 名称/描述，系统提示词经 persona
    注入），热更新随域 fiber 重启（effect disposer 清理后按新配置重挂）。
+- **提示词编排重构（P3F v2，entries 唯一组装）**：预设条目（可排序）成为唯一组装方式
+  ——system 条目合并进系统提示词，user/assistant 条目经 A1 请求构造层（llm/stream
+  重写）以**真实消息**注入，chat_history 条目决定历史前后位置（before=列表最前，
+  after=当前回合 user 消息之前，对齐原版 findCurrentTurnStartIndex 语义）；
+  fakeThought 仅以 typed `{type:'reasoning'}` 块传递（**绝对禁止 `[thinking]` 文本
+  降级**——渠道不支持时思维链不注入而非降级）；`prompt_mode_preview` 感知请求层并
+  标注「user/assistant 条目将以真实消息注入」；D-11=c 的系统文本段落路径已删除。
+- **宿主提示词覆盖（overrideHostPrompt，默认开）**：agent 作用域注册
+  `system-prompt/assemble` 瀑布——过滤宿主 sections（只保留 `graycode:persona` +
+  `graycode:prompt`），被移除内容中和渲染（{{...}} 组替换为确定性占位）后以
+  `{{graycode_dsh_prompt}}` 变量可引用（覆盖与变量化双满足）；`{{$TOOLS}}` 占位符
+  延迟为 `{{graycode_tools}}`（工具清单由瀑布无条件提供，含 `tools` 别名兼容）；
+  contexts 按名过滤（只留 `graycode.` 前缀，弃用 suppressRuntimeContext 一刀切）；
+  瀑布 `await next()` 组合 + fail-closed（异常透传）。
+- **动态上下文（preserve 语义）**：`systemPrompt.context` 注册 `graycode.todo` /
+  `graycode.memory`——TODO 快照（格式对齐原版 textUtils：`Total: N | pending: x…`
+  统计行 + `- [status] content` + 200 截断 + in_progress<pending<completed<cancelled
+  排序 + 50 条上限）与 MEMORY 说明以持久化 user 消息快照进入会话历史（DSH 原生
+  preserve：文本去重、变化追加、旧快照原位保留、compaction 可清理），前端由宿主
+  ContextInjectionRow 自动展示（零前端代码）；模板占位符 `{{$TODO_LIST}}` /
+  `{{$MEMORY}}` 同步提供值（`dynamicTodo`/`dynamicMemory` 开关）。
+- **per-mode toolPolicy 持久化（D-4 补全）**：PromptMode 新增 `toolPolicy` /
+  `toolPolicyCustomized` 字段——导入保存（不再丢弃）、CRUD patch 支持、执行链
+  `resolveModeToolPolicy` 优先读模式持久化值（toolPolicyCustomized=true 用模式名单，
+  否则回退内置表），自定义模式可配置、内置模式可定制。
+- **legacy 导入映射**：`dynamicTemplate`（启用时）导入为 user 条目（order 置于首个
+  chat_history 条目之前）；全局 SystemPromptConfig 形状折叠导入（modes Record、全局
+  template 回退 code 模式、全局 dynamicTemplate 去重映射、currentModeId 生效）；
+  `promptAssemblyMode: 'legacy'` 保留 warning（原版 legacy 模式 promptEntries 从未
+  生效、导入后被激活，提示用户）。
+- **A1 默认启用与配置联动**：`prompt.requestLayer` / `sendHistoryThoughts` /
+  `overrideHostPrompt` / `dynamicTodo` / `dynamicMemory` 与 `thoughts.enabled` /
+  `thoughts.sendHistoryThoughts` 默认 true；组合根 **AND 联动**（thoughts 实际启用 =
+  `enabled && prompt.requestLayer`，requestLayer 翻转时主动重派生 thoughts fiber，
+  消除双注入与条目丢失中间态）；llm/stream 重写产物 `markAgentLoopRequest` +
+  `deepFreeze` 成对处理（保持 loop 请求契约）。
+- **client 设置界面**：prompt 页新增 `overrideHostPrompt` / `dynamicTodo` /
+  `dynamicMemory` 三个开关（zh/en/ja 三套文案），说明预设条目以真实消息注入、
+  动态上下文以宿主注入上下文行显示。
+- **host Remote 端点（prompt 域）**：`src/prompt/remote.ts`——命名空间 `prompt` 9 个
+  端点（modes.list/get/setCurrent/create/update/delete/duplicate/import/export），
+  业务错误映射 `GRAY_PROMPT_*` 稳定码（入参形状错误 `GRAY_INVALID_INPUT`），
+  promptEntries/toolPolicy 入参校验（防坏数据触发 STORAGE_CORRUPT），注册随 fiber
+  注销（`ctx.get('grayRemote')` 独立挂载静默跳过）；26 用例。
+- **client 模式管理 UI（仅用户编辑）**：设置「提示词」页挂载 `PromptModeManager`——
+  模式列表/切换/新建/复制/删除（内置禁删禁改名）/单模式与全部导出/JSON 导入
+  （warnings 展示）+ `ModeEditor`（名称、主模板 `{{$MODULE}}`、`EntriesEditor`
+  条目排序/启用/角色 system|user|assistant|chat_history（固定）/content/fakeThought
+  「伪造思维链（reasoning）」文本域/上移下移/增删、`ToolPolicyEditor` 继承/自定义
+  两态 + 32 工具预置全选）；**模型无任何编辑入口**（仅 prompt_mode_list/set/preview）；
+  memory 页新增 `memory.systemPrompt` 自定义提示词字段；zh/en 文案（ja 经 en 继承）；
+  33 用例（纯逻辑/transport/往返一致性）。
+- **MEMORY 自定义提示词链路**：memory 域 Config 新增 `systemPrompt`（空=默认说明）与
+  `enabled` 显式字段，提供跨域服务 `graycode.memoryPrompt`
+  （getSystemPrompt/isEnabled）；promptInjector 的 `{{$MEMORY}}` 与 `graycode.memory`
+  context 改经服务取值——memory 关闭置空、自定义优先、无服务兜底默认说明（对齐
+  原版 generateMemorySection）；12 用例。
+- **宿主 complete section 检测告警**：waterfall 检测到宿主 complete section 覆盖过滤
+  时 logger.warn（fail-open 不干预，overrideHostPrompt=false 不告警）。
+- **回合首步注入（B1 修复）**：llm/stream 重写只在回合首个 step 注入预设条目——
+  末尾用户输入之后只允许插件快照后缀，出现工具结果/assistant 即跳过（对齐原版
+  「工具迭代循环不重复添加」；真实 loop 首步末尾是 runtime-context 快照，后缀判定
+  避免误杀）；多步工具循环不再重复注入预设条目（token 节省 + 语义正确）。
+- **thoughts e2e 集成验证**：`tests/e2e/thoughtsLoop.test.ts`——真实 agent-loop +
+  mock LLM + 默认配置，验证首步注入（user 条目头部 + assistant reasoning 块 +
+  真实输入保序）、第二 step 不再注入、第二用户回合再次注入；连跑稳定。
 
 ### Changed（变更）
 
+- **默认值翻转**：`prompt.requestLayer` / `prompt.sendHistoryThoughts` /
+  `thoughts.enabled` / `thoughts.sendHistoryThoughts` 从默认 false 改为默认 true
+  （A1 真实消息注入与思维链默认启用）；存量 `settings.yaml` 已持久化值不受 base 层
+  默认翻转影响，需手动更新或 reset。
+- **预设条目语义**：user/assistant 条目不再渲染为系统文本段落（D-11=c 段落路径与
+  `[thinking]` 文本前缀已删除）；fakeThought 仅以 typed reasoning 块传递。
 - **构建管线**：根 package.json 的 build/typecheck/pack 纳入 `@graycode/dsh-client`
   （此前仅 plugin）；`pnpm ci:all` 三包全量。
 - **依赖**：plugin devDependencies 补 `@deepseek-ai/dsh-subagent@0.1.0-rc.6`

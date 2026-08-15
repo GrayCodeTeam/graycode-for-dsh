@@ -23,6 +23,26 @@
 > （global / 绝对路径，memoryTarget 应用）+ migration/scopeMap Remote 端点；
 > client ScopeMapPanel 可视化面板（Remote/Mock 双源，32 用例）；D-4a 会话工作区
 > 归属缺失报告清单、D-5b 会话存档点清单；ADR-0004 注册表立项。
+> 本轮（P3F v2，提示词编排重构）：预设条目（entries）成为**唯一组装方式**——
+> system 条目进系统提示词，user/assistant 条目经 A1（llm/stream 重写）以真实消息注入，
+> chat_history 条目决定历史前后位置；**fakeThought 仅以 typed reasoning 块传递，
+> 绝对禁止 [thinking] 文本降级**（主人决策）；D-11=c 段落路径删除。
+> 宿主提示词覆盖（overrideHostPrompt）：system-prompt/assemble 瀑布过滤宿主 sections
+> → `{{graycode_dsh_prompt}}` 变量化；`{{$TOOLS}}` → `{{graycode_tools}}` 延迟插值。
+> 动态上下文 preserve：systemPrompt.context 注册 graycode.todo/graycode.memory，
+> 快照持久化进历史 + 宿主 ContextInjectionRow 自动展示。per-mode toolPolicy 持久化
+> （D-4 补全）；dynamicTemplate 导入映射 + 全局配置折叠。A1 默认启用 + AND 联动
+> （thoughts.enabled && prompt.requestLayer）；llm/stream 重写产物 mark+deepFreeze
+> 成对；after 注入定位修正。client 设置新增 overrideHostPrompt/dynamicTodo/
+> dynamicMemory 开关。全量测试 1903 用例全绿。
+> 本轮（P3F v2 第二批，UI 与缺口修复）：host 侧 prompt/modes Remote 端点（9 个，
+> 命名空间 prompt）；client 模式管理 UI（PromptModeManager——模式列表/CRUD/导入导出
+> + EntriesEditor 条目排序/角色/fakeThought 文本域 + ToolPolicyEditor 32 工具预置；
+> **预设条目仅用户编辑，模型无编辑入口**）；memory.systemPrompt 自定义提示词链路
+> （graycode.memoryPrompt 跨域服务，关闭置空/自定义优先/无服务兑底）；宿主 complete
+> section 检测告警；**回合首步注入修复**（工具迭代循环不再重复注入预设条目，对齐原版
+> 注入时机语义）；thoughts 真实 agent-loop e2e（首步注入 + 第二 step 不注入 + 多回合
+> 再注入）；全量测试 1981 用例全绿。
 
 ## 版本锁定（ADR-0001）
 
