@@ -322,6 +322,37 @@ describe('memory 工具（经 service 闭包）', () => {
     }
   })
 
+  test('工作区与全局记忆并存非互斥：有工作区记忆时 wake/recall 仍始终包含全局段', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-dual-'))
+    try {
+      const globalMgr = await service.getGlobal()
+      await globalMgr.note('global-kept')
+      // 工作区记忆存在（非空）时，wake 双段并存：全局段不被工作区段替换/隐藏
+      await tools.get('memory_note')!.execute({ text: 'workspace-added' }, fakeExec(wsDir))
+      const wake = tools.get('memory_wake')!
+      const woke = (await wake.execute({}, fakeExec(wsDir))) as WakeToolResult
+      expect(woke.text).toContain('--- Global memory ---')
+      expect(woke.text).toContain('global-kept')
+      expect(woke.text).toContain('--- Workspace memory (')
+      expect(woke.text).toContain('workspace-added')
+      // 默认（不传 scope）双作用域合并口径
+      expect(woke.totalMemories).toBe(2)
+
+      // recall 同样合并两个作用域，互不排斥
+      const recall = tools.get('memory_recall')!
+      const hit = (await recall.execute({ regex: 'kept|added' }, fakeExec(wsDir))) as RecallToolResult
+      expect(hit.totalHits).toBe(2)
+      expect(hit.text).toContain('--- Global memory ---')
+      expect(hit.text).toContain('global-kept')
+      expect(hit.text).toContain('--- Workspace memory (')
+      expect(hit.text).toContain('workspace-added')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
   test('memory_wake scope="global"：只读全局段，工作区段不出现且不建目录', async () => {
     const { tools, service, dataRoot } = makeTools()
     const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-scope-'))
