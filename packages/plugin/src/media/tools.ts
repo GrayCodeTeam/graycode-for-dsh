@@ -95,6 +95,72 @@ function cancelledResultFor(inputPath: string, index: number): MediaTaskResult {
   return failResultFor(inputPath, index, MediaErrorCode.CANCELLED, 'user cancelled the operation', true)
 }
 
+/** 剔除值为 undefined 的键（lossless-JSON 契约：不序列化 undefined 值键） */
+function omitUndefined<T extends object>(value: T): T {
+  const out = Object.fromEntries(
+    Object.entries(value).filter(([, v]) => v !== undefined),
+  ) as Record<string, unknown>
+  return out as T
+}
+
+/**
+ * 图片 magic bytes 判定（PNG 89 50 4E 47 / JPEG FF D8 FF / WebP RIFF....WEBP /
+ * GIF 47 49 46 38）。返回归一化格式名；无法识别返回 undefined。
+ */
+function detectImageFormat(bytes: Uint8Array): 'png' | 'jpeg' | 'webp' | 'gif' | undefined {
+  if (bytes.byteLength < 4) return undefined
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'png'
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpeg'
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    if (bytes.byteLength >= 12 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+      return 'webp'
+    }
+  }
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'gif'
+  return undefined
+}
+
+/** 渠道声明 format/mime 归一化为格式名（未知值返回 undefined，不据此拒绝） */
+function normalizeDeclaredFormat(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'png' || normalized === 'image/png' || normalized === 'image/x-png') return 'png'
+  if (normalized === 'jpg' || normalized === 'jpeg' || normalized === 'image/jpeg') return 'jpeg'
+  if (normalized === 'webp' || normalized === 'image/webp') return 'webp'
+  if (normalized === 'gif' || normalized === 'image/gif') return 'gif'
+  return undefined
+}
+
+/**
+ * 模型渠道返回字节与期望输出格式的一致性校验（H-17）：
+ * 1) magic bytes 必须识别为受支持图片格式；
+ * 2) 必须与期望输出格式一致（jpeg 统一 .jpg 扩展名）；
+ * 3) 渠道声明 format/mime 与 magic bytes 冲突时拒绝。
+ * 返回错误文案；null = 通过。不一致必须明确拒绝，不静默落盘。
+ */
+function imageOutputMismatch(
+  expectedExt: string,
+  bytes: Uint8Array,
+  declared: { format?: string; mime?: string },
+): string | null {
+  const detected = detectImageFormat(bytes)
+  if (detected === undefined) {
+    return `model channel returned bytes that are not a supported image format (expected ${expectedExt === 'jpg' ? 'jpeg' : expectedExt})`
+  }
+  const expected = expectedExt === 'jpg' ? 'jpeg' : expectedExt
+  if (detected !== expected) {
+    return `model channel returned ${detected} image bytes but the output format is ${expected} (extension .${expectedExt})`
+  }
+  for (const [kind, value] of [['format', declared.format], ['mime', declared.mime]] as const) {
+    if (!value) continue
+    const normalized = normalizeDeclaredFormat(value)
+    if (normalized && normalized !== detected) {
+      return `model channel declared ${kind} "${value}" but returned ${detected} image bytes`
+    }
+  }
+  return null
+}
+
 /**
  * 模型渠道工具输出路径解析：显式 output_path（工作区内）或调用方按同一 ts
  * 生成的默认路径（generate：media-output/gen-<ts>.<ext>；remove-background：
@@ -189,7 +255,7 @@ async function loadImage(
 
   let bytes: Uint8Array
   try {
-    bytes = await deps.fs.readBytes(input.absolute, { signal, maxBytes: MAX_READ_BYTES })
+    bytes = await deps.fs.readBytes(input.absolute, { signal, maxBytes: MAX_READ_BYTES, workspaceRoot: cwd })
   } catch (error) {
     const mediaError = error instanceof MediaError ? error : new MediaError(MediaErrorCode.READ_FAILED, String(error))
     return { ok: false, result: failResult(index, task, mediaError.code, mediaError.message) }
@@ -520,6 +586,14 @@ async function executeGenerateImageTask(
   if (!result.bytes || result.bytes.byteLength === 0) {
     return failResultFor('', index, MediaErrorCode.MODEL_RESPONSE_INVALID, 'model channel returned an empty image response')
   }
+  // H-17：magic bytes + 期望格式 + 渠道声明一致性校验，不一致明确拒绝（不静默落盘）
+  const mismatch = imageOutputMismatch(outputFormat.ext, result.bytes, {
+    format: result.format,
+    mime: result.mime,
+  })
+  if (mismatch !== null) {
+    return failResultFor('', index, MediaErrorCode.MODEL_RESPONSE_INVALID, mismatch)
+  }
 
   try {
     await deps.fs.writeBytes(output.absolute, result.bytes, { signal, workspaceRoot: cwd })
@@ -552,7 +626,7 @@ async function executeRemoveBackgroundTask(
 
   let bytes: Uint8Array
   try {
-    bytes = await deps.fs.readBytes(input.absolute, { signal, maxBytes: MAX_READ_BYTES })
+    bytes = await deps.fs.readBytes(input.absolute, { signal, maxBytes: MAX_READ_BYTES, workspaceRoot: cwd })
   } catch (error) {
     const mediaError = error instanceof MediaError ? error : new MediaError(MediaErrorCode.READ_FAILED, String(error))
     return failResultFor(task.image_path, index, mediaError.code, mediaError.message)
@@ -582,6 +656,14 @@ async function executeRemoveBackgroundTask(
   if (signal?.aborted) return cancelledResultFor(task.image_path, index)
   if (!result.bytes || result.bytes.byteLength === 0) {
     return failResultFor(task.image_path, index, MediaErrorCode.MODEL_RESPONSE_INVALID, 'model channel returned an empty image response')
+  }
+  // H-17 同族：remove_background 契约输出透明背景 PNG，返回字节必须是真实 PNG
+  const mismatch = imageOutputMismatch('png', result.bytes, {
+    format: result.format,
+    mime: result.mime,
+  })
+  if (mismatch !== null) {
+    return failResultFor(task.image_path, index, MediaErrorCode.MODEL_RESPONSE_INVALID, mismatch)
   }
 
   try {
@@ -692,7 +774,7 @@ function summarize(
     message += `\n\n⚠️ Note: ${cancelledResults.length} tasks were cancelled by user`
   }
 
-  return {
+  return omitUndefined({
     success,
     code,
     message,
@@ -702,7 +784,7 @@ function summarize(
     cancelledCount: cancelledResults.length,
     results,
     paths,
-  }
+  })
 }
 
 /** 批量执行主循环（顺序执行；每任务失败不中断，收集到 results；每步检查 signal） */

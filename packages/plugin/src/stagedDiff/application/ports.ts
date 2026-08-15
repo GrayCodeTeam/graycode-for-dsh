@@ -44,6 +44,8 @@ export interface ApplyFilePort {
    * - 返回写盘前快照（before）。
    */
   applyFile(destination: string, content: string, options: ApplyFileOptions): Promise<ApplyFileOutcome>;
-  /** 读目标当前内容（拒绝冲突检测用）；目标不存在返回 null */
-  readFile(destination: string): Promise<string | null>;
+  /** 读目标当前内容（拒绝冲突检测用）；目标不存在返回 null。
+   * 传入 `options.workspaceRoot` 时实现方必须做符号链接包含性校验
+   * （逃逸抛 GRAY_STAGED_PATH_ESCAPE）；不传则跳过校验（保持旧调用兼容）。 */
+  readFile(destination: string, options?: { workspaceRoot?: string }): Promise<string | null>;
 }

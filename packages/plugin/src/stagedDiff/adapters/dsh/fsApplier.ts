@@ -7,6 +7,9 @@
  * - 符号链接逃逸权威校验：`ctx.fs.resolve` 跟随符号链接得到规范 targetKey，
  *   再用 `ctx.fs.contains(workspaceRootTarget, target)` 做包含性检查，逃逸即抛
  *   GRAY_STAGED_PATH_ESCAPE（domain/pathSafety.ts 的静态校验是前置防线）。
+ * - readFile（拒绝冲突检测）同构：调用方传入 `options.workspaceRoot` 时读前同样
+ *   做 resolve + contains 校验（防符号链接逃逸读取工作区外文件）。options 可选以
+ *   保持 ApplyFilePort 接口兼容（旧调用 readFile(destination) 行为不变）。
  */
 import type { FileSystem } from '@deepseek-ai/dsh-fs';
 import type { ApplyFilePort } from '../../application/ports.ts';
@@ -30,8 +33,17 @@ export function createDshFsApplyFilePort(fsService: FileSystem): ApplyFilePort {
       return { before: outcome.before };
     },
 
-    async readFile(destination) {
+    async readFile(destination, options) {
       const target = await fsService.resolve(destination);
+      if (options?.workspaceRoot !== undefined) {
+        const rootTarget = await fsService.resolve(options.workspaceRoot);
+        if (!fsService.contains(rootTarget, target)) {
+          throw new StagedDiffError(
+            `target "${destination}" resolves outside workspace root "${options.workspaceRoot}" (symlink escape rejected)`,
+            StagedDiffErrorCode.PATH_ESCAPE
+          );
+        }
+      }
       const info = await fsService.stat(target);
       if (info === undefined) return null;
       return fsService.readText(target);

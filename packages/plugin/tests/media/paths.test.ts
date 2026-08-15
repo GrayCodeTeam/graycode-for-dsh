@@ -42,10 +42,12 @@ describe('resolveInsideWorkspace', () => {
     expect(resolveInsideWorkspace(root, root)).toBe(root)
   })
 
-  test('拒绝 .. 穿越（含 a/../b 形态的越界）', () => {
+  test('拒绝 .. 穿越（含 sub/../file 归一化后仍在工作区内的形态）', () => {
     expectPathError(() => resolveInsideWorkspace(root, '../outside.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
     expectPathError(() => resolveInsideWorkspace(root, 'images/../../outside.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
-    // a/../b 归一化后仍在工作区内（<root>/b），包含性校验通过——不抛错（见下方用例）
+    // 文档/注释承诺 ".. 一律拒绝"：出现 .. 段即拒绝，即使归一化后仍在工作区内
+    expectPathError(() => resolveInsideWorkspace(root, 'a/../b.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
+    expectPathError(() => resolveInsideWorkspace(root, 'sub/../file.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
   })
 
   test('拒绝工作区外的绝对路径', () => {
@@ -63,9 +65,11 @@ describe('resolveInsideWorkspace', () => {
     expectPathError(() => resolveInsideWorkspace(root, undefined as unknown as string), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
   })
 
-  test('工作区内的 .. 不越界时按解析结果处理（如 a/../b → b）', () => {
-    // a/../b 停留在工作区内：path.resolve 归一为 <root>/b，属于合法包含
-    expect(resolveInsideWorkspace(root, 'a/../b.png')).toBe(path.join(root, 'b.png'))
+  test('拒绝含 .. 段的路径（即使归一化后仍在工作区内）', () => {
+    // 与 stagedDiff pathSafety 同约定：出现 .. 段一律拒绝（L1），
+    // 不放行归一化后仍在工作区内的形态
+    expectPathError(() => resolveInsideWorkspace(root, 'a/../b.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
+    expectPathError(() => resolveInsideWorkspace(root, 'sub/../file.png'), MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
   })
 })
 

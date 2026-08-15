@@ -64,6 +64,11 @@ async function writeBytes(dir: string, relativePath: string, bytes: Uint8Array):
   return fullPath
 }
 
+/** 最小 JPEG 头字节（FF D8 FF E0 ... JFIF；magic bytes 校验只需前 3 字节） */
+function jpegBytes(): Uint8Array {
+  return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01])
+}
+
 /** 记录调用的 mock 渠道（默认返回 1x1 PNG；可覆盖方法行为） */
 interface MockChannel extends ChannelImagePort {
   generateCalls: ChannelGenerateImageRequest[]
@@ -131,7 +136,10 @@ describe('generate_image（成功路径，mock 渠道）', () => {
   })
 
   test('成功：显式 output_path 写入指定路径，format jpg 归一为 jpeg 透传', async () => {
-    const channel = createMockChannel()
+    // format=jpg 时期望输出 JPEG 字节（H-17 magic bytes 一致性校验），mock 返回 JPEG
+    const channel = createMockChannel({
+      generateImage: async () => ({ bytes: jpegBytes(), format: 'jpeg', mime: 'image/jpeg' }),
+    })
     const { ws, tools } = await makeTools(channel)
     try {
       const result = (await tools.get('generate_image')!.execute(
@@ -141,6 +149,9 @@ describe('generate_image（成功路径，mock 渠道）', () => {
       expect(result.success).toBe(true)
       expect(result.paths[0]).toBe(path.join(ws, 'art', 'gen.png'))
       expect(channel.generateCalls[0]!.format).toBe('jpeg')
+      const written = await fs.readFile(path.join(ws, 'art', 'gen.png'))
+      expect(written[0]).toBe(0xff)
+      expect(written[1]).toBe(0xd8)
     } finally {
       await fs.rm(ws, { recursive: true, force: true })
     }
@@ -210,6 +221,44 @@ describe('generate_image（失败路径）', () => {
       )) as ToolResult
       expect(result.success).toBe(false)
       expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  test('渠道返回文本字节冒充图片 → GRAY_MEDIA_MODEL_RESPONSE_INVALID，不落盘（H-17）', async () => {
+    const channel = createMockChannel({
+      generateImage: async () => ({ bytes: new TextEncoder().encode('this is not an image at all') }),
+    })
+    const { ws, tools } = await makeTools(channel)
+    try {
+      const result = (await tools.get('generate_image')!.execute(
+        { prompt: 'a cat', format: 'png' },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
+      expect(result.results[0]?.error).toContain('image')
+      // 未通过校验 → 不落盘（media-output 目录不应产生）
+      await expect(fs.stat(path.join(ws, 'media-output'))).rejects.toThrow()
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  test('渠道声明 format 与 magic bytes 冲突 → GRAY_MEDIA_MODEL_RESPONSE_INVALID（H-17）', async () => {
+    const channel = createMockChannel({
+      generateImage: async () => ({ bytes: png1x1Bytes(), format: 'jpeg' }),
+    })
+    const { ws, tools } = await makeTools(channel)
+    try {
+      const result = (await tools.get('generate_image')!.execute(
+        { prompt: 'a cat' },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
+      expect(result.results[0]?.error).toContain('jpeg')
     } finally {
       await fs.rm(ws, { recursive: true, force: true })
     }
@@ -334,6 +383,41 @@ describe('remove_background（失败路径）', () => {
       expect(result.results[0]?.code).toBe(MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
       expect(channel.removeCalls).toHaveLength(0)
     } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  test('符号链接逃逸读取 → GRAY_MEDIA_PATH_OUTSIDE_WORKSPACE（readBytes 含 workspaceRoot 校验，S-1）', async t => {
+    const channel = createMockChannel()
+    const { ws, tools } = await makeTools(channel)
+    // Windows 未开开发者模式/无管理员权限时 symlink 抛 EPERM → 动态跳过
+    const probe = path.join(ws, '__symlink_probe__')
+    try {
+      await fs.symlink(ws, probe, 'dir')
+      await fs.rm(probe)
+    } catch (error) {
+      await fs.rm(ws, { recursive: true, force: true })
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM') {
+        t.skip()
+        return
+      }
+      throw error
+    }
+    const outside = await createTempDir('dsh-media-outside-')
+    try {
+      // 工作区外 secret 文件 + 工作区内指向它的目录符号链接
+      await writeBytes(outside, 'secret.png', png1x1Bytes())
+      await fs.symlink(outside, path.join(ws, 'link'), 'dir')
+      const result = (await tools.get('remove_background')!.execute(
+        { image_path: 'link/secret.png' },
+        makeExec(ws),
+      )) as ToolResult
+      // 字符串层放行（link/secret.png 在工作区内），适配层 realpath 校验拒绝
+      expect(result.success).toBe(false)
+      expect(result.results[0]?.code).toBe(MediaErrorCode.PATH_OUTSIDE_WORKSPACE)
+      expect(channel.removeCalls).toHaveLength(0)
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true })
       await fs.rm(ws, { recursive: true, force: true })
     }
   })

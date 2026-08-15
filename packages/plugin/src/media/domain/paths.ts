@@ -44,6 +44,12 @@ export function resolveInsideWorkspace(cwd: string, rawPath: string): string {
     throw invalidPath(rawPath, 'path contains control characters')
   }
 
+  // `..` 穿越段一律拒绝（含 sub/../file 归一化后仍在工作区内的形态；与
+  // stagedDiff pathSafety 同约定，兑现文档/注释的 ".. 一律拒绝" 承诺，L1）
+  if (rawPath.replace(/\\/g, '/').split('/').includes('..')) {
+    throw invalidPath(rawPath, 'parent-directory traversal ("..") is not allowed')
+  }
+
   // 绝对路径判定：POSIX 根 / 或 Windows 盘符（C:\ 或 C:/）
   const isAbsoluteInput = rawPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rawPath)
   const candidate = isAbsoluteInput ? rawPath : path.resolve(cwd, rawPath)

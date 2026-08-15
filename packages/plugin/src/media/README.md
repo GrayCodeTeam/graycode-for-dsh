@@ -85,7 +85,9 @@ tests/media/        单元测试（domain 纯函数 + sharp 集成 + 工具层�
 `adapters/mediaFs.ts` 是唯一文件边界（端口 `MediaFsPort`：readBytes / writeBytes / stat）：
 
 - 读：`ctx.fs.resolve` → `ctx.fs.readBytes(target, signal, maxBytes)`（rc.6 原生二进制读，
-  上限 MAX_READ_BYTES = 50 MiB，超出报 `GRAY_MEDIA_FILE_TOO_LARGE`）；
+  上限 MAX_READ_BYTES = 50 MiB，超出报 `GRAY_MEDIA_FILE_TOO_LARGE`）；调用方随读选项
+  传入 `workspaceRoot`，readBytes/stat 前同样做 resolve + contains 权威校验
+  （与写路径同构，防符号链接逃逸读取工作区外文件）；
 - 写：fatal UTF-8 判定 → 文本走 `ctx.fs.writeText`（原子写、自动建父目录、经过
   `fs/write-intent` 策略缝、携带 `sandboxPolicy: { mode: 'workspace-write', workspaceRoot }`）；
   **GAP（rc.6 无公开 writeBytes API）**：二进制/非 UTF-8 图片字节 → node fs 直写回退
@@ -114,7 +116,10 @@ tests/media/        单元测试（domain 纯函数 + sharp 集成 + 工具层�
   （形如 `1024x1024`，单边 ≤ 16K）+ `format?`（png/jpeg/webp，**png 优先**）+
   `output_path?`。输出格式优先级：显式 format → 输出路径扩展名 → png；默认输出
   `<workspace>/media-output/gen-<ts>.<ext>`。可取消（AbortSignal 经 ChannelImagePort
-  透传底层 HTTP）；渠道返回字节原样写盘（复用 MediaFsPort，GAP 回退 node fs）。
+  透传底层 HTTP）；渠道返回字节先做 magic bytes 校验（PNG/JPEG/WebP/GIF，与期望输出
+  格式及渠道声明的 format/mime 一致性校验），不一致报
+  `GRAY_MEDIA_MODEL_RESPONSE_INVALID`（不静默落盘），通过后写盘（复用 MediaFsPort，
+  GAP 回退 node fs）。
 - **remove_background**：参数 `image_path`（必填，工作区内）+ `output_path?`。输入经
   `resolveInsideWorkspace`（纯字符串层）+ `MediaFsPort.readBytes`（适配层权威校验）；
   默认输出 `<workspace>/media-output/<name>-bg-removed-<ts>.png`（透明背景）。

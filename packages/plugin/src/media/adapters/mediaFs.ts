@@ -13,7 +13,9 @@
  *
  * 路径安全权威校验：DSH 实现经 `fs.resolve`（跟随符号链接得到规范路径）后
  * 用 `fs.contains(workspaceRoot, target)` 做包含性检查，逃逸即拒绝
- * （GRAY_MEDIA_PATH_OUTSIDE_WORKSPACE）；node 回退实现做 realpath 前缀检查。
+ * （GRAY_MEDIA_PATH_OUTSIDE_WORKSPACE）；node 回退实现做 realpath 后 contains 检查。
+ * 读（readBytes/stat）与写（writeBytes）同构：调用方传入 workspaceRoot 后，
+ * 读/stat 前同样做权威校验（防符号链接逃逸读取工作区外文件，S-1）。
  * 与 stagedDiff fsApplier 同构的双层防线（domain/paths.ts 纯字符串层 + 本层）。
  */
 import * as fs from 'node:fs/promises'
@@ -26,6 +28,8 @@ export interface MediaFsReadOptions {
   signal?: AbortSignal
   /** 字节上限（超出报 GRAY_MEDIA_FILE_TOO_LARGE） */
   maxBytes: number
+  /** 工作区根：读前做 resolve + contains 权威校验（符号链接逃逸拒绝，S-1） */
+  workspaceRoot?: string
 }
 
 /** 一次字节写入的选项 */
@@ -50,18 +54,42 @@ export interface MediaFsStat {
 export interface MediaFsPort {
   readBytes(absolutePath: string, opts: MediaFsReadOptions): Promise<Uint8Array>
   writeBytes(absolutePath: string, bytes: Uint8Array, opts: MediaFsWriteOptions): Promise<void>
-  stat(absolutePath: string, opts?: { signal?: AbortSignal }): Promise<MediaFsStat | undefined>
+  stat(absolutePath: string, opts?: { signal?: AbortSignal; workspaceRoot?: string }): Promise<MediaFsStat | undefined>
+}
+
+/** node 回退：realpath + contains 权威校验（S-1，防符号链接逃逸读工作区外文件） */
+async function nodeResolveInside(absolutePath: string, workspaceRoot: string | undefined): Promise<string> {
+  const real = await fs.realpath(absolutePath)
+  if (workspaceRoot !== undefined) {
+    const rootReal = await fs.realpath(workspaceRoot)
+    if (!isPathInside(rootReal, real)) {
+      throw new MediaError(
+        MediaErrorCode.PATH_OUTSIDE_WORKSPACE,
+        `path escapes the workspace root: ${absolutePath}`,
+      )
+    }
+  }
+  return real
+}
+
+/** realpath 后的包含性判定（目标等于根或为根的后代） */
+function isPathInside(rootReal: string, targetReal: string): boolean {
+  const relative = path.relative(rootReal, targetReal)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 /** 无 DSH 注入时的 node fs 回退实现（测试/兼容；语义与直写一致） */
 export function createNodeFsMediaFs(): MediaFsPort {
   return {
-    async readBytes(absolutePath, { signal, maxBytes }) {
+    async readBytes(absolutePath, { signal, maxBytes, workspaceRoot }) {
       signal?.throwIfAborted()
       let bytes: Uint8Array
       try {
-        bytes = await fs.readFile(absolutePath)
+        // S-1：读前 realpath + contains 权威校验（符号链接逃逸拒绝）
+        const real = await nodeResolveInside(absolutePath, workspaceRoot)
+        bytes = await fs.readFile(real)
       } catch (error) {
+        if (error instanceof MediaError) throw error
         throw mapNodeReadError(absolutePath, error)
       }
       if (bytes.byteLength > maxBytes) {
@@ -84,14 +112,17 @@ export function createNodeFsMediaFs(): MediaFsPort {
         )
       }
     },
-    async stat(absolutePath) {
+    async stat(absolutePath, { workspaceRoot } = {}) {
       try {
-        const info = await fs.stat(absolutePath)
+        // S-1：stat 前同样做 realpath + contains 权威校验
+        const real = await nodeResolveInside(absolutePath, workspaceRoot)
+        const info = await fs.stat(real)
         return {
           type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
           size: info.size,
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof MediaError) throw error
         return undefined
       }
     },
@@ -131,11 +162,13 @@ export function createDshFsMediaFs(fsService: FileSystem): MediaFsPort {
   }
 
   return {
-    async readBytes(absolutePath, { signal, maxBytes }) {
+    async readBytes(absolutePath, { signal, maxBytes, workspaceRoot }) {
       try {
-        const target = await fsService.resolve(absolutePath)
+        // S-1：读前 resolve + contains 权威校验（与写路径 resolveInside 同构）
+        const target = await resolveInside(absolutePath, workspaceRoot)
         return await fsService.readBytes(target, signal, maxBytes)
       } catch (error) {
+        if (error instanceof MediaError) throw error
         throw mapFsReadError(absolutePath, error)
       }
     },
@@ -171,9 +204,10 @@ export function createDshFsMediaFs(fsService: FileSystem): MediaFsPort {
         throw mapFsWriteError(absolutePath, error)
       }
     },
-    async stat(absolutePath, { signal } = {}) {
+    async stat(absolutePath, { signal, workspaceRoot } = {}) {
       try {
-        const target = await fsService.resolve(absolutePath)
+        // S-1：stat 前同样做 resolve + contains 权威校验
+        const target = await resolveInside(absolutePath, workspaceRoot)
         const info = await fsService.stat(target, signal)
         if (!info) return undefined
         return { type: info.type, size: info.size }

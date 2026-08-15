@@ -327,7 +327,7 @@ export class StagedDiffService {
         // null = 目标确实不存在（被删除）——与 before 快照（存在）不一致，属冲突
         let current: string | null | undefined;
         try {
-          current = await this.applier.readFile(destination);
+          current = await this.applier.readFile(destination, { workspaceRoot: input.workspaceRoot });
         } catch {
           current = undefined;
         }
