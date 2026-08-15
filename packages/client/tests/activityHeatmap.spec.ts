@@ -24,11 +24,15 @@ import {
   readActivitySession,
   readActivityStatsResult,
   readActivityThrownError,
+  readActivityTokenBuckets,
+  readActivityTokenListItems,
+  readActivityTokenSessionSummary,
   readCurrentSessionInfo,
   readDayActivityStats,
   readHourlyHeatmapRow,
   readMonthlyActivityStats,
 } from '../src/client/activityHeatmap/wire.ts'
+import { aggregateActivityTokens, activityTokenRangeStartMs } from '../src/client/activityHeatmap/tokens.ts'
 import {
   activityStatsErrorHint,
   activityStatsErrorKey,
@@ -40,11 +44,14 @@ import {
   buildActivityHeatmap,
   buildActivityMonthlyBars,
   buildActivitySummary,
+  buildActivityTokenStats,
   formatActivityDuration,
   formatGeneratedAt,
+  formatTokenCount,
   type ActivityHeatmapRowView,
 } from '../src/client/activityHeatmap/viewModel.ts'
 import {
+  ConnectionActivityTokensDataSource,
   MockActivityStatsDataSource,
   RemoteActivityStatsDataSource,
   createMockActivityStats,
@@ -178,6 +185,51 @@ describe('activity wire readers', () => {
   it('readActivityThrownError normalizes arbitrary throws', () => {
     expect(readActivityThrownError({ code: 'GRAY_CONFLICT', message: 'x', details: {} }).code).toBe('GRAY_CONFLICT')
     expect(readActivityThrownError(new Error('secret: /home/user')).code).toBe('GRAY_INTERNAL')
+  })
+
+  it('narrows a token usage projection and defaults missing cache buckets to 0', () => {
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 })).toEqual({
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 30,
+      cacheWriteTokens: 40,
+      totalTokens: 100,
+    })
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 5, outputTokens: 6 })).toEqual({
+      inputTokens: 5,
+      outputTokens: 6,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 11,
+    })
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 5 })).toBeNull()
+    expect(readActivityTokenBuckets('nope')).toBeNull()
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 'x', outputTokens: 1 })).toBeNull()
+  })
+
+  it('narrows a session summary item and drops items without usable projections', () => {
+    const item = {
+      sessionId: 'session-a',
+      updatedAt: Date.UTC(2026, 7, 14, 10, 0, 0),
+      title: 'My session',
+      projections: { values: { tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 } } },
+    }
+    const row = readActivityTokenSessionSummary(item)
+    expect(row).not.toBeNull()
+    expect(row!.title).toBe('My session')
+    expect(row!.date).toBe('2026-08-14')
+    expect(row!.totalTokens).toBe(10)
+    expect(readActivityTokenSessionSummary({ sessionId: 'x', updatedAt: 1 })).toBeNull()
+    expect(readActivityTokenSessionSummary({ ...item, projections: undefined })).toBeNull()
+    expect(readActivityTokenSessionSummary({ ...item, updatedAt: '1' })).toBeNull()
+    expect(readActivityTokenSessionSummary(null)).toBeNull()
+  })
+
+  it('narrows the session.list value into its raw item list', () => {
+    expect(readActivityTokenListItems({ items: [1, 2] })).toEqual([1, 2])
+    expect(readActivityTokenListItems({ items: 'x' })).toBeNull()
+    expect(readActivityTokenListItems({})).toBeNull()
+    expect(readActivityTokenListItems(null)).toBeNull()
   })
 })
 
@@ -324,6 +376,86 @@ describe('activity view model', () => {
     expect(formatGeneratedAt(local.getTime())).toBe('2026-08-14 09:05')
     expect(formatGeneratedAt(Number.NaN)).toBe('')
   })
+
+  it('formats token counts compactly (raw / K / M, locale-free)', () => {
+    expect(formatTokenCount(0)).toBe('0')
+    expect(formatTokenCount(999)).toBe('999')
+    expect(formatTokenCount(1500)).toBe('1.5K')
+    expect(formatTokenCount(12_300)).toBe('12.3K')
+    expect(formatTokenCount(10_000)).toBe('10.0K')
+    expect(formatTokenCount(2_500_000)).toBe('2.5M')
+    expect(formatTokenCount(25_000_000)).toBe('25.0M')
+    expect(formatTokenCount(Number.NaN)).toBe('0')
+    expect(formatTokenCount(-5)).toBe('0')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// token aggregation (pure)
+// ---------------------------------------------------------------------------
+
+const TOKEN_SESSIONS = [
+  { sessionId: 'a', title: 'Alpha', date: '2026-08-14', inputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400, totalTokens: 1000 },
+  { sessionId: 'b', title: 'Beta', date: '2026-08-13', inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 30 },
+  { sessionId: 'c', title: 'Gamma', date: '2026-08-01', inputTokens: 500, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1000 },
+] as const
+
+describe('activity token aggregation', () => {
+  it('computes the range start for every bounded range and none for all', () => {
+    const now = new Date(2026, 7, 14, 12, 0, 0).getTime()
+    expect(activityTokenRangeStartMs(undefined, now)).toBeUndefined()
+    expect(activityTokenRangeStartMs('all', now)).toBeUndefined()
+    expect(activityTokenRangeStartMs('today', now)).toBe(new Date(2026, 7, 14, 0, 0, 0).getTime())
+    expect(activityTokenRangeStartMs('7d', now)).toBe(new Date(2026, 7, 8, 0, 0, 0).getTime())
+    expect(activityTokenRangeStartMs('30d', now)).toBe(new Date(2026, 6, 16, 0, 0, 0).getTime())
+  })
+
+  it('totals, groups by day (newest first) and sorts sessions by total descending', () => {
+    const now = new Date(2026, 7, 14, 12, 0, 0).getTime()
+    const result = aggregateActivityTokens([...TOKEN_SESSIONS], {}, now)
+    expect(result.generatedAt).toBe(now)
+    expect(result.totals).toEqual({ inputTokens: 610, outputTokens: 720, cacheReadTokens: 300, cacheWriteTokens: 400, totalTokens: 2030 })
+    expect(result.byDay.map(day => day.date)).toEqual(['2026-08-14', '2026-08-13', '2026-08-01'])
+    expect(result.byDay[0]).toEqual({ date: '2026-08-14', inputTokens: 100, outputTokens: 200, cacheReadTokens: 300, cacheWriteTokens: 400, totalTokens: 1000 })
+    expect(result.sessions.map(session => session.sessionId)).toEqual(['a', 'c', 'b'])
+  })
+
+  it('filters sessions outside the range before aggregating', () => {
+    const now = new Date(2026, 7, 14, 12, 0, 0).getTime()
+    const result = aggregateActivityTokens([...TOKEN_SESSIONS], { range: '7d' }, now)
+    expect(result.sessions.map(session => session.sessionId)).toEqual(['a', 'b'])
+    expect(result.totals.totalTokens).toBe(1030)
+    expect(aggregateActivityTokens([...TOKEN_SESSIONS], { range: 'all' }, now).sessions).toHaveLength(3)
+  })
+
+  it('yields zero buckets for an empty set', () => {
+    const result = aggregateActivityTokens([], {}, 1)
+    expect(result.totals.totalTokens).toBe(0)
+    expect(result.byDay).toEqual([])
+    expect(result.sessions).toEqual([])
+  })
+})
+
+describe('activity token view model', () => {
+  it('caps the session list and projects day rows', () => {
+    const many = Array.from({ length: 12 }, (_, index) => ({
+      sessionId: `s-${index}`,
+      title: `S${index}`,
+      date: '2026-08-14',
+      inputTokens: index + 1,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: index + 1,
+    }))
+    const result = aggregateActivityTokens(many, {}, 1)
+    const view = buildActivityTokenStats(result)
+    expect(view.sessions).toHaveLength(8)
+    expect(view.sessions[0]!.sessionId).toBe('s-11')
+    expect(view.byDay).toHaveLength(1)
+    expect(view.byDay[0]).toEqual({ date: '2026-08-14', totalTokens: 78 })
+    expect(view.totals.totalTokens).toBe(78)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -390,6 +522,48 @@ describe('remote activity data source', () => {
     const controller = new AbortController()
     await source.stats({}, controller.signal)
     expect(transport.mock.calls[0]![2]).toBe(controller.signal)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// token data source (browser-side session list)
+// ---------------------------------------------------------------------------
+
+const SESSION_LIST_ITEMS = [
+  {
+    sessionId: 'session-a',
+    updatedAt: Date.UTC(2026, 7, 14, 10, 0, 0),
+    title: 'Alpha',
+    projections: { values: { tokenUsage: { uncachedInputTokens: 100, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 } } },
+  },
+  { sessionId: 'session-blank', updatedAt: 1, title: '' },
+]
+
+describe('connection token data source', () => {
+  it('calls session.list and aggregates the narrowed rows', async () => {
+    const list = vi.fn(async () => ({ result: { ok: true as const, value: { items: SESSION_LIST_ITEMS } } }))
+    const source = new ConnectionActivityTokensDataSource({ sessions: { list } })
+    const result = await source.tokens({ range: 'all' })
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({ sessionId: 'session-a', title: 'Alpha', totalTokens: 300 })
+    expect(result.totals.totalTokens).toBe(300)
+  })
+
+  it('throws a stable error on a failure result', async () => {
+    const source = new ConnectionActivityTokensDataSource({
+      sessions: {
+        list: async () => ({ result: { ok: false, error: { code: 'session-not-found', message: 'x', details: {} } } }),
+      },
+    })
+    await expect(source.tokens({})).rejects.toMatchObject({ code: 'session-not-found' })
+  })
+
+  it('throws GRAY_INTERNAL on a malformed value and on transport throws', async () => {
+    const malformed = new ConnectionActivityTokensDataSource({ sessions: { list: async () => ({ result: { ok: true, value: { nope: 1 } } }) } })
+    await expect(malformed.tokens({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
+    const rejected = new ConnectionActivityTokensDataSource({ sessions: { list: async () => { throw new Error('net down') } } })
+    await expect(rejected.tokens({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
   })
 })
 

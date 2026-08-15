@@ -18,6 +18,8 @@
 import { ACTIVITY_HEATMAP_MAX_ROWS } from './query.ts'
 import type {
   ActivityStatsResultLike,
+  ActivityTokenBucketsLike,
+  ActivityTokensResultLike,
   DayActivityStatsLike,
   HourlyHeatmapRowLike,
   MonthlyActivityStatsLike,
@@ -182,4 +184,60 @@ export function formatGeneratedAt(ms: number): string {
     ':',
     two(date.getMinutes()),
   ].join('')
+}
+
+// ---------------------------------------------------------------------------
+// Token statistics views
+// ---------------------------------------------------------------------------
+
+/** Default cap for the per-session list shown under the token section. */
+export const ACTIVITY_TOKEN_MAX_SESSIONS = 8
+
+/**
+ * Render-ready view of the token stats: totals plus the two bar lists.
+ * The per-session list is capped to the top {@link ACTIVITY_TOKEN_MAX_SESSIONS}
+ * rows (the aggregation already sorts by total tokens descending).
+ */
+export interface ActivityTokenStatsView {
+  readonly totals: ActivityTokenBucketsLike
+  /** Day rows (newest first), ready for the bar list. */
+  readonly byDay: readonly ActivityTokenDayView[]
+  /** Session rows (total descending, capped). */
+  readonly sessions: readonly ActivityTokenSessionView[]
+}
+
+/** One render-ready token day row (date + buckets). */
+export interface ActivityTokenDayView {
+  readonly date: string
+  readonly totalTokens: number
+}
+
+/** One render-ready token session row. */
+export interface ActivityTokenSessionView {
+  readonly sessionId: string
+  readonly title: string
+  readonly date: string
+  readonly totalTokens: number
+}
+
+/** Build the render-ready token view from the aggregated result. */
+export function buildActivityTokenStats(result: ActivityTokensResultLike): ActivityTokenStatsView {
+  return {
+    totals: result.totals,
+    byDay: result.byDay.map(day => ({ date: day.date, totalTokens: day.totalTokens })),
+    sessions: result.sessions.slice(0, ACTIVITY_TOKEN_MAX_SESSIONS).map(session => ({
+      sessionId: session.sessionId,
+      title: session.title,
+      date: session.date,
+      totalTokens: session.totalTokens,
+    })),
+  }
+}
+
+/** Format a token count compactly (999 → `999`, 1500 → `1.5K`, 2.5M → `2.5M`). */
+export function formatTokenCount(count: number): string {
+  const value = Number.isFinite(count) ? Math.max(0, count) : 0
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
+  return String(value)
 }

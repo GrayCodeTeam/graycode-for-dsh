@@ -21,12 +21,17 @@
  */
 import { buildActivityStatsRequest } from './query.ts'
 import type {
+  ActivitySessionListApi,
   ActivityStatsDataSource,
   ActivityStatsError,
   ActivityStatsResultLike,
   ActivityStatsWireParams,
+  ActivityTokensDataSource,
+  ActivityTokensResultLike,
+  ActivityTokensWireParams,
 } from './types.ts'
-import { readActivityEnvelope, readActivityStatsResult } from './wire.ts'
+import { readActivityEnvelope, readActivityStatsResult, readActivityTokenListItems, readActivityTokenSessionSummary, readActivityThrownError } from './wire.ts'
+import { aggregateActivityTokens } from './tokens.ts'
 
 /** Host endpoint consumed by this surface (contract key). */
 export type ActivityRemoteEndpoint = 'activity/stats'
@@ -67,6 +72,39 @@ export class RemoteActivityStatsDataSource implements ActivityStatsDataSource {
     const result = readActivityStatsResult(envelope.value)
     if (result === null) throw toActivityError('GRAY_INTERNAL', 'malformed activity/stats result')
     return result
+  }
+}
+
+/**
+ * Browser-side token statistics source.
+ *
+ * The host exposes token usage per session through the `session.list`
+ * projection baseline (`projections.values.tokenUsage`, token-meter), covering
+ * both attached and cold sessions via the durable projection cache — no plugin
+ * endpoint needed. This source narrows the unary response defensively, raises a
+ * stable {@link ActivityStatsError} on malformed envelopes, and delegates the
+ * range filter / day grouping / sorting to the pure aggregator in `tokens.ts`.
+ */
+export class ConnectionActivityTokensDataSource implements ActivityTokensDataSource {
+  constructor(private readonly api: ActivitySessionListApi) {}
+
+  async tokens(params: ActivityTokensWireParams): Promise<ActivityTokensResultLike> {
+    let response: { readonly result: { readonly ok: boolean; readonly value?: unknown; readonly error?: unknown } }
+    try {
+      response = await this.api.sessions.list({})
+    } catch (error: unknown) {
+      throw readActivityThrownError(error)
+    }
+    const { result } = response
+    if (!result.ok) {
+      throw readActivityThrownError(result.error ?? new Error('session.list failed'))
+    }
+    const rawItems = readActivityTokenListItems(result.value)
+    if (rawItems === null) throw toActivityError('GRAY_INTERNAL', 'malformed session.list result')
+    const sessions = rawItems
+      .map(readActivityTokenSessionSummary)
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+    return aggregateActivityTokens(sessions, params, Date.now())
   }
 }
 

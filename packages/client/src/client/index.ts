@@ -257,6 +257,7 @@ export function apply(ctx: ClientContext): void {
           store,
           locale: localeFace,
           remote,
+          connection,
           activityT,
           memoryT,
         }),

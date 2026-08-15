@@ -181,6 +181,15 @@
    `memory/*` Remote 端点；配套新增 host 侧 `memory/note` 端点（等价 memory_note
    工具写入路径，写路径创建缺失的 workspace 存储），客户端传输新增 `add`（remote
    与 mock 双实现 + 契约测试）。
+- **活动统计 Token 用量区块（C6 扩展）**：`ActivityHeatmapPanel` 新增 `tokensSource`
+   数据源——浏览器端直接消费宿主 `session.list` 的 `projections.values.tokenUsage`
+   （token-meter 持久化投影，冷会话一并覆盖），无需插件新端点；面板渲染
+   `ActivityTokenStats` 区块（合计 / 输入(未缓存) / 输出(含思考) / 缓存读 / 缓存写
+   总览卡 + 按日条形图 + 按会话条形图，`1.5K/2.5M` 紧凑格式化），随活动范围切换
+   过滤（与活动各 range 同一本地日语义）。
+- **作息热力图布局修正（C6）**：方块改为长方形并横向铺满轨道（flex:1，不再残留
+   正方形间隙），行距收紧到 2px；新增与数据行同构的刻度轴行（0/6/12/18/23 与
+   列精确对齐，日期列定宽 34px 右对齐），删除不再使用的 `heatmap.hourLabels` 键。
 
 ### Changed（变更）
 

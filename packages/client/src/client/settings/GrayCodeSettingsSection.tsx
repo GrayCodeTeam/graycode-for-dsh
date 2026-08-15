@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import type { SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { GlobalStandardProps, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { CATEGORIES } from './pages.tsx'
 import type { GcTranslate } from './fields.tsx'
 import { useGrayCodeStore, type GrayCodeStore } from './store.ts'
@@ -40,6 +41,8 @@ export interface GrayCodeSettingsSectionInjected {
   store: GrayCodeStore
   locale: GrayCodeLocaleFace
   remote: GrayRemoteInvoke
+  /** Browser connection handle (session-list API for the token section). */
+  connection: ConnectionHandle
   /** Translate seat for the `graycode.activityHeatmap` namespace. */
   activityT: TranslateNS<'graycode.activityHeatmap'>
   /** Translate seat for the `graycode.memoryManage` namespace. */
@@ -59,7 +62,7 @@ export function selectCurrentSessionWorkspace(state: SessionListState): string |
   return cwd === undefined || cwd.length === 0 ? undefined : cwd
 }
 
-export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions, activityT, memoryT }: GrayCodeSettingsSectionProps): ReactNode {
+export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions, activityT, memoryT, connection }: GrayCodeSettingsSectionProps): ReactNode {
   const state = useGrayCodeStore(store)
   const defaultWorkspace = useSessions(selectCurrentSessionWorkspace)
   useEffect(() => {
@@ -143,6 +146,7 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions,
             defaultWorkspace={defaultWorkspace}
             activityT={activityT}
             memoryT={memoryT}
+            connection={connection}
           />
         )}
       </div>

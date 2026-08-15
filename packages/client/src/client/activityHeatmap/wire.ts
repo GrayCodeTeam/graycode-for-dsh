@@ -13,6 +13,8 @@ import type {
   ActivitySessionLike,
   ActivityStatsError,
   ActivityStatsResultLike,
+  ActivityTokenBucketsLike,
+  ActivityTokenSessionLike,
   CurrentSessionInfoLike,
   DayActivityStatsLike,
   HourlyHeatmapRowLike,
@@ -200,4 +202,60 @@ export function readActivityThrownError(error: unknown): ActivityStatsError {
     }
   }
   return internalFailure('unexpected error')
+}
+
+/**
+ * Narrow one host `TokenUsageProjection` value (`{ uncachedInputTokens,
+ * outputTokens, cacheReadTokens, cacheWriteTokens }`). Missing cache buckets
+ * degrade to 0; a missing input/output bucket is a malformed row (null).
+ */
+export function readActivityTokenBuckets(value: unknown): ActivityTokenBucketsLike | null {
+  if (!isRecord(value)) return null
+  const inputTokens = readInt(value.uncachedInputTokens)
+  const outputTokens = readInt(value.outputTokens)
+  if (inputTokens === undefined || outputTokens === undefined) return null
+  const cacheReadTokens = readInt(value.cacheReadTokens) ?? 0
+  const cacheWriteTokens = readInt(value.cacheWriteTokens) ?? 0
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+  }
+}
+
+/** Local `YYYY-MM-DD` day key of a ms epoch (matches the activity day keys). */
+export function localDateKey(ms: number): string {
+  const date = new Date(ms)
+  const two = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+}
+
+/**
+ * Narrow one `session.list` item into a token session row: the `sessionId`,
+ * `updatedAt` and `title` fields plus the `projections.values.tokenUsage`
+ * buckets. Items without a usable token projection are dropped (null) — a
+ * session with no provider-reported usage has nothing to show.
+ */
+export function readActivityTokenSessionSummary(value: unknown): ActivityTokenSessionLike | null {
+  if (!isRecord(value)) return null
+  const sessionId = readString(value.sessionId)
+  const updatedAt = readInt(value.updatedAt)
+  if (sessionId === undefined || updatedAt === undefined) return null
+  const projections = isRecord(value.projections) ? value.projections : null
+  const values = projections !== null && isRecord(projections.values) ? projections.values : null
+  const usage = values === null ? null : readActivityTokenBuckets(values.tokenUsage)
+  if (usage === null) return null
+  return { sessionId, title: readString(value.title) ?? '', date: localDateKey(updatedAt), ...usage }
+}
+
+/**
+ * Narrow the `session.list` RPC result value into the raw item list
+ * (`result.value.items`). Anything malformed degrades to null so the data
+ * source can raise a stable `GRAY_INTERNAL` failure.
+ */
+export function readActivityTokenListItems(value: unknown): unknown[] | null {
+  if (!isRecord(value) || !Array.isArray(value.items)) return null
+  return value.items
 }

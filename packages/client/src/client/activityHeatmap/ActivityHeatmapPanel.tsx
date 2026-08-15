@@ -18,15 +18,17 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { readActivityThrownError } from './wire.ts'
 import { ACTIVITY_RANGES, createActivityStatsQuery, withActivityRange, type ActivityStatsQueryModel } from './query.ts'
 import { activityStatsErrorHint } from './errors.ts'
-import type { ActivityStatsDataSource, ActivityStatsError } from './types.ts'
+import type { ActivityStatsDataSource, ActivityStatsError, ActivityTokensDataSource, ActivityTokensResultLike } from './types.ts'
 import { ActivityHeatmapChart } from './ActivityHeatmapChart.tsx'
 import { ActivityDailyBars } from './ActivityDailyBars.tsx'
 import { ActivityMonthlyBars } from './ActivityMonthlyBars.tsx'
+import { ActivityTokenStats } from './ActivityTokenStats.tsx'
 import {
   buildActivityDailyBars,
   buildActivityHeatmap,
   buildActivityMonthlyBars,
   buildActivitySummary,
+  buildActivityTokenStats,
   formatActivityDuration,
   formatGeneratedAt,
   type ActivityDailyBarView,
@@ -45,6 +47,12 @@ export interface ActivityHeatmapPanelProps {
    * or hoist) to avoid refetch loops.
    */
   source?: ActivityStatsDataSource
+  /**
+   * Token statistics source (browser-side session-projection aggregation).
+   * Absent during replay / unwired hosts → the token section is skipped.
+   * Callers must keep the instance stable across renders.
+   */
+  tokensSource?: ActivityTokensDataSource
 }
 
 const panelStyle: CSSProperties = {
@@ -165,6 +173,7 @@ type PanelPhase =
 export function ActivityHeatmapPanel({
   t,
   source,
+  tokensSource,
 }: ActivityHeatmapPanelProps): ReactNode {
   const [range, setRange] = useState<ActivityStatsQueryModel>(createActivityStatsQuery)
   const [showHourly, setShowHourly] = useState(true)
@@ -174,6 +183,8 @@ export function ActivityHeatmapPanel({
   const [heatmap, setHeatmap] = useState<readonly ActivityHeatmapRowView[]>([])
   const [daily, setDaily] = useState<readonly ActivityDailyBarView[]>([])
   const [monthly, setMonthly] = useState<readonly ActivityMonthlyBarView[]>([])
+  const [tokens, setTokens] = useState<ActivityTokensResultLike | null>(null)
+  const [tokensError, setTokensError] = useState<ActivityStatsError | null>(null)
   const disposed = useRef(false)
 
   useEffect(() => {
@@ -211,6 +222,27 @@ export function ActivityHeatmapPanel({
       })
     return () => controller.abort()
   }, [source, range, showHourly, showMonthly])
+
+  // Token fetch: on mount and whenever the range changes (toggles do not
+  // affect the token aggregation). Latest-wins guard — the session list has
+  // no abort transport, so stale responses are dropped by request id.
+  useEffect(() => {
+    if (tokensSource === undefined) return
+    let latest = true
+    setTokensError(null)
+    setTokens(null)
+    tokensSource.tokens({ range: range.range }).then(
+      (result) => {
+        if (!disposed.current && latest) setTokens(result)
+      },
+      (error: unknown) => {
+        if (!disposed.current && latest) setTokensError(readActivityThrownError(error))
+      },
+    )
+    return () => {
+      latest = false
+    }
+  }, [tokensSource, range])
 
   const retry = useCallback((): void => {
     // Re-trigger the fetch effect by toggling through a fresh query object.
@@ -315,6 +347,15 @@ export function ActivityHeatmapPanel({
           {showHourly && <ActivityHeatmapChart t={t} rows={heatmap} />}
           <ActivityDailyBars t={t} bars={daily} />
           {showMonthly && <ActivityMonthlyBars t={t} bars={monthly} />}
+
+          {tokensSource !== undefined && tokens !== null && (
+            <ActivityTokenStats t={t} view={buildActivityTokenStats(tokens)} />
+          )}
+          {tokensSource !== undefined && tokens === null && tokensError !== null && (
+            <div style={hintStyle}>
+              <div>{t(activityStatsErrorHint(tokensError.code)?.key ?? 'error.unknown')}</div>
+            </div>
+          )}
         </>
       )}
     </div>

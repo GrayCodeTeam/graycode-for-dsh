@@ -30,6 +30,16 @@ export type GrayCodeActivityHeatmapLocaleKey =
   | 'summary.activeDays'
   | 'summary.sessions'
   | 'heatmap.title'
+  | 'tokens.title'
+  | 'tokens.empty'
+  | 'tokens.total'
+  | 'tokens.input'
+  | 'tokens.output'
+  | 'tokens.cacheRead'
+  | 'tokens.cacheWrite'
+  | 'tokens.byDay'
+  | 'tokens.bySession'
+  | 'tokens.untitled'
   | 'daily.title'
   | 'daily.empty'
   | 'monthly.title'
@@ -83,6 +93,16 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'summary.activeDays': '活跃天数',
     'summary.sessions': '会话数',
     'heatmap.title': '7×24 作息热力图',
+    'tokens.title': 'Token 统计',
+    'tokens.empty': '所选范围内没有 token 用量记录',
+    'tokens.total': '合计',
+    'tokens.input': '输入(未缓存)',
+    'tokens.output': '输出(含思考)',
+    'tokens.cacheRead': '缓存读',
+    'tokens.cacheWrite': '缓存写',
+    'tokens.byDay': '按日用量',
+    'tokens.bySession': '按会话用量',
+    'tokens.untitled': '未命名会话',
     'daily.title': '每日活跃时长',
     'daily.empty': '所选范围内无每日数据',
     'monthly.title': '月度汇总',
@@ -120,6 +140,16 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'summary.activeDays': 'active days',
     'summary.sessions': 'sessions',
     'heatmap.title': '7×24 heatmap',
+    'tokens.title': 'Token usage',
+    'tokens.empty': 'No token usage in range',
+    'tokens.total': 'Total',
+    'tokens.input': 'Input (uncached)',
+    'tokens.output': 'Output (incl. thinking)',
+    'tokens.cacheRead': 'Cache read',
+    'tokens.cacheWrite': 'Cache write',
+    'tokens.byDay': 'By day',
+    'tokens.bySession': 'By session',
+    'tokens.untitled': 'Untitled session',
     'daily.title': 'Daily activity',
     'daily.empty': 'No daily data in range',
     'monthly.title': 'Monthly summary',
@@ -165,6 +195,16 @@ export const graycodeActivityHeatmapJaPlaceholder: LocaleDict = {
   'summary.activeDays': 'アクティブ日数',
   'summary.sessions': 'セッション数',
   'heatmap.title': '7×24 ヒートマップ',
+  'tokens.title': 'トークン統計',
+  'tokens.empty': '範囲内にトークン使用記録がありません',
+  'tokens.total': '合計',
+  'tokens.input': '入力（キャッシュなし）',
+  'tokens.output': '出力（思考含む）',
+  'tokens.cacheRead': 'キャッシュ読み込み',
+  'tokens.cacheWrite': 'キャッシュ書き込み',
+  'tokens.byDay': '日別使用量',
+  'tokens.bySession': 'セッション別使用量',
+  'tokens.untitled': '名前のないセッション',
   'daily.title': '日別アクティビティ',
   'daily.empty': '範囲内に日別データがありません',
   'monthly.title': '月次サマリー',

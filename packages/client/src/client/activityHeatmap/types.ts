@@ -85,3 +85,60 @@ export interface ActivityStatsError {
 export interface ActivityStatsDataSource {
   stats(params: ActivityStatsWireParams, signal?: AbortSignal): Promise<ActivityStatsResultLike>
 }
+
+// ---------------------------------------------------------------------------
+// Token statistics (browser-side aggregation over the host session list)
+// ---------------------------------------------------------------------------
+
+/** Wire params for the token surface (same range vocabulary as `stats`). */
+export interface ActivityTokensWireParams {
+  readonly range?: ActivityRange
+}
+
+/** Token usage buckets (host `TokenUsageProjection` mirror; 4 disjoint buckets). */
+export interface ActivityTokenBucketsLike {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+  readonly totalTokens: number
+}
+
+/** One day's token totals. */
+export interface ActivityTokenDayLike extends ActivityTokenBucketsLike {
+  readonly date: string
+}
+
+/** One session's token totals (date = the session's last-updated local day). */
+export interface ActivityTokenSessionLike extends ActivityTokenBucketsLike {
+  readonly sessionId: string
+  readonly title: string
+  readonly date: string
+}
+
+/** Aggregated token stats result (generated wholly on the browser side). */
+export interface ActivityTokensResultLike {
+  readonly generatedAt: number
+  readonly totals: ActivityTokenBucketsLike
+  readonly byDay: readonly ActivityTokenDayLike[]
+  readonly sessions: readonly ActivityTokenSessionLike[]
+}
+
+/**
+ * Minimal structural mirror of the host session-list API — the one unary this
+ * surface needs. Kept local so the client never imports host packages at
+ * runtime (bundle purity gate); `connection.api` satisfies it structurally.
+ */
+export interface ActivitySessionListApi {
+  readonly sessions: {
+    list(
+      payload: { readonly cursor?: string },
+      signal?: AbortSignal,
+    ): Promise<{ readonly result: { readonly ok: boolean; readonly value?: unknown; readonly error?: unknown } }>
+  }
+}
+
+/** Data source for the token section (browser-side, host session projections). */
+export interface ActivityTokensDataSource {
+  tokens(params: ActivityTokensWireParams): Promise<ActivityTokensResultLike>
+}

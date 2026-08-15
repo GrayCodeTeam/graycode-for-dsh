@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import {
   IconArchiveOutline20,
   IconChecklistOutline14,
@@ -16,7 +17,7 @@ import { FieldSection, type FieldSpec, type GcTranslate } from './fields.tsx'
 import { buttonDangerStyle, noteStyle } from './styles.ts'
 import type { GrayCodeConfig, GrayRemoteInvoke } from './types.ts'
 import { ActivityHeatmapPanel } from '../activityHeatmap/ActivityHeatmapPanel.tsx'
-import { RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
+import { ConnectionActivityTokensDataSource, RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
 import { MemoryManagePanel } from '../memoryManage/MemoryManagePanel.tsx'
 import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
 
@@ -27,6 +28,8 @@ export interface GrayCodePageProps {
   onReset: () => void
   remote: GrayRemoteInvoke
   defaultWorkspace?: string
+  /** Browser connection handle (session-list API for the token section). */
+  connection: ConnectionHandle
   /** Translate seat for the `graycode.activityHeatmap` namespace. */
   activityT: TranslateNS<'graycode.activityHeatmap'>
   /** Translate seat for the `graycode.memoryManage` namespace. */
@@ -136,7 +139,7 @@ const WorkflowsPage: GrayCodePage = ({ t, config, onChange }) => (
   />
 )
 
-const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT }) => {
+const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT, connection }) => {
   // The transport adapts the surface's `activity/stats` endpoint onto the
   // host remote dispatcher (`<namespace>/<method>`); memoized so the panel
   // source stays stable across renders (no refetch loops).
@@ -149,6 +152,9 @@ const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT }) 
     }),
     [remote],
   )
+  // Token stats aggregate on the browser side from the host session list
+  // (`session.list` projections, token-meter); memoized like the stats source.
+  const tokensSource = useMemo(() => new ConnectionActivityTokensDataSource(connection.api), [connection])
   return (
     <div>
       <FieldSection
@@ -163,7 +169,7 @@ const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT }) 
         onChange={onChange}
         t={t}
       />
-      <ActivityHeatmapPanel t={activityT} source={source} />
+      <ActivityHeatmapPanel t={activityT} source={source} tokensSource={tokensSource} />
     </div>
   )
 }
