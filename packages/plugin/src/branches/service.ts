@@ -288,6 +288,16 @@ export class BranchCoordinatorService {
                     BranchErrorCode.NO_PREVIOUS_TURN
                 );
             }
+            // 显式 boundary 必须是 parent 事件日志中真实存在的事件 seq（3.15-M6）：
+            // 越界（超出末尾）会让 fork seed 缺失边界后的内容，过小（小于首事件 seq）
+            // 会产生空 seed；修剪/稀疏 seq 下数组下标与真实 seq 脱节，必须按 seq 校验。
+            if (input.boundary !== undefined && !parent.events.some(event => event.seq === input.boundary)) {
+                throw new BranchError(
+                    `boundary ${input.boundary} is not a valid fork boundary for session "${input.parentSessionId}": ` +
+                        'no event with that seq in the parent log',
+                    BranchErrorCode.INVALID_INPUT
+                );
+            }
             return this.forkAndRecord({
                 group,
                 parent,
@@ -500,7 +510,7 @@ export class BranchCoordinatorService {
         return group;
     }
 
-    /** 取组内候选并验证其会话仍 live（会话对象来自适配器侧，服务侧只持 id 集合） */
+    /** 取组内候选并验证其会话仍 live 且未软删（软删候选不能作分支父；3.15-M1） */
     private requireLiveCandidate(
         group: GrayBranchGroup,
         sessionId: string
@@ -510,6 +520,12 @@ export class BranchCoordinatorService {
             throw new BranchError(
                 `session "${sessionId}" is not a candidate of branch group "${group.id}"`,
                 BranchErrorCode.SESSION_NOT_IN_GROUP
+            );
+        }
+        if (candidate.deletedAt !== undefined) {
+            throw new BranchError(
+                `session "${sessionId}" is soft-deleted and cannot be used as a branch parent`,
+                BranchErrorCode.CANDIDATE_DELETED
             );
         }
         return {

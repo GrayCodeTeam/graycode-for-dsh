@@ -240,6 +240,10 @@ describe('BranchCoordinatorService initialize', () => {
       const store = await sidecarStore(env.dataRoot)
       expect((store.groups as Array<{ id: string }>).some(g => g.id === group.id)).toBe(true)
     } finally {
+      // 失败路径也放行门控：release() 幂等（Promise resolve 重复调用无害）。
+      // 断言提前失败时不 release() 会让 gate 永久挂起，泄漏的挂起 promise 级联
+      // 拖住整文件后续测试（H-14）
+      release()
       service.dispose()
     }
   })
@@ -276,6 +280,8 @@ describe('BranchCoordinatorService initialize', () => {
       const store = await sidecarStore(env.dataRoot)
       expect(store.groups).toHaveLength(1)
     } finally {
+      // 失败路径也放行门控（与 BUG-09 用例同模式）：release() 幂等
+      release()
       service.dispose()
     }
   })
@@ -369,6 +375,40 @@ describe('BranchCoordinatorService createBranch', () => {
       env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION }),
       BranchErrorCode.NO_PREVIOUS_TURN,
     )
+  })
+
+  it('rejects an explicit boundary that is not a real event seq (INVALID_INPUT, 3.15-M6)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    // 越界：boundary 超过事件日志末尾（twoClosedTurns 最大 seq 5）
+    await expectRejectCode(
+      env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 99 }),
+      BranchErrorCode.INVALID_INPUT,
+    )
+    // 过小/中间空洞：boundary 落在稀疏 seq 缺失的位置（seq1 不存在）
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 2, { source: { kind: 'user' } }),
+      ev('turn/end', 3, { turn: 1 }),
+    ])
+    await expectRejectCode(
+      env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 1 }),
+      BranchErrorCode.INVALID_INPUT,
+    )
+    // 校验失败不产生任何 fork / 候选变更
+    expect(env.adapter.forkCalls).toHaveLength(0)
+    expect(env.service.getGroup(group.id)!.candidates).toHaveLength(1)
+  })
+
+  it('rejects forking from a soft-deleted candidate (CANDIDATE_DELETED, 3.15-M1)', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    await env.service.deleteCandidate({ groupId: group.id, sessionId: child.sessionId })
+    // 已删候选不能作分支父：requireLiveCandidate 在 fork 前拒绝
+    await expectRejectCode(
+      env.service.createBranch({ groupId: group.id, parentSessionId: child.sessionId, boundary: 2 }),
+      BranchErrorCode.CANDIDATE_DELETED,
+    )
+    expect(env.adapter.forkCalls).toHaveLength(1) // 仅第一次 createBranch 的 fork
   })
 
   it('rejects an unknown group with GROUP_NOT_FOUND', async () => {

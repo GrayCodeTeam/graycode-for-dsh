@@ -86,7 +86,9 @@ export function lastCompleteBoundary(events: readonly BranchEventView[]): number
     if (lastClosed) return lastClosed.endSeq;
     // 只有不包含任何轮次（纯 seed/标记事件）时才允许 fork 到当前末尾；
     // 存在未关闭轮次时没有安全边界，由调用方拒绝。
-    if (turns.length === 0) return events.length === 0 ? undefined : events.length - 1;
+    // 末尾必须取最后一个事件的真实 seq：事件流 seq 可能不连续（修剪/压缩/过滤），
+    // 数组下标（events.length - 1）在稀疏 seq 会话下不是真实事件 seq（H-8）。
+    if (turns.length === 0) return events.length === 0 ? undefined : events[events.length - 1]!.seq;
     return undefined;
 }
 

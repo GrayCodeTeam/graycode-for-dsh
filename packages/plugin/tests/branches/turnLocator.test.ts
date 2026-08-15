@@ -131,6 +131,12 @@ describe('lastCompleteBoundary', () => {
     expect(lastCompleteBoundary(events)).toBe(1)
   })
 
+  it('uses the actual seq of the last event when seqs are sparse (trimmed/compacted session)', () => {
+    // 数组下标（events.length - 1 = 1）不是真实事件 seq；必须是最后一个事件的 seq9
+    const events = [ev('request/header', 5), ev('chunk', 9)]
+    expect(lastCompleteBoundary(events)).toBe(9)
+  })
+
   it('with no events returns undefined', () => {
     expect(lastCompleteBoundary([])).toBeUndefined()
   })
