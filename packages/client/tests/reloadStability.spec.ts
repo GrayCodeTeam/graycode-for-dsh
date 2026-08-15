@@ -360,6 +360,18 @@ function createFiberHarness() {
 }
 
 /**
+ * Flush the microtask queue. apply() fire-and-forgets `store.refresh()`, which
+ * pumps through `queue = queue.then(...)` (settings/store.ts) — two turns
+ * complete the pump chain plus the async callback's own await hop, so the
+ * refresh fully settles without ever touching the registration surface under
+ * test (3.18-M2: the microtask was previously never awaited/flushed).
+ */
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+/**
  * Slot registration options are compared structurally; the settings section's
  * `label` is a fresh thunk per apply() call, so functions are normalized to a
  * marker before comparing across fibers (their identity is not part of the
@@ -373,11 +385,14 @@ function plainSlotOptions(calls: Array<Array<unknown>>): unknown[][] {
 }
 
 describe('HMR mount/unmount idempotency of apply()', () => {
-  it('apply() is a pure function of ctx (no module-level mutable state across fibers)', () => {
+  it('apply() is a pure function of ctx (no module-level mutable state across fibers)', async () => {
     const first = createFiberHarness()
     const second = createFiberHarness()
     apply(first.ctx)
     apply(second.ctx)
+    // Settle the fire-and-forget store.refresh() before comparing — the pump
+    // only touches the store snapshot, so it must not perturb the surfaces.
+    await flushMicrotasks()
     // Identical registration sequences ⇒ a fresh fiber after an HMR reload
     // re-applies the exact same surface set; nothing leaks across fibers
     // through module state.
@@ -389,7 +404,7 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     expect(plainSlotOptions(second.slotRegister.mock.calls)).toEqual(plainSlotOptions(first.slotRegister.mock.calls))
   })
 
-  it('a second apply on the SAME live fiber registers twice (host must unload first)', () => {
+  it('a second apply on the SAME live fiber registers twice (host must unload first)', async () => {
     // Cordis entries are not self-guarding; the DSH HMR contract is dispose →
     // re-apply. Pinning this so a future "idempotent apply" refactor is an
     // explicit, deliberate change rather than an accident.
@@ -397,34 +412,44 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     apply(harness.ctx)
     const once = harness.definitions.length
     apply(harness.ctx)
+    await flushMicrotasks()
     expect(harness.definitions).toHaveLength(once * 2)
-    expect(harness.locale.size).toBeGreaterThanOrEqual(EXPECTED_LOCALE_NS.length)
+    // Every namespace stays a single map key across both applies (dict + ja
+    // placeholder accumulate inside it) — exactly the thirteen namespaces,
+    // not a best-effort "at least" floor (3.18-M2).
+    expect(harness.locale.size).toBe(EXPECTED_LOCALE_NS.length)
   })
 
-  it('fiber unload removes every effect-tied registration (zero definition residue)', () => {
+  it('fiber unload removes every effect-tied registration (zero definition residue)', async () => {
     const harness = createFiberHarness()
     for (let cycle = 0; cycle < 3; cycle++) {
       apply(harness.ctx)
-      expect(harness.definitions.length).toBeGreaterThan(0)
+      await flushMicrotasks()
+      // Exactly one definition per apply (the workflow Definition is the only
+      // conversationEvents.register) — precise count, not a presence floor.
+      expect(harness.definitions).toHaveLength(1)
       harness.unload()
       expect(harness.definitions).toHaveLength(0)
     }
   })
 
-  it('an HMR cycle (apply → unload → apply) yields exactly one definition set, no duplicates', () => {
+  it('an HMR cycle (apply → unload → apply) yields exactly one definition set, no duplicates', async () => {
     const baseline = createFiberHarness()
     apply(baseline.ctx)
+    await flushMicrotasks()
     const expected = baseline.definitions.length
     const harness = createFiberHarness()
     apply(harness.ctx)
     harness.unload()
     apply(harness.ctx)
+    await flushMicrotasks()
     expect(harness.definitions).toHaveLength(expected)
   })
 
-  it('locale namespaces are fiber-tied: an apply→unload→apply HMR cycle leaves no residue', () => {
+  it('locale namespaces are fiber-tied: an apply→unload→apply HMR cycle leaves no residue', async () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
+    await flushMicrotasks()
     for (const ns of EXPECTED_LOCALE_NS) {
       expect(harness.locale.get(ns), ns).toHaveLength(2) // dict + ja placeholder
     }
@@ -441,14 +466,16 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     // A host HMR cycle (unload old fiber → re-apply) re-registers exactly one
     // set per namespace — nothing accumulates across cycles.
     apply(harness.ctx)
+    await flushMicrotasks()
     for (const ns of EXPECTED_LOCALE_NS) {
       expect(harness.locale.get(ns), ns).toHaveLength(2)
     }
   })
 
-  it('slot injection lifetime follows the shell.overlay declaration, not the fiber', () => {
+  it('slot injection lifetime follows the shell.overlay declaration, not the fiber', async () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
+    await flushMicrotasks()
     // Three injections: the shell.overlay marker, the settings.section entry
     // and the subagent back-to-main header action.
     expect(harness.overlayEntries).toHaveLength(3)
@@ -463,6 +490,7 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     // lives — documented declaration-lifetime semantics.
     const other = createFiberHarness()
     apply(other.ctx)
+    await flushMicrotasks()
     other.unload()
     expect(other.definitions).toHaveLength(0)
     expect(other.overlayEntries).toHaveLength(3)

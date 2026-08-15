@@ -13,8 +13,11 @@
  * - When a build is present (lib/ is gitignored, so a fresh checkout has
  *   none), the manifest-referenced artifacts are checked on disk and the bundle
  *   is verified to keep the `window.__ModuleLoader__.load({ id, factory })`
- *   closure contract. When lib/ is absent the on-disk checks skip and only the
- *   manifest ↔ config consistency remains (both always asserted).
+ *   closure contract. The closure contract itself is additionally pinned
+ *   build-independently from tsdown.config.ts (banner/intro/footer), so a
+ *   fresh checkout still guards the host contract. When lib/ is absent only
+ *   the on-disk checks skip; manifest ↔ config ↔ closure-shape consistency
+ *   stays asserted.
  *
  * Zero network: everything here reads package-local files only.
  */
@@ -64,6 +67,20 @@ describe('dsh.client manifest ↔ tsdown output consistency (cache/roster)', () 
     expect(config).toContain("platform: 'browser'")
     expect(config).toContain('dts: false')
     expect(config).toContain('clean: false')
+  })
+
+  it('the tsdown config pins the loader-closure contract build-independently (banner/intro/footer)', () => {
+    const config = readFileSync(join(packageRoot, 'tsdown.config.ts'), 'utf8')
+    // The bundle contract is fully determined by tsdown config, so a fresh
+    // checkout without lib/ can still pin it: the host executes the artifact as
+    // a classic script, and banner+intro+footer form the closure factory
+    //   window.__ModuleLoader__.load({ id: "@graycode/dsh-client", factory: (require) => { ... return module.exports; } });
+    // The banner renders JSON.stringify('@graycode/dsh-client') — assert the
+    // raw config expression so a package-id rename cannot silently drift the id.
+    expect(config).toContain("window.__ModuleLoader__.load({ id: ${JSON.stringify('@graycode/dsh-client')}, factory: (require) => {")
+    expect(config).toContain("banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify('@graycode/dsh-client')}, factory: (require) => {`")
+    expect(config).toContain("footer: 'return module.exports; } });'")
+    expect(config).toContain("intro: 'var module = { exports: {} }; var exports = module.exports;'")
   })
 
   it.skipIf(!hasLibBuild)('the served bundle preserves the DSH loader-closure contract', () => {

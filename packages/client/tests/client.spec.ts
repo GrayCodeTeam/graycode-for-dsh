@@ -169,12 +169,35 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(options.label?.()).toBe('nav')
   })
 
-  it('wires the config store to ctx.connection and refreshes on connection/reset', () => {
+  it('wires the config store to ctx.connection and refreshes on connection/reset', async () => {
     const { ctx, connectionCall, on } = makeFakeCtx()
     apply(ctx)
     expect(ctx.get).toHaveBeenCalledWith('connection')
     expect(on).toHaveBeenCalledWith('connection/reset', expect.any(Function))
+    // apply() fire-and-forgets store.refresh(); the RPC is queued behind the
+    // store's microtask pump, so nothing has hit the wire at this synchronous
+    // point (H-13: the old `not.toHaveBeenCalled()` assertion never observed
+    // the refresh and was vacuously true).
     expect(connectionCall).not.toHaveBeenCalled()
+    // Flush the microtask queue — the refresh pump must actually reach the
+    // /graycode RPC channel.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(connectionCall).toHaveBeenCalledTimes(1)
+    expect(connectionCall).toHaveBeenCalledWith('/graycode', 'config.get', {})
+    // The connection/reset handler replays the same refresh through the store.
+    const resetHandler = on.mock.calls.find((call) => call[0] === 'connection/reset')?.[1] as (() => void) | undefined
+    expect(typeof resetHandler).toBe('function')
+    resetHandler?.()
+    // refresh() queues behind the settled pump rather than firing synchronously.
+    // apply() 的 store 泵链比单次 pump 更深（refresh 已在 apply 时排过一次队），
+    // 4 轮 flush 才确保第二份 refresh 真正打到 RPC 通道（实测 3 轮起）。
+    expect(connectionCall).toHaveBeenCalledTimes(1)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(connectionCall).toHaveBeenCalledTimes(2)
   })
 
   it('registers the back-to-main header action when the sessions service is present', () => {
