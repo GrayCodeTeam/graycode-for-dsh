@@ -280,7 +280,13 @@ export class LegacyImportService {
         // outcome === 'import'（含 disabled-draft 对象：以草稿形态导入）
         this.assertNotCancelled(signal)
         try {
-          const result = await writer.write({ runId: run.id, object: obj, sourceDir, scopeOverrides })
+          const result = await writer.write({
+            runId: run.id,
+            sourceFingerprint: run.sourceFingerprint,
+            object: obj,
+            sourceDir,
+            scopeOverrides,
+          })
           if (domain === 'settings' && result.summary) settingsWriteSummaries.push(result.summary)
           const entry: LedgerEntry = {
             key,

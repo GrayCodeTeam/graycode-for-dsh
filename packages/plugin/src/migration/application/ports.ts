@@ -89,6 +89,13 @@ export interface PlanPort {
 
 export interface WriteTargetInput {
   runId: string
+  /**
+   * 源目录稳定指纹（H-5a）：memory writer 目标侧台账键的维度之一
+   * （memory:global:<fp> / memory:workspace:<legacyId>:<fp>），保证跨源迁移
+   * （第二源）不因台账键碰撞被整体跳过；与幂等键（domain/idempotency.ts）对称。
+   * 缺省（直接调用 writer 的单元测试等）= 无指纹维度（legacy 键形态）。
+   */
+  sourceFingerprint?: string
   object: PlannedObject
   sourceDir: string
   /** D-1：工作区记忆 scope 覆盖表（memory writer 消费；可选，未覆盖走自动映射） */

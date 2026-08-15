@@ -12,6 +12,13 @@
  * 目标侧去重（H1b）：注入 journalPath 时启用迁移写入台账（applied.json）——
  * writer 落盘成功后记录对象键；apply 中 ledger.put 失败（幂等窗口）后重跑，
  * ledger 仍缺条目但本台账已有记录 → 跳过同一对象，不重复追加。
+ *
+ * H-5a：台账键含 sourceFingerprint（memory:global:<fp> / memory:workspace:<legacyId>:<fp>），
+ * 与幂等键对称——跨源迁移（第二源）的 global/workspace 记忆不会被第一源的台账键
+ * 整体跳过（数据丢失）。
+ *
+ * M3：写目标与台账落盘顺序为先 journal 后写——崩溃（进程被杀/中途断电）时台账已落，
+ * 重跑凭台账跳过，不会把已写入的 N 条记忆重复追加（at-most-once）。
  */
 
 import { MemoryService, normalizeWorkspaceKey, stableIdOfScopeKey } from '../../../memory/service.ts'
@@ -31,9 +38,17 @@ export interface MemoryTargetWriterOptions {
   journalPath?: string
 }
 
-/** 台账键：scope 维度 + legacyId（memory-workspace 的 legacyId = scope hash 目录，全局唯一） */
-function journalKeyFor(scope: 'global' | 'workspace', legacyId: string): string {
-  return scope === 'global' ? 'memory:global' : `memory:workspace:${legacyId}`
+/**
+ * 台账键：scope 维度 + legacyId + sourceFingerprint（H-5a：跨源迁移不互相台账跳过）。
+ * 缺省（无 sourceFingerprint，直接调用 writer 的单元测试）退化为 legacy 键形态。
+ */
+function journalKeyFor(
+  scope: 'global' | 'workspace',
+  legacyId: string,
+  sourceFingerprint: string | undefined,
+): string {
+  const fp = sourceFingerprint ?? ''
+  return scope === 'global' ? `memory:global:${fp}` : `memory:workspace:${legacyId}:${fp}`
 }
 
 export function createMemoryTargetWriter(
@@ -49,7 +64,7 @@ export function createMemoryTargetWriter(
         throw new Error(`memory 对象负载缺失: ${input.object.legacyId}`)
       }
       const scopeRef = data.scope === 'global' ? 'memory://global' : `memory://workspace/${input.object.legacyId}`
-      const journalKey = journalKeyFor(data.scope, input.object.legacyId)
+      const journalKey = journalKeyFor(data.scope, input.object.legacyId, input.sourceFingerprint)
 
       // 目标侧去重（H1b）：重复 apply 同一对象（ledger 缺条目）不重复追加
       if (journal) {
@@ -64,8 +79,8 @@ export function createMemoryTargetWriter(
 
       // 目标选择（D-1）：默认按 scope.json 自动映射；用户覆盖可改写目标。
       // scopeRef 随实际目标更新（global → memory://global；覆盖路径 → 该路径的
-      // 工作区记忆目录）；journalKey 保持 memory:workspace:<legacyId>（同一对象
-      // 只导一次，与目标无关）。
+      // 工作区记忆目录）；journalKey 保持 memory:workspace:<legacyId>:<fp>（同一源
+      // 同一对象只导一次，与目标无关；跨源以 sourceFingerprint 区分，H-5a）。
       let resolvedScopeRef = scopeRef
       let manager
       if (data.scope === 'global') {
@@ -88,6 +103,14 @@ export function createMemoryTargetWriter(
       }
       if (!manager) throw new Error(`memory scope 不可用: ${input.object.legacyId}`)
 
+      // M3：先落写入台账再写目标。若在写目标中途崩溃（进程被杀/断电），台账已含本键，
+      // 重跑凭此跳过——已写入的 N 条不会被重复追加（at-most-once；未写入部分由 verify
+      // 暴露或用户按需重导，绝不产生重复记忆）。台账写入失败则在写任何条目之前抛出，
+      // 目标保持干净，重跑可完整重写。
+      if (journal) {
+        await journal.put(journalKey, { at: new Date().toISOString(), targetRef: resolvedScopeRef })
+      }
+
       const maxChars = manager.getConfig().entryChars
       let appended = 0
       let truncated = 0
@@ -106,10 +129,6 @@ export function createMemoryTargetWriter(
       if (truncated > 0) notes.push(`${truncated} 条超长记忆已按目标 entryChars 裁剪`)
       notes.push(`已写入 ${appended} 条（日期按导入日重新盖章）`)
 
-      // 落盘成功后记录写入台账（ledger.put 失败后重跑凭此跳过）
-      if (journal) {
-        await journal.put(journalKey, { at: new Date().toISOString(), targetRef: resolvedScopeRef })
-      }
       return { targetRef: resolvedScopeRef, notes }
     },
     async probe(targetRef: string): Promise<boolean> {

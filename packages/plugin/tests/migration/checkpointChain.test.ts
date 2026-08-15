@@ -747,4 +747,61 @@ describe('checkpoint 增量链导入（端到端 scan + apply）', () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test('H-5b：多工作区根——非首根文件保留自身根前缀，全部收录（不静默跳过）', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-multiroot-'))
+    try {
+      const wsA = 'ws_aaaaaaaaaaaaaaaa'
+      const wsB = 'ws_bbbbbbbbbbbbbbbb'
+      const cpId = 'cp_multiroot'
+      const manifestFiles: Record<string, Record<string, unknown>> = {}
+      for (const [key, content] of Object.entries({ [`${wsA}/src/a.txt`]: 'alpha', [`${wsB}/src/b.txt`]: 'beta' })) {
+        manifestFiles[key] = {
+          hash: sha256Hex(content),
+          size: Buffer.byteLength(content, 'utf-8'),
+          mtimeMs: 1700000000000,
+        }
+        writeText(root, `checkpoints/${cpId}/${key}`, content)
+      }
+      writeText(
+        root,
+        `checkpoints/${cpId}/manifest.json`,
+        JSON.stringify({
+          version: 1,
+          checkpointId: cpId,
+          workspaceRoots: [
+            { id: wsA, name: 'a', uri: 'file:///c%3A/a' },
+            { id: wsB, name: 'b', uri: 'file:///c%3A/b' },
+          ],
+          files: manifestFiles,
+          emptyDirs: [],
+          changes: [],
+          excluded: [],
+          ignoreSnapshot: IGNORE_SNAPSHOT,
+          partial: false,
+        }, null, 2),
+      )
+
+      const fx = makeService()
+      try {
+        const scan = await fx.service.scan(root)
+        const cp = scan.report.objects.find(o => o.objectType === 'checkpoint')
+        expect(cp?.outcome).toBe('import')
+
+        const applied = await fx.service.apply(root, scan.report.planToken)
+        expect(applied.run.steps.checkpoints.status).toBe('complete')
+        expect(applied.run.steps.checkpoints.targetCount).toBe(1)
+
+        const manifest = loadTargetManifest(fx.dataRoot, cpId)!.manifest
+        // 两个根的文件都收录，且各自保留自身根前缀（非首根不被改写为 workspaceId 前缀）
+        expect(Object.keys(manifest.files).sort()).toEqual([`${wsA}/src/a.txt`, `${wsB}/src/b.txt`].sort())
+        expect(manifest.files[`${wsA}/src/a.txt`]!.hash).toBe(sha256Hex('alpha'))
+        expect(manifest.files[`${wsB}/src/b.txt`]!.hash).toBe(sha256Hex('beta'))
+      } finally {
+        fx.cleanup()
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

@@ -13,6 +13,8 @@
  * 8. M6 settingsTarget.probe 路径校验；
  * 9. M7 TREE 非法块大小跳过（无幻影摘要）；
  * 10. L10 settings 固定布局路径匹配。
+ * 11. H-5a：memory 目标侧台账键含 sourceFingerprint（跨源不互相跳过）；
+ *     M3：memory writer 先 journal 后写（崩溃窗口重跑不重复追加）。
  */
 import * as os from 'os'
 import * as path from 'path'
@@ -26,6 +28,7 @@ import { DefaultValidator } from '../../src/migration/adapters/legacy/validator.
 import { parseSegmentedHistory } from '../../src/migration/adapters/legacy/conversationsParser.ts'
 import { parseSettingsExport } from '../../src/migration/adapters/legacy/settingsParser.ts'
 import { FileLedgerStore } from '../../src/migration/adapters/storage/ledgerStore.ts'
+import { AppliedJournalStore } from '../../src/migration/adapters/storage/appliedJournal.ts'
 import { FileRunStore } from '../../src/migration/adapters/storage/runStore.ts'
 import { createMemoryTargetWriter } from '../../src/migration/adapters/storage/memoryTarget.ts'
 import { createCheckpointTargetWriter } from '../../src/migration/adapters/storage/checkpointTarget.ts'
@@ -538,6 +541,77 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
       }
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─── H-5a（台账键含 sourceFingerprint）与 M3（先 journal 后写） ─────────────
+
+describe('H-5a / M3 memory 台账', () => {
+  test('H-5a：跨源迁移——第二源 global 记忆不被第一源台账键跳过（键含 sourceFingerprint）', async () => {
+    const sourceA = makeLegacyRoot({ withMemory: true })
+    const sourceB = makeLegacyRoot({ withMemory: true })
+    // 第二源目录额外文件改变源指纹（内存内容相同但指纹不同 → 台账键不碰撞）
+    writeText(sourceB, 'second-source.txt', 'second')
+    const journalPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-')), 'applied.json')
+    const fx = makeService({ journalPath })
+    try {
+      // 第一源：3 条全局记忆
+      const scanA = await fx.service.scan(sourceA)
+      expect(scanA.report.counts.import).toBe(1)
+      const appliedA = await fx.service.apply(sourceA, scanA.report.planToken)
+      expect(appliedA.run.status).toBe('complete')
+      expect(await (await new MemoryService({ dataRoot: fx.dataRoot }).getGlobal()).totalEntries()).toBe(3)
+
+      // 第二源（指纹不同）：global 记忆必须真实写入，而不是被第一源台账键整体跳过
+      const scanB = await fx.service.scan(sourceB)
+      expect(scanB.report.counts.import).toBe(1)
+      const appliedB = await fx.service.apply(sourceB, scanB.report.planToken)
+      expect(appliedB.run.status).toBe('complete')
+      expect(appliedB.report.counts.import).toBe(1)
+      expect(await (await new MemoryService({ dataRoot: fx.dataRoot }).getGlobal()).totalEntries()).toBe(6)
+
+      // 台账按 sourceFingerprint 区分（两个源各一条 memory:global:<fp> 键）
+      const journalRaw = fs.readFileSync(journalPath, 'utf-8')
+      expect(journalRaw.match(/memory:global:/g) ?? []).toHaveLength(2)
+    } finally {
+      fx.cleanup()
+      fs.rmSync(sourceA, { recursive: true, force: true })
+      fs.rmSync(sourceB, { recursive: true, force: true })
+    }
+  })
+
+  test('M3：先 journal 后写——崩溃窗口重跑凭台账跳过，不重复追加已写入的条目', async () => {
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-m3-target-'))
+    const journalPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-m3-journal-')), 'applied.json')
+    const journal = new AppliedJournalStore(journalPath)
+    const writer = createMemoryTargetWriter(new MemoryService({ dataRoot }), { journalPath })
+    const object = {
+      domain: 'memory' as const,
+      objectType: 'memory-global' as const,
+      legacyId: 'global',
+      sourceHash: 'h',
+      outcome: 'import' as const,
+      data: {
+        scope: 'global' as const,
+        entries: [
+          { id: 0, date: '2026-01-01', text: 'a' },
+          { id: 1, date: '2026-01-01', text: 'b' },
+          { id: 2, date: '2026-01-01', text: 'c' },
+        ],
+      },
+    }
+    try {
+      // 模拟崩溃窗口：journal-first 语义下台账已先落（可能只写了部分条目）
+      await journal.put('memory:global:fp1', { at: new Date().toISOString(), targetRef: 'memory://global' })
+      const result = await writer.write({ runId: 'r', sourceFingerprint: 'fp1', object, sourceDir: '' })
+      expect(result.notes?.join('\n')).toContain('已按迁移写入台账跳过')
+      // 不重复追加（未新增任何条目）
+      const globalMgr = await new MemoryService({ dataRoot }).getGlobal()
+      expect(await globalMgr.totalEntries()).toBe(0)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(path.dirname(journalPath), { recursive: true, force: true })
     }
   })
 })

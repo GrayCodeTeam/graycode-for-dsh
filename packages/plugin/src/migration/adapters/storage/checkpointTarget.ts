@@ -244,9 +244,12 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
       }
 
       for (const [scopedKey, entry] of Object.entries(parsed.files).sort(([a], [b]) => a.localeCompare(b))) {
-        // 旧存档可能用扁平相对路径（无 ws_ 前缀）：统一 scoped 到 workspaceId 下
+        // H-5b：每个工作区根的文件键必须保留其自身根前缀（不改写为其他根）。
+        // 已带合法 ws_<rootId>/ 前缀的键原样保留——非首根文件仍能从自身根目录
+        // 定位物理文件（backupDir/<scopedKey>），manifest 收录其真实 scoped 路径；
+        // 只有旧存档的扁平相对路径（无 ws_ 前缀）才统一 scoped 到 workspaceId 下。
         const safeRelative = normalizeSafeCheckpointPath(scopedKey)
-        const scopedPath = safeRelative.startsWith(`${workspaceId}/`) ? safeRelative : `${workspaceId}/${safeRelative}`
+        const scopedPath = /^ws_[a-f0-9]{16}\//.test(safeRelative) ? safeRelative : `${workspaceId}/${safeRelative}`
         let srcPath: string
         try {
           srcPath = await resolvePathInsideRootNoSymlink(backupDir, scopedPath)
