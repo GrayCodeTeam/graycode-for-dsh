@@ -30,7 +30,6 @@ export type GrayCodeActivityHeatmapLocaleKey =
   | 'summary.activeDays'
   | 'summary.sessions'
   | 'heatmap.title'
-  | 'heatmap.hourLabels'
   | 'daily.title'
   | 'daily.empty'
   | 'monthly.title'
@@ -84,7 +83,6 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'summary.activeDays': '活跃天数',
     'summary.sessions': '会话数',
     'heatmap.title': '7×24 作息热力图',
-    'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
     'daily.title': '每日活跃时长',
     'daily.empty': '所选范围内无每日数据',
     'monthly.title': '月度汇总',
@@ -122,7 +120,6 @@ export const graycodeActivityHeatmapDictionaries: Record<LocaleId, LocaleDictOf<
     'summary.activeDays': 'active days',
     'summary.sessions': 'sessions',
     'heatmap.title': '7×24 heatmap',
-    'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
     'daily.title': 'Daily activity',
     'daily.empty': 'No daily data in range',
     'monthly.title': 'Monthly summary',
@@ -168,7 +165,6 @@ export const graycodeActivityHeatmapJaPlaceholder: LocaleDict = {
   'summary.activeDays': 'アクティブ日数',
   'summary.sessions': 'セッション数',
   'heatmap.title': '7×24 ヒートマップ',
-  'heatmap.hourLabels': '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23',
   'daily.title': '日別アクティビティ',
   'daily.empty': '範囲内に日別データがありません',
   'monthly.title': '月次サマリー',
