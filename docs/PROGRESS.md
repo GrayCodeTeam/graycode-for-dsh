@@ -52,6 +52,17 @@
 > 条目名称/chat_history 锁定卡/拖拽排序/变量插入 chips/未保存确认；createMode 空模板
 > 回退内置 code 模板）；PromptEntry.name 显示名全链路；术语清理（用户可见黑话 9 处 →
 > 原插件/DSH 官方用语，zh/en/ja 三语）；5 commits 推送 main；全量测试 2038 用例全绿。
+> 本轮（对齐审计第二轮，2026-08-16）：记忆域 P0 三项 + 存档点自动存档。记忆域：
+> enabled 工具门控（M-01，false → 7 工具不注册，Remote 管理端点保持）；memory/scopes
+> 枚举端点 + client 作用域下拉（M-02）；memory/forgetBatch 批量删除端点 + client
+> 多选/全选/批量删除（M-03，deleteEntries 单次重编号防错删）。存档点：自动存档引擎
+> （autoCheckpoint.ts）——tools/execute before/after（24 默认工具）+ agent/pre-step
+> 新回合 + agent/turn-stopping；CheckpointSummary.origin（auto/manual）持久化 + client
+> 徽标；Config 新增 enabled/autoCheckpoint/modelToolsEnabled/beforeTools/afterTools/
+> messageCheckpoint（默认照原插件：user 前、仅根 agent、无变更合并）；mergeUnchanged
+> contentHash 确认级回滚；模型工具开关（modelToolsEnabled=false 不注册）。顺带修复：
+> checkpoint_list/preview/restore output schema 缺字段（真实注册表执行会抛
+> ToolOutputError）。全量测试 2161 用例全绿。
 
 ## 版本锁定（ADR-0001）
 
@@ -449,8 +460,8 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：136 文件 2039 用例全绿（2038 通过 / 1 skipped；本地实测）——
-plugin 117 文件 1446 用例 + client 19 文件 592 用例（对齐审计执行后全量重跑）。
+`pnpm test`：143 文件 2162 用例全绿（2161 通过 / 1 skipped；本地实测）——
+plugin 124 文件 1569 用例 + client 19 文件 592 用例（对齐审计第二轮后全量重跑）。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
 `scripts/verify-pack.ps1`：PASS（3 tarball，violations: none，warnings 0）。
 

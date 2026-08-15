@@ -1,6 +1,7 @@
 # Gray Code × DSH 实现对齐审计报告
 
-> 状态：✅ 第一轮执行已完成（2026-08-16，5 commits 推送 main）；剩余待办见 §8
+> 状态：✅ 第一轮执行已完成（2026-08-16，5 commits 推送 main）；✅ 第二轮执行已完成
+> （2026-08-16，记忆域 P0 + 存档点自动存档）；剩余待办见 §8
 > 调查方式：16 个并行子代理深度只读调查（原插件 `参考项目/Gray-Code-main` + 当前实现 `packages/` + DSH 官方 `参考项目/deepseek-harness-master` + cordis 源码/运行时探针）
 > 调查日期：2026-09
 
@@ -9,8 +10,8 @@
 | 域 | 结论 | 优先动作 |
 | --- | --- | --- |
 | 提示词（聚焦） | ① UI 结构与原插件差异大（字段区单框 + 列表式管理器 vs 原插件一体化模式编辑器）；② **GRAY_ENDPOINT_NOT_FOUND 阻断 bug 根因已确认** | ✅ 已执行：7cd843b 修 bug + 3a161b4/9eb895d UI 重构（见 §0.1） |
-| 记忆（顺带） | enabled 开关语义不一致、多工作区管理/批量删除缺失、memory_wake 快照语义差异、术语 | 文档化，待排期（P0 三项见 §8-4） |
-| 存档点（顺带） | 自动存档 vs 显式工具集（架构差异）、enabled/排除 UI/批量删除缺失 | 文档化，待排期（方向需产品决策） |
+| 记忆（顺带） | enabled 开关语义不一致、多工作区管理/批量删除缺失、memory_wake 快照语义差异、术语 | ✅ 已执行：M-01~M-03（工具门控 + scopes/forgetBatch 端点 + client 下拉/批量删除 UI） |
+| 存档点（顺带） | 自动存档 vs 显式工具集（架构差异）、enabled/排除 UI/批量删除缺失 | ✅ 已执行：C-01/C-02/C-03 核心（自动存档 + origin 标记 + 模型工具开关）；排除 UI/批量删除仍待排期 |
 | 分支（顺带） | 工作区联动缺失、分支 UI 全缺、reroll 粒度变化、子树软删缺失 | 文档化，待排期（大工程单独排期） |
 | 工作流（顺带） | compare finding key 差异、todo id/cancelled、requiresUserConfirmation、plan 卡片、review 本地化 | 文档化，待排期 |
 | 工具面（顺带） | 大部分由 DSH 原生替代（有意）；缺失 search replace/insert_code/list_files/get_symbols | 文档化，待排期 |
@@ -257,8 +258,9 @@ Host 侧（与 UI 拆分对应的技术层）：
 1. ✅ **修复 GRAY_ENDPOINT_NOT_FOUND**（阻断 bug，7 处注册点统一 inject + 日志 + 测试）— commit `7cd843b`，已推送
 2. ✅ **提示词 UI 合并重构**（主人已拍板方向：原插件骨架 + 去传统模板 + 仅预设条目；P-01~P-06 一并处理）— commit `3a161b4`/`9eb895d`，已推送
 3. ✅ **术语清理**（第 7 节清单，用户可见优先 + lib 重建）— commit `34b0326`，已推送；注：代码注释残留「未接线」4 处（notifications 域，非用户可见），可顺手收尾
-4. ⏳ **记忆域 P0 项**（M-01 enabled 开关语义、M-02 多工作区、M-03 批量删除）——待主人确认方向后排期
-5. ⏳ **其他域按优先级**（存档点自动存档方向需产品决策；分支 UI/工作区联动是大工程，单独排期；其中 B-03 reroll 粒度建议优先）
+4. ✅ **记忆域 P0 项**（M-01 enabled 开关语义、M-02 多工作区、M-03 批量删除）— 已落地（2026-08-16）：enabled=false 工具门控（Remote 管理端点保持）、`memory/scopes` 枚举端点、`memory/forgetBatch` 批量删除端点、client 作用域下拉 + 多选/全选/批量删除
+5. ✅ **存档点自动存档（C-01/C-02/C-03 核心）** — 已落地（2026-08-16）：`tools/execute` before/after 存档（24 默认工具）+ `agent/pre-step` 新回合 + `agent/turn-stopping`；`origin: auto/manual` 持久化 + client 徽标；Config 新增 `enabled`/`autoCheckpoint`/`modelToolsEnabled`/`beforeTools`/`afterTools`/`messageCheckpoint`（默认照原插件：user 前、仅根 agent、无变更合并）；模型工具用户可开关。剩余：排除类别 UI（C-04）、清理管理（C-05）、自动存档配置的 beforeTools 可视化编辑
+6. ⏳ **其他域按优先级**：分支 UI/工作区联动是大工程，单独排期（B-03 reroll 粒度建议优先）；C-04/C-05 待排期
 
 ---
 

@@ -272,6 +272,19 @@
 - **Remote 契约测试补全**：契约端点 19 → 32（补齐 prompt 9 + branches 2 + activity 1 +
   migration 1），含无文档外端点断言；新增 lateRegistration 回归测试（grayRemote 晚到
   自动补注册）。
+- **记忆多作用域管理（M-02）**：`memory/scopes` 枚举端点（global + 各 workspace，
+  scope.json 缺失/损坏容错）+ client 面板作用域下拉（默认当前会话工作区，失败降级）。
+- **记忆批量删除（M-03）**：`memory/forgetBatch` 端点（ids + expectedRevision + confirm
+  门闸，deleteEntries 单次扫描防重编号错删，返回 removed/notFound）+ client 多选/全选/
+  批量删除（确认弹层、部分 notFound 提示、防重入）。
+- **存档点自动存档（C-01/C-02/C-03）**：autoCheckpoint.ts 引擎——`tools/execute`
+  before/after（beforeTools/afterTools，默认 DSH 版 24 工具）+ `agent/pre-step` 新用户
+  回合 + `agent/turn-stopping` 模型回合；CheckpointSummary.origin（auto/manual）
+  持久化 + client 列表徽标；Config 新增 enabled/autoCheckpoint/modelToolsEnabled/
+  messageCheckpoint（beforeMessages/afterMessages/modelOuterLayerOnly/
+  mergeUnchangedCheckpoints，默认照原插件）；mergeUnchanged 用 contentHash 确认级
+  回滚（防误删真实变更）；client settings 新增全部开关与工具列表编辑 + CheckpointManager
+  配置区接线。
 
 ### Changed（变更）
 
@@ -305,6 +318,11 @@
   代理作用范围→工具注册范围、启用提示词域→启用提示词功能、思考请求层→思考注入、
   子代理最大消息跳数→子代理最大消息往返次数、条条目→条、主机服务→DSH 服务等；
   zh/en/ja 三语同步。
+- **存档点自动存档配置（对齐原插件默认值）**：checkpoints Config 新增 enabled /
+  autoCheckpoint / modelToolsEnabled / beforeTools / afterTools / messageCheckpoint
+  （beforeMessages 默认 ['user']、afterMessages []、modelOuterLayerOnly true、
+  mergeUnchangedCheckpoints true）；memory Config 的 enabled 从「仅控注入」扩展为
+  「不注入 + 工具不注册」。
 
 ### Fixed（修复，来自审计批次）
 
@@ -401,6 +419,12 @@
   checkpoints/branches/activity/migration）统一 `ctx.inject(['grayRemote'])` 延迟注册
   （服务可用自动补注册、卸载自动回收、HMR 安全）；`GrayRemoteService.invoke` 端点未
   命中补 `logger.warn`；契约测试 19→32 端点 + lateRegistration 回归测试。
+- **checkpoint 工具 output schema 缺字段（真实注册表执行抛 ToolOutputError）**：
+  checkpoint_list 缺 messageIndex/toolName/phase/manifestVersion/origin；
+  checkpoint_preview 缺 legacy/failures/missingBackupDirs/autoPrunedCheckpointCount/
+  excludedNote；checkpoint_restore 缺 missingBackupDirs/autoPrunedCheckpointCount/
+  excludedNote——`additionalProperties: false` 会在 `ctx.tools.execute` 真实分发时
+  拒绝未声明字段（`ctx.tools` 实测复现）。已全部补齐。
 
 ### Security（安全）
 
