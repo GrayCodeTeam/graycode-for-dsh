@@ -250,3 +250,46 @@ describe('checkpoints/verify / previewRestore / restore', () => {
     }
   })
 })
+
+describe('checkpoints/create / delete / gc', () => {
+  it('exposes the complete manager lifecycle with destructive confirmation gates', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      await writeFile(env.workspaceDir, 'managed.txt', 'snapshot')
+      const created = await env.invoke('checkpoints', 'create', {
+        workspace: env.workspaceDir,
+        title: 'from settings',
+      })
+      expect(created.ok).toBe(true)
+      const checkpointId = created.ok
+        ? (created.value as { checkpointId: string }).checkpointId
+        : ''
+
+      expectFailure(
+        await env.invoke('checkpoints', 'delete', { workspace: env.workspaceDir, checkpointId }),
+        GRAY_REMOTE_ERROR_CODES.APPROVAL_REQUIRED,
+      )
+      const deleted = await env.invoke('checkpoints', 'delete', {
+        workspace: env.workspaceDir,
+        checkpointId,
+        confirm: true,
+      })
+      expect(deleted).toMatchObject({ ok: true, value: { success: true, deleted: true } })
+
+      const preview = await env.invoke('checkpoints', 'gc', { workspace: env.workspaceDir })
+      expect(preview).toMatchObject({ ok: true, value: { dryRun: true } })
+      expectFailure(
+        await env.invoke('checkpoints', 'gc', { workspace: env.workspaceDir, dryRun: false }),
+        GRAY_REMOTE_ERROR_CODES.APPROVAL_REQUIRED,
+      )
+      const applied = await env.invoke('checkpoints', 'gc', {
+        workspace: env.workspaceDir,
+        dryRun: false,
+        confirm: true,
+      })
+      expect(applied).toMatchObject({ ok: true, value: { dryRun: false } })
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+})

@@ -10,6 +10,9 @@
  * - `checkpoints/restore`：二次确认执行（必须回传 previewToken；
  *   缺失/过期 → GRAY_APPROVAL_REQUIRED；预览后工作区漂移/manifest 变化 → GRAY_CONFLICT；
  *   取消 → GRAY_CANCELLED）。
+ * - `checkpoints/create`：立即创建检查点；
+ * - `checkpoints/delete`：显式 confirm 门闸后删除；
+ * - `checkpoints/gc`：dry-run 默认，真实清理需要 confirm 门闸。
  *
  * 错误分类说明：领域 RestoreResult 以字符串承载错误（错误文案只在 host 侧
  * 分类一次，UI 只消费稳定机器码；映射表见 src/remote/README.md）。
@@ -20,6 +23,7 @@ import { GrayRemoteError } from '../../../remote/errors.ts'
 import {
   normalizeLimit,
   optionalBoolean,
+  optionalString,
   optionalWorkspace,
   requireString,
 } from '../../../remote/validate.ts'
@@ -65,6 +69,17 @@ function classifyRestoreError(message: string | undefined, signal?: AbortSignal)
 /** 创建 checkpoints Remote 端点处理器（由 checkpoints 域 apply() 注册）。 */
 export function createCheckpointsRemoteHandlers(service: CheckpointService): GrayRemoteHandlers {
   return {
+    'checkpoints/create': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
+      const workspace = optionalWorkspace(args)
+      const title = optionalString(args, 'title')
+      const notes = optionalString(args, 'notes')
+      const result = await service.createCheckpoint(workspace, { title, notes, signal })
+      if (result === null) {
+        throw GrayRemoteError.internal('checkpoint creation produced no result')
+      }
+      return result
+    },
+
     'checkpoints/list': async (args: GrayRemoteArgs) => {
       const workspace = optionalWorkspace(args)
       const cursor = args.cursor === undefined || args.cursor === null ? undefined : requireString(args, 'cursor')
@@ -127,6 +142,41 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
       if (!result.success) {
         throw classifyRestoreError(result.error, signal)
       }
+      return result
+    },
+
+    'checkpoints/delete': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
+      const workspace = optionalWorkspace(args)
+      const checkpointId = requireString(args, 'checkpointId')
+      const force = optionalBoolean(args, 'force')
+      if (args.confirm !== true) {
+        throw GrayRemoteError.approvalRequired('checkpoints.delete requires explicit confirmation', {
+          checkpointId,
+        })
+      }
+      const outcome = await service.deleteCheckpoint(workspace, checkpointId, { force, signal })
+      if (!outcome.success) {
+        if (outcome.reason === 'cancelled' || signal?.aborted) throw GrayRemoteError.cancelled()
+        if (outcome.reason === 'Checkpoint not found') {
+          throw GrayRemoteError.notFound(outcome.reason, { checkpointId })
+        }
+        if (outcome.rejected) {
+          throw GrayRemoteError.conflict(outcome.rejected, { checkpointId })
+        }
+        throw GrayRemoteError.internal('checkpoint deletion failed')
+      }
+      return outcome
+    },
+
+    'checkpoints/gc': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
+      const workspace = optionalWorkspace(args)
+      const dryRun = optionalBoolean(args, 'dryRun') !== false
+      if (!dryRun && args.confirm !== true) {
+        throw GrayRemoteError.approvalRequired('checkpoints.gc requires confirmation when dryRun is false')
+      }
+      const result = await service.collectGarbage(workspace, { dryRun, signal })
+      if (result.issue === 'cancelled' || signal?.aborted) throw GrayRemoteError.cancelled()
+      if (result.issue) throw GrayRemoteError.internal('checkpoint garbage collection failed')
       return result
     },
   }

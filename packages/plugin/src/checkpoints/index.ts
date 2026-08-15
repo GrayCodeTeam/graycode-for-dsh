@@ -29,6 +29,8 @@ export interface Config {
   maxFileSizeBytes: number
   /** Blob GC grace period in days (<= 0 = collect orphans immediately). */
   blobGracePeriodDays: number
+  /** Create a rollback checkpoint before restore (best effort). */
+  restoreProtectionPoint: boolean
   /** Tool install scope: roots (default), all agents, or disabled (no registration). */
   agentScope: AgentScopeMode
 }
@@ -40,6 +42,7 @@ export const Config: z<Config> = z.object({
   excludePatterns: z.array(z.string()).default([]),
   maxFileSizeBytes: z.number().default(50 * 1024 * 1024),
   blobGracePeriodDays: z.number().default(7),
+  restoreProtectionPoint: z.boolean().default(true),
   agentScope: agentScopeSchema,
 })
 

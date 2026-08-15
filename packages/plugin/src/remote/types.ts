@@ -209,9 +209,12 @@ export interface GrayMemoryForgetResult {
 // ==================== checkpoints（P4-04/05 列表与恢复预览） ====================
 
 import type {
+  CheckpointDeleteOutcome,
+  CheckpointGcResult,
   CheckpointListResult,
   CheckpointPreviewOutcome,
   CheckpointVerifyResult,
+  CreateCheckpointResult,
 } from '../checkpoints/service.ts'
 import type {
   CheckpointSummary,
@@ -239,6 +242,12 @@ export interface GrayCheckpointListResult {
   readonly nextCursor?: string
 }
 
+export interface GrayCheckpointCreateParams {
+  readonly workspace?: string
+  readonly title?: string
+  readonly notes?: string
+}
+
 export interface GrayCheckpointVerifyParams {
   readonly checkpointId: string
 }
@@ -256,6 +265,22 @@ export interface GrayCheckpointRestoreParams {
   /** previewRestore 返回值，必须原样回传；缺失/过期 → GRAY_APPROVAL_REQUIRED。 */
   readonly previewToken: string
   readonly deleteUntrackedFiles?: boolean
+}
+
+export interface GrayCheckpointDeleteParams {
+  readonly workspace?: string
+  readonly checkpointId: string
+  readonly force?: boolean
+  /** Browser destructive-action gate. */
+  readonly confirm: true
+}
+
+export interface GrayCheckpointGcParams {
+  readonly workspace?: string
+  /** Defaults to true. */
+  readonly dryRun?: boolean
+  /** Required only when dryRun=false. */
+  readonly confirm?: true
 }
 
 // ==================== stagedDiff（P4-06 staged diff 卡片） ====================
@@ -280,5 +305,12 @@ export interface GrayStagedDiffDecisionParams {
   readonly workspace?: string
 }
 
-export type { CheckpointListResult, CheckpointPreviewOutcome, CheckpointVerifyResult }
+export type {
+  CheckpointDeleteOutcome,
+  CheckpointGcResult,
+  CheckpointListResult,
+  CheckpointPreviewOutcome,
+  CheckpointVerifyResult,
+  CreateCheckpointResult,
+}
 export type { CheckpointSummary, RestoreResult }
