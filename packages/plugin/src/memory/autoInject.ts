@@ -5,9 +5,17 @@
  * an agent (and again only when memory content changes), a bounded memory
  * snapshot (global section + current workspace section, mirroring the
  * memory_wake line format via the domain wake/cover logic) is appended to the
- * `enter` decision's messages as an injected user message. Dedup by revision:
- * the same memory content is never injected twice. Any failure degrades to
- * no injection; it never blocks the step.
+ * `enter` decision's messages as an injected user message (source
+ * graycode-memory).
+ *
+ * PERSISTENCE: agent-loop persists every decision message into the session
+ * history as a `user/message` event — agent.ts turn() runs session.append over
+ * decision.messages (L282-284) — so the snapshot IS part of the conversation
+ * log, exactly like the runtime-context projection, and the client shows it as
+ * a normal context row. Dedup by revision: the same memory content is never
+ * injected twice, so unchanged memory does not accumulate duplicate snapshots
+ * in the persisted history. Any failure degrades to no injection; it never
+ * blocks the step.
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'

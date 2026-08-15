@@ -30,6 +30,18 @@ export interface Config {
   partLines: number
   /** Tool install scope: roots (default), all agents, or disabled (no registration). */
   agentScope: AgentScopeMode
+  /**
+   * Master switch for the MEMORY prompt section (default true). `false` →
+   * the prompt domain injects an empty MEMORY value (legacy parity with
+   * contextSections.generateMemorySection: enabled === false → '').
+   */
+  enabled?: boolean
+  /**
+   * Custom MEMORY system prompt (default '' = built-in English note). The
+   * prompt domain (promptInjector) reads it via the cross-domain service
+   * `graycode.memoryPrompt`; empty/whitespace → built-in note.
+   */
+  systemPrompt?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -39,7 +51,25 @@ export const Config: z<Config> = z.object({
   partChars: z.number().step(1).min(1).max(1000000).default(20000),
   partLines: z.number().step(1).min(1).max(100000).default(500),
   agentScope: agentScopeSchema,
+  enabled: z.boolean().default(true),
+  systemPrompt: z.string().default(''),
 })
+
+/**
+ * Cross-domain service key: the prompt domain (promptInjector) reads the
+ * MEMORY prompt configuration via `ctx.get` per assembly. Absent service
+ * (prompt mounted standalone / tests without the memory domain) degrades to
+ * the built-in static note.
+ */
+export const MEMORY_PROMPT_SERVICE = 'graycode.memoryPrompt'
+
+/** Cross-domain service shape consumed by the prompt domain. */
+export interface MemoryPromptService {
+  /** Trimmed custom system prompt; '' means the built-in note is used. */
+  getSystemPrompt(): string
+  /** Master switch: false → the MEMORY value is '' (nothing injected). */
+  isEnabled(): boolean
+}
 
 export function apply(ctx: Context, config: Config): void {
   const service = new MemoryService({
@@ -62,7 +92,16 @@ export function apply(ctx: Context, config: Config): void {
   // changes) a bounded snapshot enters the request; failures degrade to no
   // injection. The listener unregisters with this fiber.
   const detachInjector = ctx.on('agent/pre-step', createMemoryPreStepListener(service, ctx.logger))
+  // Cross-domain service (prompt domain reads the MEMORY prompt text): the
+  // prompt injector lazily fetches it per assembly via ctx.get, so HMR
+  // restarts (settings changes) are picked up without re-registration.
+  // Disposer follows this fiber (provide returns it; ctx.effect unwinds it).
+  const disposeProvide = ctx.provide(MEMORY_PROMPT_SERVICE, {
+    getSystemPrompt: () => config.systemPrompt?.trim() ?? '',
+    isEnabled: () => config.enabled !== false,
+  } satisfies MemoryPromptService)
   ctx.effect(() => () => {
+    disposeProvide()
     disposeRemote?.()
     registrar.dispose()
     detachInjector()
