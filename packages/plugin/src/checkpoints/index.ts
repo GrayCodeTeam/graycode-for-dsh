@@ -9,6 +9,9 @@ import { createDshFsRestoreWorkspaceWriter } from './domain/RestoreWorkspaceWrit
 
 export const name = 'graycode-checkpoints'
 
+/** 跨域共享键：CheckpointService 实例（autoCheckpoints 等消费；同 notifications/stagedDiff 模式）。 */
+export const CHECKPOINTS_SERVICE_KEY = 'graycode.checkpoints.service'
+
 export const inject = ['agents', 'fs'] as const
 
 /**
@@ -53,6 +56,8 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
   const service = new CheckpointService(config, createDshFsRestoreWorkspaceWriter(ctx.fs))
   // 初始化失败交给 Cordis fiber；成功前不注册任何可调用表面。
   await service.initialize()
+  // 跨域共享：实例供 autoCheckpoints 等域消费；fiber 卸载时 disposeService 回收。
+  const disposeService = ctx.provide(CHECKPOINTS_SERVICE_KEY, service)
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
   registrar.register(createCheckpointToolDefinitions(service))
   // Phase 4 host 侧 Remote 查询/命令层（checkpoint 列表/恢复预览）：注册端点；
@@ -66,6 +71,7 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
   })
   return () => {
     registrar.dispose()
+    disposeService()
     service.dispose()
   }
 }
