@@ -5,10 +5,39 @@ export const AGENT_SCOPES: readonly AgentScope[] = ['roots', 'all', 'disabled']
 /** Kept for the generic field primitive; GrayCode does not expose diagnostics here. */
 export const DIAGNOSTIC_SEVERITIES: readonly { value: string; labelKey: string }[] = []
 
+/** DSH 版默认工具清单（beforeTools / afterTools 共用，24 个）。 */
+export const DSH_TOOL_DEFAULTS: readonly string[] = [
+  'write',
+  'edit',
+  'str_replace_editor',
+  'bash',
+  'pwsh',
+  'grep',
+  'glob',
+  'delete_code',
+  'crop_image',
+  'resize_image',
+  'rotate_image',
+  'generate_image',
+  'remove_background',
+  'create_plan',
+  'update_plan',
+  'create_design',
+  'update_design',
+  'create_progress',
+  'update_progress',
+  'record_progress_milestone',
+  'create_review',
+  'record_review_milestone',
+  'finalize_review',
+  'reopen_review',
+]
+
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },
   memory: {
     dataRoot: '',
+    enabled: true,
     wakeLines: 96,
     entryChars: 280,
     partChars: 20_000,
@@ -18,12 +47,23 @@ export const DEFAULTS: GrayCodeConfig = {
   },
   checkpoints: {
     dataRoot: '',
+    enabled: true,
     maxCheckpoints: -1,
     excludeProfiles: {},
     excludePatterns: [],
     maxFileSizeBytes: 50 * 1024 * 1024,
     blobGracePeriodDays: 7,
     restoreProtectionPoint: true,
+    autoCheckpoint: true,
+    modelToolsEnabled: true,
+    messageCheckpoint: {
+      beforeMessages: ['user'],
+      afterMessages: [],
+      modelOuterLayerOnly: true,
+      mergeUnchangedCheckpoints: true,
+    },
+    beforeTools: [...DSH_TOOL_DEFAULTS],
+    afterTools: [...DSH_TOOL_DEFAULTS],
     agentScope: 'roots',
   },
   branches: { dataRoot: '', agentScope: 'roots' },

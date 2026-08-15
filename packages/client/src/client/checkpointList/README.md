@@ -11,7 +11,7 @@ tool, conversation, excluded count, content hash).
 | --- | --- | --- |
 | Host `checkpoints/*` Remote endpoints? | **YES** — list/create/verify/previewRestore/restore/delete/gc | `packages/plugin/src/checkpoints/adapters/dsh/remote.ts` (`createCheckpointsRemoteHandlers`), registered in `packages/plugin/src/checkpoints/index.ts` (`ctx.grayRemote?.register(...)`); dispatch service assembled in `packages/plugin/src/index.ts` (`new GrayRemoteService(ctx, { journalPath })` → `ctx.grayRemote`) |
 | Result envelope? | `GrayRemoteResult` — `{ ok: true, value } \| { ok: false, error: { code, message, details } }`; business errors **never reject**; unknown endpoint → `GRAY_ENDPOINT_NOT_FOUND` | `packages/plugin/src/remote/types.ts` / `service.ts` |
-| List item shape? | `GrayCheckpointItemView = CheckpointSummary & { verifyState: 'unknown' }` — id/conversationId/messageIndex/toolName/phase/timestamp/type/baseCheckpointId/contentHash/fileCount/backupBytes/excludedCount/manifestVersion | `packages/plugin/src/remote/types.ts` |
+| List item shape? | `GrayCheckpointItemView = CheckpointSummary & { verifyState: 'unknown' }` — id/conversationId/messageIndex/toolName/phase/timestamp/type/baseCheckpointId/contentHash/fileCount/backupBytes/excludedCount/manifestVersion; P4-06 adds `origin: 'auto' \| 'manual'` (absent on old data → treated as 'manual') | `packages/plugin/src/remote/types.ts` |
 | Verify state? | rc.6 does **not** persist verify results → list is always `'unknown'`; UI may call `checkpoints/verify` on demand (`CheckpointVerifyResult`: ok/issues/checkedFiles/chainLength/filesRevisionPaired) | `adapters/dsh/remote.ts` + `checkpoints/service.ts` |
 | Pagination? | `cursor` = id of the last listed item; `limit` clamped to 1..100 (default 20); `nextCursor` absent when no more pages | `remote/types.ts` (`GRAY_PAGE_LIMIT_*`) + `remote/validate.ts` (`normalizeLimit`/`slicePage`) |
 | Error codes? | Stable GRAY_* machine codes only (INVALID_INPUT/CONFLICT/APPROVAL_REQUIRED/CANCELLED/STORAGE_CORRUPT/NOT_FOUND/ENDPOINT_NOT_FOUND/INTERNAL) | `remote/types.ts` / `errors.ts` |
@@ -34,8 +34,10 @@ the current `/graycode` bridge or a future Typert client can feed unchanged.
 | `errors.ts` | GRAY_* code → locale-keyed hint (kind + retryable), cancellation detection |
 | `store.ts` | `createCheckpointListStore` — cursor pagination state machine over the injected data source |
 | `dataSource.ts` | The consumer port plus `createMockCheckpointListDataSource` (deterministic, I/O-free mock) |
+| `configModel.ts` | Checkpoint config section pure model (P4-06): values shape, defaults, normalization, message-slot toggles, tool-list parse/validate, path commits |
+| `CheckpointConfigSection.tsx` | Checkpoint config field group (P4-06): master/auto/model-tool switches, message-trigger slots, before/after tool textareas |
 | `CheckpointList.tsx` | List panel: load-more footer, empty/loading/error states, mock notice, total counter |
-| `CheckpointListItem.tsx` | Item row (type chip, id, time, size, files, parent label, verify badge) + expandable details (chain, phase, tool, conversation, hash) |
+| `CheckpointListItem.tsx` | Item row (type chip, origin badge, id, time, size, files, parent label, verify badge) + expandable details (chain, phase, tool, conversation, hash) |
 | `CheckpointVerifyBadge.tsx` | Read-only verify badge (unknown/ok/failed tones) |
 | `locales.ts` | `graycode.checkpointList` namespace (zh/en balanced + ja placeholder) |
 
@@ -70,6 +72,25 @@ The badge renders `verifyState` as read-only display (rc.6: always 'unknown').
 The optional `onVerify` callback on the list/item is declarative — with no
 callback (replay/unwired host) the button renders disabled with the
 `verify.replayOnly` hint. The client never initiates verification itself.
+
+### Origin badge (P4-06)
+
+An item with `origin: 'auto'` (created by the automatic checkpoint pipeline)
+renders a small badge next to the type chip (`origin.auto` label). 'manual'
+and missing legacy values render no badge — the wire reader normalizes both
+to `'manual'`, so old list data is untouched.
+
+### Checkpoint config section (P4-06)
+
+`CheckpointConfigSection` + `configModel` render the new checkpoints Config
+fields (enabled / autoCheckpoint / modelToolsEnabled / messageCheckpoint
+message slots / beforeTools / afterTools). The section is stateless: it
+commits absolute paths (`['checkpoints', ...]`) through an injected
+`onChange`, i.e. the same contract as the settings `store.set` channel — the
+settings page (`CheckpointManager`) wires it with the host config snapshot;
+without a save channel it degrades to an honest local-draft mode with a
+notice. Copy lives in its own `graycode.checkpointConfig` namespace so the
+settings half (which owns `settings.graycode`) needs no changes.
 
 ### Error mapping (errors.ts)
 

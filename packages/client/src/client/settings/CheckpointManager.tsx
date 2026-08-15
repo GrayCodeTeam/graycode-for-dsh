@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { GcTranslate } from './fields.tsx'
 import {
   buttonDangerStyle,
@@ -25,11 +25,33 @@ import {
   shouldAdoptWorkspaceDefault,
   type WorkspaceRequestToken,
 } from './workspaceRequestGuard.ts'
+import { CheckpointConfigSection } from '../checkpointList/CheckpointConfigSection.tsx'
+import {
+  DEFAULT_CHECKPOINT_CONFIG,
+  createCheckpointConfigFallbackT,
+  setCheckpointConfigPath,
+  type CheckpointConfigValues,
+} from '../checkpointList/configModel.ts'
 
 export interface CheckpointManagerProps {
   t: GcTranslate
   remote: GrayRemoteInvoke
   defaultWorkspace?: string
+  /**
+   * Checkpoint config snapshot (new host Config fields). Absent → the config
+   * section runs as a local draft (see `onCheckpointConfigChange`).
+   */
+  checkpointConfig?: CheckpointConfigValues
+  /**
+   * Config update channel — the settings page's `onChange` (→ `store.set`,
+   * absolute paths `['checkpoints', ...]`). Absent → edits stay local.
+   */
+  onCheckpointConfigChange?: (path: readonly string[], value: unknown) => void | Promise<void>
+  /**
+   * Bound `graycode.checkpointConfig` translator seat; absent → built-in zh
+   * fallback (mirrors the locale runtime's own fallback locale).
+   */
+  configT?: (key: string) => string
 }
 
 const panelStyle: CSSProperties = {
@@ -71,7 +93,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
 }
 
-export function CheckpointManager({ t, remote, defaultWorkspace = '' }: CheckpointManagerProps): ReactNode {
+export function CheckpointManager({
+  t,
+  remote,
+  defaultWorkspace = '',
+  checkpointConfig,
+  onCheckpointConfigChange,
+  configT: configTProp,
+}: CheckpointManagerProps): ReactNode {
   const initialLoadStarted = useRef(false)
   const [workspace, setWorkspace] = useState(defaultWorkspace)
   const workspaceRef = useRef(defaultWorkspace)
@@ -98,6 +127,24 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
   const [deleteUntracked, setDeleteUntracked] = useState(false)
   const [listWorkspace, setListWorkspace] = useState('')
   const [gcPreview, setGcPreview] = useState<{ value: CheckpointGcResult; workspace: string } | null>(null)
+
+  // ---- checkpoint config section (P4-06) ----
+  const [localConfig, setLocalConfig] = useState<CheckpointConfigValues>(DEFAULT_CHECKPOINT_CONFIG)
+  const [configSaveError, setConfigSaveError] = useState('')
+  const configSectionT = useMemo(() => configTProp ?? createCheckpointConfigFallbackT('zh'), [configTProp])
+  // Wired = the settings page supplies both the snapshot and the save channel;
+  // otherwise the section runs as an honest local draft (notice shown).
+  const configWired = checkpointConfig !== undefined && onCheckpointConfigChange !== undefined
+  const handleConfigChange = useCallback((path: readonly string[], value: unknown): void => {
+    if (onCheckpointConfigChange !== undefined) {
+      setConfigSaveError('')
+      Promise.resolve(onCheckpointConfigChange(path, value)).catch(() => {
+        setConfigSaveError(configSectionT('config.saveError'))
+      })
+      return
+    }
+    setLocalConfig(current => setCheckpointConfigPath(current, path, value))
+  }, [configSectionT, onCheckpointConfigChange])
 
   const clearWorkspaceResults = useCallback((): void => {
     setItems([])
@@ -332,6 +379,14 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
     <section style={panelStyle} data-graycode-checkpoint-manager>
       <strong>{t('checkpoint.managerTitle')}</strong>
       <p style={noteStyle}>{t('checkpoint.managerDescription')}</p>
+      <CheckpointConfigSection
+        t={configSectionT}
+        config={configWired ? checkpointConfig : localConfig}
+        onChange={handleConfigChange}
+        disabled={busy}
+        localOnly={!configWired}
+        saveError={configSaveError}
+      />
       <label>
         <span>{t('checkpoint.workspace')}</span>
         <input

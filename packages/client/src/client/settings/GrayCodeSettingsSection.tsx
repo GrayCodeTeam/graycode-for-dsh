@@ -47,6 +47,8 @@ export interface GrayCodeSettingsSectionInjected {
   activityT: TranslateNS<'graycode.activityHeatmap'>
   /** Translate seat for the `graycode.memoryManage` namespace. */
   memoryT: TranslateNS<'graycode.memoryManage'>
+  /** Translate seat for the `graycode.checkpointConfig` namespace. */
+  checkpointConfigT: TranslateNS<'graycode.checkpointConfig'>
 }
 
 /** 宿主 owner props（设置外壳）+ 注入面。 */
@@ -62,7 +64,7 @@ export function selectCurrentSessionWorkspace(state: SessionListState): string |
   return cwd === undefined || cwd.length === 0 ? undefined : cwd
 }
 
-export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions, activityT, memoryT, connection }: GrayCodeSettingsSectionProps): ReactNode {
+export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions, activityT, memoryT, checkpointConfigT, connection }: GrayCodeSettingsSectionProps): ReactNode {
   const state = useGrayCodeStore(store)
   const defaultWorkspace = useSessions(selectCurrentSessionWorkspace)
   useEffect(() => {
@@ -146,6 +148,7 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, useSessions,
             defaultWorkspace={defaultWorkspace}
             activityT={activityT}
             memoryT={memoryT}
+            checkpointConfigT={checkpointConfigT}
             connection={connection}
           />
         )}

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
-import { DEFAULTS } from '../src/client/settings/defaults.ts'
+import { DEFAULTS, DSH_TOOL_DEFAULTS } from '../src/client/settings/defaults.ts'
 import { GRAYCODE_CHANNEL, createGrayCodeStore, getAtPath, setAtPath } from '../src/client/settings/store.ts'
 import { createGrayRemoteInvoker } from '../src/client/settings/remote.ts'
 import {
@@ -9,7 +9,7 @@ import {
   graycodeSettingsJaPlaceholder,
   zh,
 } from '../src/client/settings/locales.ts'
-import { CATEGORIES } from '../src/client/settings/pages.tsx'
+import { CATEGORIES, commaListTransform, modelAfterTransform, userBeforeTransform } from '../src/client/settings/pages.tsx'
 import { selectCurrentSessionWorkspace } from '../src/client/settings/GrayCodeSettingsSection.tsx'
 import {
   createFieldDraft,
@@ -55,6 +55,89 @@ describe('settings path helpers', () => {
 
   it('emits no patch for an unchanged value', () => {
     expect(setAtPath(structuredClone(DEFAULTS), ['todo', 'enabled'], true).patch).toEqual({})
+  })
+})
+
+describe('shared settings layer: memory.enabled / checkpoints extensions', () => {
+  it('mirrors the new host fields in the browser defaults', () => {
+    expect(DEFAULTS.memory.enabled).toBe(true)
+    expect(DEFAULTS.checkpoints.enabled).toBe(true)
+    expect(DEFAULTS.checkpoints.autoCheckpoint).toBe(true)
+    expect(DEFAULTS.checkpoints.modelToolsEnabled).toBe(true)
+    expect(DEFAULTS.checkpoints.messageCheckpoint).toEqual({
+      beforeMessages: ['user'],
+      afterMessages: [],
+      modelOuterLayerOnly: true,
+      mergeUnchangedCheckpoints: true,
+    })
+    expect(DEFAULTS.checkpoints.beforeTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(DEFAULTS.checkpoints.afterTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(DSH_TOOL_DEFAULTS).toHaveLength(24)
+  })
+
+  it('resolves every new field path on the defaults snapshot', () => {
+    for (const path of [
+      ['memory', 'enabled'],
+      ['checkpoints', 'enabled'],
+      ['checkpoints', 'autoCheckpoint'],
+      ['checkpoints', 'modelToolsEnabled'],
+      ['checkpoints', 'messageCheckpoint', 'beforeMessages'],
+      ['checkpoints', 'messageCheckpoint', 'afterMessages'],
+      ['checkpoints', 'messageCheckpoint', 'modelOuterLayerOnly'],
+      ['checkpoints', 'messageCheckpoint', 'mergeUnchangedCheckpoints'],
+      ['checkpoints', 'beforeTools'],
+      ['checkpoints', 'afterTools'],
+    ]) {
+      expect(getAtPath(DEFAULTS, path), path.join('.')).toBeDefined()
+    }
+  })
+
+  it('toggling the checkpoints master switch emits the whole segment with the nested policy intact', () => {
+    const { patch } = setAtPath(structuredClone(DEFAULTS), ['checkpoints', 'enabled'], false)
+    expect(patch).toEqual({ checkpoints: { ...DEFAULTS.checkpoints, enabled: false } })
+    expect(patch.checkpoints?.messageCheckpoint).toEqual(DEFAULTS.checkpoints.messageCheckpoint)
+    expect(patch.checkpoints?.beforeTools).toEqual(DEFAULTS.checkpoints.beforeTools)
+  })
+
+  it('replaces the nested messageCheckpoint policy wholesale through a top-level patch', () => {
+    const config = structuredClone(DEFAULTS)
+    const { next, patch } = setAtPath(config, ['checkpoints', 'messageCheckpoint', 'beforeMessages'], ['user', 'model'])
+    expect(next.checkpoints.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
+    expect(config.checkpoints.messageCheckpoint.beforeMessages).toEqual(['user'])
+    expect(patch).toEqual({
+      checkpoints: {
+        ...DEFAULTS.checkpoints,
+        messageCheckpoint: { ...DEFAULTS.checkpoints.messageCheckpoint, beforeMessages: ['user', 'model'] },
+      },
+    })
+  })
+
+  it('emits a patch when toggling memory.enabled off', () => {
+    const { patch } = setAtPath(structuredClone(DEFAULTS), ['memory', 'enabled'], false)
+    expect(patch).toEqual({ memory: { ...DEFAULTS.memory, enabled: false } })
+  })
+
+  it('round-trips comma-separated tool lists through the text transform', () => {
+    expect(commaListTransform.toInput(DEFAULTS.checkpoints.beforeTools)).toBe(DSH_TOOL_DEFAULTS.join(', '))
+    expect(commaListTransform.fromInput('write, edit , bash,')).toEqual(['write', 'edit', 'bash'])
+    expect(commaListTransform.fromInput('')).toEqual([])
+    expect(commaListTransform.fromInput(42)).toEqual([])
+    expect(prepareTextCommit('write, edit', commaListTransform)).toEqual({
+      value: ['write', 'edit'],
+      canonical: 'write, edit',
+    })
+  })
+
+  it('maps the two message checkpoint toggles onto the before/after role arrays', () => {
+    expect(userBeforeTransform.toInput(['user', 'model'])).toBe(true)
+    expect(userBeforeTransform.toInput(['model'])).toBe(false)
+    expect(userBeforeTransform.toInput(undefined)).toBe(false)
+    expect(userBeforeTransform.fromInput(true)).toEqual(['user'])
+    expect(userBeforeTransform.fromInput(false)).toEqual([])
+    expect(modelAfterTransform.toInput(['model'])).toBe(true)
+    expect(modelAfterTransform.toInput([])).toBe(false)
+    expect(modelAfterTransform.fromInput(true)).toEqual(['model'])
+    expect(modelAfterTransform.fromInput(false)).toEqual([])
   })
 })
 

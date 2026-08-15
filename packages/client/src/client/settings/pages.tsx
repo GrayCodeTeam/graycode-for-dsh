@@ -22,6 +22,8 @@ import { ActivityHeatmapPanel } from '../activityHeatmap/ActivityHeatmapPanel.ts
 import { ConnectionActivityTokensDataSource, RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
 import { MemoryManagePanel } from '../memoryManage/MemoryManagePanel.tsx'
 import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
+import { normalizeCheckpointConfig } from '../checkpointList/configModel.ts'
+import type { GrayCodeCheckpointConfigLocaleKey } from '../checkpointList/locales.ts'
 import { PromptModeManager } from './promptModes/PromptModeManager.tsx'
 
 export interface GrayCodePageProps {
@@ -37,6 +39,8 @@ export interface GrayCodePageProps {
   activityT: TranslateNS<'graycode.activityHeatmap'>
   /** Translate seat for the `graycode.memoryManage` namespace. */
   memoryT: TranslateNS<'graycode.memoryManage'>
+  /** Translate seat for the `graycode.checkpointConfig` namespace. */
+  checkpointConfigT: TranslateNS<'graycode.checkpointConfig'>
 }
 
 export type GrayCodePage = (props: GrayCodePageProps) => ReactNode
@@ -71,13 +75,40 @@ const secondsTransform = {
   fromInput: (value: unknown): number => typeof value === 'number' ? Math.round(value * 1000) : 1000,
 }
 
-const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace }) => (
+/** 逗号分隔工具名列表 ↔ string[]（checkpoints.beforeTools / afterTools 共用）。 */
+export const commaListTransform = {
+  toInput: (value: unknown): string => Array.isArray(value) ? value.join(', ') : '',
+  fromInput: (value: unknown): string[] => typeof value === 'string'
+    ? value.split(',').map(item => item.trim()).filter(Boolean)
+    : [],
+}
+
+/** messageCheckpoint.beforeMessages ↔ “用户消息前自动存档”开关（user ∈ 数组）。 */
+export const userBeforeTransform = {
+  toInput: (value: unknown): boolean => Array.isArray(value) ? value.includes('user') : false,
+  fromInput: (value: unknown): Array<'user' | 'model'> => value === true ? ['user'] : [],
+}
+
+/** messageCheckpoint.afterMessages ↔ “模型回复后自动存档”开关（model ∈ 数组）。 */
+export const modelAfterTransform = {
+  toInput: (value: unknown): boolean => Array.isArray(value) ? value.includes('model') : false,
+  fromInput: (value: unknown): Array<'user' | 'model'> => value === true ? ['model'] : [],
+}
+
+const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, checkpointConfigT }) => (
   <div>
     <FieldSection
       title={t('pages.checkpoints.title')}
       description={t('pages.checkpoints.description')}
       fields={[
+        { kind: 'boolean', path: ['checkpoints', 'enabled'], labelKey: 'fields.checkpointsEnabled', descriptionKey: 'fields.checkpointsEnabled.description' },
         scope('checkpoints', t),
+        { kind: 'boolean', path: ['checkpoints', 'autoCheckpoint'], labelKey: 'fields.autoCheckpoint', descriptionKey: 'fields.autoCheckpoint.description' },
+        { kind: 'boolean', path: ['checkpoints', 'modelToolsEnabled'], labelKey: 'fields.modelToolsEnabled', descriptionKey: 'fields.modelToolsEnabled.description' },
+        { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'beforeMessages'], labelKey: 'fields.checkpointBeforeUserMessage', descriptionKey: 'fields.checkpointBeforeUserMessage.description', transform: userBeforeTransform },
+        { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'afterMessages'], labelKey: 'fields.checkpointAfterModelMessage', descriptionKey: 'fields.checkpointAfterModelMessage.description', transform: modelAfterTransform },
+        { kind: 'text', path: ['checkpoints', 'beforeTools'], labelKey: 'fields.beforeTools', descriptionKey: 'fields.beforeTools.description', monospace: true, transform: commaListTransform },
+        { kind: 'text', path: ['checkpoints', 'afterTools'], labelKey: 'fields.afterTools', descriptionKey: 'fields.afterTools.description', monospace: true, transform: commaListTransform },
         { kind: 'number', path: ['checkpoints', 'maxCheckpoints'], labelKey: 'fields.maxCheckpoints', descriptionKey: 'fields.maxCheckpoints.description', min: -1, step: 1 },
         { kind: 'number', path: ['checkpoints', 'maxFileSizeBytes'], labelKey: 'fields.maxFileSizeMiB', min: 0, step: 1, transform: mebibytesTransform },
         { kind: 'number', path: ['checkpoints', 'blobGracePeriodDays'], labelKey: 'fields.blobGraceDays', min: 0, step: 1 },
@@ -88,7 +119,14 @@ const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWor
       onChange={onChange}
       t={t}
     />
-    <CheckpointManager t={t} remote={remote} defaultWorkspace={defaultWorkspace} />
+    <CheckpointManager
+      t={t}
+      remote={remote}
+      defaultWorkspace={defaultWorkspace}
+      checkpointConfig={normalizeCheckpointConfig(config.checkpoints)}
+      onCheckpointConfigChange={onChange}
+      configT={key => checkpointConfigT(key as GrayCodeCheckpointConfigLocaleKey)}
+    />
   </div>
 )
 
@@ -105,6 +143,7 @@ const MemoryPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspac
         title={t('pages.memory.title')}
         description={t('pages.memory.description')}
         fields={[
+          { kind: 'boolean', path: ['memory', 'enabled'], labelKey: 'fields.memoryEnabled', descriptionKey: 'fields.memoryEnabled.description' },
           scope('memory', t),
           { kind: 'number', path: ['memory', 'wakeLines'], labelKey: 'fields.wakeLines', min: 1, max: 10_000, step: 1 },
           { kind: 'number', path: ['memory', 'entryChars'], labelKey: 'fields.entryChars', min: 1, max: 1000, step: 1 },

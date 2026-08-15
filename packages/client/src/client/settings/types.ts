@@ -15,9 +15,23 @@ export interface CustomAgentConfig {
   enabled: boolean
 }
 
+/** 消息级自动存档策略（checkpoints.messageCheckpoint）。 */
+export interface CheckpointMessagePolicy {
+  /** 在哪些角色消息之前自动创建存档点。 */
+  beforeMessages: Array<'user' | 'model'>
+  /** 在哪些角色消息之后自动创建存档点。 */
+  afterMessages: Array<'user' | 'model'>
+  /** 仅对模型最外层消息应用消息存档策略（内部工具循环消息除外）。 */
+  modelOuterLayerOnly: boolean
+  /** 内容未变化的相邻存档点合并为一个。 */
+  mergeUnchangedCheckpoints: boolean
+}
+
 export interface GrayCodeConfig {
   workflows: DataRootConfig & ScopedConfig & { documentRoot: string }
   memory: DataRootConfig & ScopedConfig & {
+    /** 记忆域总开关（默认 true）；关闭后记忆工具不可用且不再注入 MEMORY 提示词。 */
+    enabled: boolean
     wakeLines: number
     entryChars: number
     partChars: number
@@ -26,12 +40,24 @@ export interface GrayCodeConfig {
     systemPrompt?: string
   }
   checkpoints: DataRootConfig & ScopedConfig & {
+    /** 存档点域总开关（默认 true）。 */
+    enabled: boolean
     maxCheckpoints: number
     excludeProfiles: Record<string, boolean>
     excludePatterns: string[]
     maxFileSizeBytes: number
     blobGracePeriodDays: number
     restoreProtectionPoint: boolean
+    /** 工具执行/消息前后自动创建存档点（默认 true）。 */
+    autoCheckpoint: boolean
+    /** 模型是否可调用 checkpoint_* 工具（默认 true）；自动存档不受影响。 */
+    modelToolsEnabled: boolean
+    /** 消息级自动存档策略。 */
+    messageCheckpoint: CheckpointMessagePolicy
+    /** 执行前自动存档的工具名列表（默认 DSH 版 24 工具）。 */
+    beforeTools: string[]
+    /** 执行后自动存档的工具名列表（默认 DSH 版 24 工具）。 */
+    afterTools: string[]
   }
   branches: DataRootConfig & ScopedConfig
   persona: ToggleScopedConfig & { template?: string }

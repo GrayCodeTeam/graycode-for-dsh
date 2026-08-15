@@ -48,6 +48,13 @@ export type CheckpointPhase = 'before' | 'after'
  */
 export type CheckpointVerifyState = 'unknown' | 'ok' | 'failed'
 
+/**
+ * Snapshot origin. 'auto' = created by the automatic checkpoint pipeline;
+ * 'manual' = created on demand. Old list data predates the field and is
+ * treated as 'manual' (the badge only renders for 'auto').
+ */
+export type CheckpointOrigin = 'auto' | 'manual'
+
 /** Wire list item (host `GrayCheckpointItemView`, structural re-declaration). */
 export interface CheckpointListItemWire {
   readonly id: string
@@ -68,6 +75,8 @@ export interface CheckpointListItemWire {
   readonly excludedCount: number
   readonly manifestVersion: number
   readonly verifyState: CheckpointVerifyState
+  /** Snapshot origin ('auto' = automatic pipeline); absent = 'manual' (old data). */
+  readonly origin?: CheckpointOrigin
 }
 
 /** One wire page (host `GrayCheckpointListResult`). */
@@ -165,6 +174,8 @@ export interface CheckpointListItemVM {
   readonly excludedCount: number
   readonly contentHash: string
   readonly verifyState: CheckpointVerifyState
+  /** Normalized origin ('manual' when the wire field is absent). */
+  readonly origin: CheckpointOrigin
   /** Parent chain, bounded for display (see viewModel.ts). */
   readonly chain: readonly CheckpointChainLink[]
   readonly chainTruncated: boolean
@@ -220,6 +231,11 @@ function readVerifyState(value: unknown): CheckpointVerifyState {
   return typeof value === 'string' && VERIFY_STATES.has(value) ? (value as CheckpointVerifyState) : 'unknown'
 }
 
+/** Narrow an origin value; anything but 'auto'/'manual' (incl. missing) → 'manual'. */
+function readOrigin(value: unknown): CheckpointOrigin {
+  return value === 'auto' || value === 'manual' ? value : 'manual'
+}
+
 /**
  * Narrow one raw list item to the wire shape.
  * @param data - raw payload (unknown by contract; narrowed defensively).
@@ -248,6 +264,7 @@ export function readCheckpointListItem(data: unknown): CheckpointListItemWire | 
     excludedCount: readOptionalInt(record.excludedCount) ?? 0,
     manifestVersion: readOptionalInt(record.manifestVersion) ?? 0,
     verifyState: readVerifyState(record.verifyState),
+    origin: readOrigin(record.origin),
   }
 }
 

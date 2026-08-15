@@ -28,18 +28,23 @@ import {
 import {
   CHECKPOINT_CHAIN_MAX_LINKS,
   buildCheckpointItemsById,
+  checkpointOriginLabelKey,
   checkpointPhaseLabelKey,
   checkpointTypeLabelKey,
   formatCheckpointBytes,
   formatCheckpointTime,
   resolveCheckpointChain,
+  shouldShowCheckpointOriginBadge,
   shortCheckpointId,
   toCheckpointItemVM,
 } from '../src/client/checkpointList/viewModel.ts'
 import { createCheckpointListStore } from '../src/client/checkpointList/store.ts'
 import { createMockCheckpointListDataSource } from '../src/client/checkpointList/dataSource.ts'
 import {
+  GRAYCODE_CHECKPOINT_CONFIG_NS,
   GRAYCODE_CHECKPOINT_LIST_NS,
+  graycodeCheckpointConfigDictionaries,
+  graycodeCheckpointConfigJaPlaceholder,
   graycodeCheckpointListDictionaries,
   graycodeCheckpointListJaPlaceholder,
 } from '../src/client/checkpointList/locales.ts'
@@ -299,6 +304,23 @@ describe('item view model', () => {
     const vm = toCheckpointItemVM(item, buildCheckpointItemsById([item]))
     expect(vm.verifyState).toBe('ok')
   })
+
+  it('carries origin with a manual default; badge renders only for auto', () => {
+    const auto = toCheckpointItemVM(fakeItem(1, { origin: 'auto' }), buildCheckpointItemsById([fakeItem(1, { origin: 'auto' })]))
+    expect(auto.origin).toBe('auto')
+    expect(shouldShowCheckpointOriginBadge(auto.origin)).toBe(true)
+    expect(checkpointOriginLabelKey(auto.origin)).toBe('origin.auto')
+
+    const manual = toCheckpointItemVM(fakeItem(2, { origin: 'manual' }), buildCheckpointItemsById([fakeItem(2, { origin: 'manual' })]))
+    expect(manual.origin).toBe('manual')
+    expect(shouldShowCheckpointOriginBadge(manual.origin)).toBe(false)
+    expect(checkpointOriginLabelKey(manual.origin)).toBe('origin.manual')
+
+    // Legacy wire items without the field normalize to manual (no badge).
+    const legacy = toCheckpointItemVM(fakeItem(3), buildCheckpointItemsById([fakeItem(3)]))
+    expect(legacy.origin).toBe('manual')
+    expect(shouldShowCheckpointOriginBadge(legacy.origin)).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -405,6 +427,17 @@ describe('defensive wire readers', () => {
     expect(item?.fileCount).toBe(0)
     expect(item?.timestamp).toBe(0)
     expect(item?.baseCheckpointId).toBeUndefined()
+  })
+
+  it('narrows origin: auto/manual pass through; missing and hostile values → manual', () => {
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after', origin: 'auto' })?.origin).toBe('auto')
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after', origin: 'manual' })?.origin).toBe('manual')
+    // Legacy data without the field defaults to manual.
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after' })?.origin).toBe('manual')
+    // Hostile values are rejected, not propagated.
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after', origin: 'bogus' })?.origin).toBe('manual')
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after', origin: 42 })?.origin).toBe('manual')
+    expect(readCheckpointListItem({ id: 'cp_1', type: 'full', phase: 'after', origin: '' })?.origin).toBe('manual')
   })
 
   it('narrows a page, filters invalid items and falls back total', () => {
@@ -684,6 +717,25 @@ describe('mock data source', () => {
     }
   })
 
+  it('emits a deterministic origin mix (auto/manual) so the badge is exercisable', async () => {
+    const a = createMockCheckpointListDataSource({ seed: 3, total: 12 })
+    const b = createMockCheckpointListDataSource({ seed: 3, total: 12 })
+    const ra = await a.list({ workspaceId: '/ws', limit: 12 })
+    const rb = await b.list({ workspaceId: '/ws', limit: 12 })
+    expect(ra.ok && rb.ok).toBe(true)
+    if (ra.ok && rb.ok) {
+      const originsA = ra.value.items.map(item => item.origin)
+      const originsB = rb.value.items.map(item => item.origin)
+      expect(originsA).toEqual(originsB)
+      expect(originsA.every(origin => origin === 'auto' || origin === 'manual')).toBe(true)
+      expect(originsA).toContain('auto')
+      expect(originsA).toContain('manual')
+      // seq % 4 === 0 → auto (every 4th item, 1-based).
+      expect(originsA[3]).toBe('auto')
+      expect(originsA[0]).toBe('manual')
+    }
+  })
+
   it('simulates a host failure on the Nth call', async () => {
     const source = createMockCheckpointListDataSource({
       seed: 1,
@@ -750,6 +802,17 @@ describe('locale alignment', () => {
     expect(jaKeys).toEqual(zhKeys)
   })
 
+  it('checkpointConfig namespace registers separately and stays balanced', () => {
+    expect(GRAYCODE_CHECKPOINT_CONFIG_NS).toBe('graycode.checkpointConfig')
+    expect(GRAYCODE_CHECKPOINT_CONFIG_NS).not.toBe(GRAYCODE_CHECKPOINT_LIST_NS)
+    const zhKeys = Object.keys(graycodeCheckpointConfigDictionaries.zh).sort()
+    const enKeys = Object.keys(graycodeCheckpointConfigDictionaries.en).sort()
+    const jaKeys = Object.keys(graycodeCheckpointConfigJaPlaceholder).sort()
+    expect(enKeys).toEqual(zhKeys)
+    expect(jaKeys).toEqual(zhKeys)
+    expect(zhKeys.length).toBeGreaterThan(0)
+  })
+
   it('every error hint key and label key exists in the dictionaries', () => {
     const keys = new Set(Object.keys(graycodeCheckpointListDictionaries.zh))
     for (const code of Object.values(CHECKPOINT_LIST_ERROR_CODES)) {
@@ -763,5 +826,7 @@ describe('locale alignment', () => {
     expect(keys.has('verify.unknown')).toBe(true)
     expect(keys.has('verify.ok')).toBe(true)
     expect(keys.has('verify.failed')).toBe(true)
+    expect(keys.has('origin.auto')).toBe(true)
+    expect(keys.has('origin.manual')).toBe(true)
   })
 })

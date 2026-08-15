@@ -15,10 +15,12 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CheckpointVerifyBadge } from './CheckpointVerifyBadge.tsx'
 import {
+  checkpointOriginLabelKey,
   checkpointPhaseLabelKey,
   checkpointTypeLabelKey,
   formatCheckpointBytes,
   formatCheckpointTime,
+  shouldShowCheckpointOriginBadge,
   shortCheckpointId,
 } from './viewModel.ts'
 import type { CheckpointChainLink, CheckpointListItemVM } from './types.ts'
@@ -62,6 +64,16 @@ const typeChipStyle: CSSProperties = {
   fontSize: '10px',
   whiteSpace: 'nowrap',
   color: '#58a6ff',
+}
+
+/** Origin badge (only 'auto' snapshots render one). */
+const originBadgeStyle: CSSProperties = {
+  padding: '0.0625rem 0.375rem',
+  borderRadius: '999px',
+  border: '1px solid currentColor',
+  fontSize: '10px',
+  whiteSpace: 'nowrap',
+  color: '#bc8cff',
 }
 
 const idStyle: CSSProperties = {
@@ -158,6 +170,11 @@ export function CheckpointListItem({
         <span data-graycode-checkpoint-list="typeChip" style={typeChipStyle}>
           {t(checkpointTypeLabelKey(item.type))}
         </span>
+        {shouldShowCheckpointOriginBadge(item.origin) && (
+          <span data-graycode-checkpoint-list="originBadge" data-origin={item.origin} style={originBadgeStyle}>
+            {t(checkpointOriginLabelKey(item.origin))}
+          </span>
+        )}
         <span style={idStyle}>{item.id}</span>
         <span style={labelStyle}>{formatCheckpointTime(item.timestamp)}</span>
         <span style={labelStyle}>

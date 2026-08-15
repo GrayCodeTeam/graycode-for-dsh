@@ -74,6 +74,9 @@ function buildMockItems(total: number, baseTimestamp: number, rng: () => number)
       excludedCount: seq % 9,
       manifestVersion: 3,
       verifyState: 'unknown',
+      // Deterministic mix so previews/tests exercise the origin badge
+      // (every 4th item is machine-created).
+      origin: seq % 4 === 0 ? 'auto' : 'manual',
     })
     previousId = id
   }

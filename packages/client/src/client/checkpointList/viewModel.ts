@@ -14,6 +14,7 @@ import type {
   CheckpointChainResolution,
   CheckpointListItemVM,
   CheckpointListItemWire,
+  CheckpointOrigin,
   CheckpointPhase,
   CheckpointType,
 } from './types.ts'
@@ -29,6 +30,19 @@ export function checkpointTypeLabelKey(type: CheckpointType): 'type.full' | 'typ
 /** Locale key for a checkpoint phase label. */
 export function checkpointPhaseLabelKey(phase: CheckpointPhase): 'phase.before' | 'phase.after' {
   return phase === 'before' ? 'phase.before' : 'phase.after'
+}
+
+/** Locale key for a checkpoint origin label ('origin.manual' is reserved; only 'auto' renders a badge). */
+export function checkpointOriginLabelKey(origin: CheckpointOrigin): 'origin.auto' | 'origin.manual' {
+  return origin === 'auto' ? 'origin.auto' : 'origin.manual'
+}
+
+/**
+ * Whether the item row renders the origin badge. Only 'auto' shows one;
+ * 'manual' (and missing legacy data, normalized to 'manual') stays bare.
+ */
+export function shouldShowCheckpointOriginBadge(origin: CheckpointOrigin): boolean {
+  return origin === 'auto'
 }
 
 /** Compact id for display (long ids truncate to head + ellipsis). */
@@ -124,6 +138,7 @@ export function toCheckpointItemVM(
     excludedCount: item.excludedCount,
     contentHash: item.contentHash,
     verifyState: item.verifyState,
+    origin: item.origin ?? 'manual',
     chain: chain.links,
     chainTruncated: chain.truncated,
   }
