@@ -257,6 +257,9 @@ export type GrayCodeCheckpointConfigLocaleKey =
   | 'config.messageCheckpoint.description'
   | 'config.beforeUserMessage'
   | 'config.beforeUserMessage.description'
+  | 'config.beforeModelMessage'
+  | 'config.beforeModelMessage.description'
+  | 'config.afterUserMessageUnavailable'
   | 'config.afterModelMessage'
   | 'config.afterModelMessage.description'
   | 'config.beforeTools'
@@ -267,6 +270,49 @@ export type GrayCodeCheckpointConfigLocaleKey =
   | 'config.toolsInvalidChars'
   | 'config.toolsTooLong'
   | 'config.toolsEmptyLine'
+  | 'config.toolsGroup'
+  | 'config.toolsGroup.description'
+  | 'config.matrix.tool'
+  | 'config.matrix.before'
+  | 'config.matrix.after'
+  | 'config.tools.selectAll'
+  | 'config.tools.clear'
+  | 'config.tools.reset'
+  | 'config.tools.customGroup'
+  | 'config.tools.customGroup.description'
+  | 'config.tools.customPlaceholder'
+  | 'config.tools.add'
+  | 'config.tools.remove'
+  | 'config.tools.duplicate'
+  | 'config.toolGroup.write'
+  | 'config.toolGroup.shell'
+  | 'config.toolGroup.search'
+  | 'config.toolGroup.image'
+  | 'config.toolGroup.workflow'
+  | 'config.tool.write.description'
+  | 'config.tool.edit.description'
+  | 'config.tool.str_replace_editor.description'
+  | 'config.tool.delete_code.description'
+  | 'config.tool.bash.description'
+  | 'config.tool.pwsh.description'
+  | 'config.tool.grep.description'
+  | 'config.tool.glob.description'
+  | 'config.tool.crop_image.description'
+  | 'config.tool.resize_image.description'
+  | 'config.tool.rotate_image.description'
+  | 'config.tool.generate_image.description'
+  | 'config.tool.remove_background.description'
+  | 'config.tool.create_plan.description'
+  | 'config.tool.update_plan.description'
+  | 'config.tool.create_design.description'
+  | 'config.tool.update_design.description'
+  | 'config.tool.create_progress.description'
+  | 'config.tool.update_progress.description'
+  | 'config.tool.record_progress_milestone.description'
+  | 'config.tool.create_review.description'
+  | 'config.tool.record_review_milestone.description'
+  | 'config.tool.finalize_review.description'
+  | 'config.tool.reopen_review.description'
   | 'config.localOnly'
   | 'config.saveError'
 
@@ -292,19 +338,65 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.modelToolsEnabled': '模型工具开关',
     'config.modelToolsEnabled.description': '关闭后模型无法调用 checkpoint_create 等 7 个存档工具；自动存档不受影响。',
     'config.messageCheckpoint': '消息触发存档',
-    'config.messageCheckpoint.description': '选择在哪些消息位置自动创建存档点。',
-    'config.beforeUserMessage': '用户消息前存档',
-    'config.beforeUserMessage.description': '开 = beforeMessages 包含 user；用户消息前创建存档点。',
-    'config.afterModelMessage': '模型回复后存档',
-    'config.afterModelMessage.description': '开 = afterMessages 包含 model；模型回复后创建存档点。',
-    'config.beforeTools': '工具调用前存档',
-    'config.beforeTools.description': '每行一个工具名；这些工具调用前创建存档点。',
-    'config.afterTools': '工具调用后存档',
-    'config.afterTools.description': '每行一个工具名；这些工具调用后创建存档点。',
+    'config.messageCheckpoint.description': '选择在哪些消息边界自动创建存档点（默认：用户消息前 + 模型消息前）。',
+    'config.beforeUserMessage': '用户消息前',
+    'config.beforeUserMessage.description': '新用户回合处理前创建存档点（agent/pre-step）。',
+    'config.beforeModelMessage': '模型消息前',
+    'config.beforeModelMessage.description': '每次模型调用发起前创建存档点（agent/request；同回合多次调用各存一次，无变更自动去重）。',
+    'config.afterModelMessage': '模型消息后',
+    'config.afterModelMessage.description': '模型回合关闭后创建存档点（agent/turn-stopping）。',
+    'config.afterUserMessageUnavailable': '「用户消息后」在 DSH 宿主没有对应触发点，因此不提供该选项。',
+    'config.beforeTools': '执行前存档',
+    'config.beforeTools.description': '勾选的工具在调用前自动创建存档点。',
+    'config.afterTools': '执行后存档',
+    'config.afterTools.description': '勾选的工具在调用后自动创建存档点。',
     'config.toolPlaceholder': '例如 checkpoint_create、checkpoint_restore',
     'config.toolsInvalidChars': '工具名含非法字符',
     'config.toolsTooLong': '工具名过长',
     'config.toolsEmptyLine': '工具名不能为空',
+    'config.toolsGroup': '工具触发存档',
+    'config.toolsGroup.description': '勾选哪些工具在「执行前 / 执行后」自动创建存档点。默认只勾：执行命令前（bash/pwsh）、删除前（delete_code）、写入后（write）、应用差异后（edit / str_replace_editor）。',
+    'config.matrix.tool': '工具',
+    'config.matrix.before': '执行前',
+    'config.matrix.after': '执行后',
+    'config.tools.selectAll': '全选',
+    'config.tools.clear': '全不选',
+    'config.tools.reset': '恢复默认',
+    'config.tools.customGroup': '自定义工具',
+    'config.tools.customGroup.description': '列表中不属于已知工具的名称（来自旧配置或手写），仍会正常生效。',
+    'config.tools.customPlaceholder': '输入工具名，例如 my_mcp_tool',
+    'config.tools.add': '添加',
+    'config.tools.remove': '移除',
+    'config.tools.duplicate': '该工具已在列表中',
+    'config.toolGroup.write': '文件写入',
+    'config.toolGroup.shell': '终端执行',
+    'config.toolGroup.search': '搜索',
+    'config.toolGroup.image': '图像处理',
+    'config.toolGroup.workflow': '工作流文档',
+    'config.tool.write.description': '写入文件',
+    'config.tool.edit.description': '编辑文件（旧版补丁格式）',
+    'config.tool.str_replace_editor.description': '精确字符串替换编辑',
+    'config.tool.delete_code.description': '删除代码片段',
+    'config.tool.bash.description': '执行 Bash 命令',
+    'config.tool.pwsh.description': '执行 PowerShell 命令',
+    'config.tool.grep.description': '按正则搜索文件内容',
+    'config.tool.glob.description': '按模式匹配文件名',
+    'config.tool.crop_image.description': '裁剪图片',
+    'config.tool.resize_image.description': '缩放图片',
+    'config.tool.rotate_image.description': '旋转图片',
+    'config.tool.generate_image.description': '生成或编辑图片',
+    'config.tool.remove_background.description': '去除图片背景',
+    'config.tool.create_plan.description': '创建计划文档',
+    'config.tool.update_plan.description': '更新计划文档',
+    'config.tool.create_design.description': '创建设计文档',
+    'config.tool.update_design.description': '更新设计文档',
+    'config.tool.create_progress.description': '创建进度文档',
+    'config.tool.update_progress.description': '更新进度文档',
+    'config.tool.record_progress_milestone.description': '记录进度里程碑',
+    'config.tool.create_review.description': '创建评审文档',
+    'config.tool.record_review_milestone.description': '记录评审里程碑',
+    'config.tool.finalize_review.description': '完结评审',
+    'config.tool.reopen_review.description': '重开评审',
     'config.localOnly': '未连接配置通道，更改仅保存在本地',
     'config.saveError': '保存失败',
   },
@@ -318,19 +410,65 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.modelToolsEnabled': 'Model tools',
     'config.modelToolsEnabled.description': 'While off, the model cannot call the 7 checkpoint tools (e.g. checkpoint_create); auto checkpointing is unaffected.',
     'config.messageCheckpoint': 'Message-triggered checkpoints',
-    'config.messageCheckpoint.description': 'Choose which message positions create checkpoints automatically.',
+    'config.messageCheckpoint.description': 'Choose which message boundaries create checkpoints automatically (default: before user messages + before model calls).',
     'config.beforeUserMessage': 'Before user messages',
-    'config.beforeUserMessage.description': 'On = beforeMessages includes user; checkpoint before each user message.',
-    'config.afterModelMessage': 'After model replies',
-    'config.afterModelMessage.description': 'On = afterMessages includes model; checkpoint after each model reply.',
-    'config.beforeTools': 'Before tool calls',
-    'config.beforeTools.description': 'One tool name per line; checkpoints are created before these tool calls.',
-    'config.afterTools': 'After tool calls',
-    'config.afterTools.description': 'One tool name per line; checkpoints are created after these tool calls.',
+    'config.beforeUserMessage.description': 'Checkpoint before each new user turn is processed (agent/pre-step).',
+    'config.beforeModelMessage': 'Before model messages',
+    'config.beforeModelMessage.description': 'Checkpoint before each model call (agent/request; one per call per turn, unchanged turns are deduped).',
+    'config.afterModelMessage': 'After model messages',
+    'config.afterModelMessage.description': 'Checkpoint after the model turn closes (agent/turn-stopping).',
+    'config.afterUserMessageUnavailable': '“After user message” has no trigger point in the DSH host, so it is not offered.',
+    'config.beforeTools': 'Checkpoint before',
+    'config.beforeTools.description': 'Checked tools automatically create a checkpoint before they run.',
+    'config.afterTools': 'Checkpoint after',
+    'config.afterTools.description': 'Checked tools automatically create a checkpoint after they run.',
     'config.toolPlaceholder': 'e.g. checkpoint_create, checkpoint_restore',
     'config.toolsInvalidChars': 'Tool name contains invalid characters',
     'config.toolsTooLong': 'Tool name is too long',
     'config.toolsEmptyLine': 'Tool name cannot be empty',
+    'config.toolsGroup': 'Tool-triggered checkpoints',
+    'config.toolsGroup.description': 'Pick which tools checkpoint before/after execution. Defaults: before commands (bash/pwsh) and deletes (delete_code); after writes (write) and diffs (edit / str_replace_editor).',
+    'config.matrix.tool': 'Tool',
+    'config.matrix.before': 'Before',
+    'config.matrix.after': 'After',
+    'config.tools.selectAll': 'Select all',
+    'config.tools.clear': 'Clear all',
+    'config.tools.reset': 'Reset to default',
+    'config.tools.customGroup': 'Custom tools',
+    'config.tools.customGroup.description': 'Names outside the known tool surface (from older configs or hand-written); they still take effect.',
+    'config.tools.customPlaceholder': 'Enter a tool name, e.g. my_mcp_tool',
+    'config.tools.add': 'Add',
+    'config.tools.remove': 'Remove',
+    'config.tools.duplicate': 'This tool is already listed',
+    'config.toolGroup.write': 'File writes',
+    'config.toolGroup.shell': 'Shell execution',
+    'config.toolGroup.search': 'Search',
+    'config.toolGroup.image': 'Image processing',
+    'config.toolGroup.workflow': 'Workflow documents',
+    'config.tool.write.description': 'Write files',
+    'config.tool.edit.description': 'Edit files (legacy patch format)',
+    'config.tool.str_replace_editor.description': 'Exact string-replace editing',
+    'config.tool.delete_code.description': 'Delete code snippets',
+    'config.tool.bash.description': 'Run Bash commands',
+    'config.tool.pwsh.description': 'Run PowerShell commands',
+    'config.tool.grep.description': 'Regex content search',
+    'config.tool.glob.description': 'File-name pattern matching',
+    'config.tool.crop_image.description': 'Crop images',
+    'config.tool.resize_image.description': 'Resize images',
+    'config.tool.rotate_image.description': 'Rotate images',
+    'config.tool.generate_image.description': 'Generate or edit images',
+    'config.tool.remove_background.description': 'Remove image backgrounds',
+    'config.tool.create_plan.description': 'Create plan documents',
+    'config.tool.update_plan.description': 'Update plan documents',
+    'config.tool.create_design.description': 'Create design documents',
+    'config.tool.update_design.description': 'Update design documents',
+    'config.tool.create_progress.description': 'Create progress documents',
+    'config.tool.update_progress.description': 'Update progress documents',
+    'config.tool.record_progress_milestone.description': 'Record progress milestones',
+    'config.tool.create_review.description': 'Create review documents',
+    'config.tool.record_review_milestone.description': 'Record review milestones',
+    'config.tool.finalize_review.description': 'Finalize reviews',
+    'config.tool.reopen_review.description': 'Reopen reviews',
     'config.localOnly': 'Not connected to the config channel; changes stay local',
     'config.saveError': 'Save failed',
   },
@@ -355,6 +493,9 @@ export const graycodeCheckpointConfigJaPlaceholder: LocaleDict = {
   'config.beforeUserMessage.description': 'オン = beforeMessages に user を含む。各ユーザーメッセージの前にチェックポイントを作成します。',
   'config.afterModelMessage': 'モデル応答の後',
   'config.afterModelMessage.description': 'オン = afterMessages に model を含む。各モデル応答の後にチェックポイントを作成します。',
+  'config.beforeModelMessage': 'モデルメッセージの前',
+  'config.beforeModelMessage.description': '各モデル呼び出しの前にチェックポイントを作成します（agent/request。同一ターンで複数回の都度作成、変更なしは自動的に重複排除）。',
+  'config.afterUserMessageUnavailable': '「ユーザーメッセージの後」は DSH ホストに対応するトリガーが存在しないため、このオプションはありません。',
   'config.beforeTools': 'ツール呼び出しの前',
   'config.beforeTools.description': '1行に1つのツール名。これらのツール呼び出しの前にチェックポイントを作成します。',
   'config.afterTools': 'ツール呼び出しの後',
@@ -363,6 +504,49 @@ export const graycodeCheckpointConfigJaPlaceholder: LocaleDict = {
   'config.toolsInvalidChars': 'ツール名に不正な文字が含まれています',
   'config.toolsTooLong': 'ツール名が長すぎます',
   'config.toolsEmptyLine': 'ツール名を空にできません',
+  'config.toolsGroup': 'ツール起点チェックポイント',
+  'config.toolsGroup.description': 'どのツールの実行前/後にチェックポイントを作成するかを選択します。リセットで全既知ツールをオンに戻します。',
+  'config.matrix.tool': 'ツール',
+  'config.matrix.before': '実行前',
+  'config.matrix.after': '実行後',
+  'config.tools.selectAll': 'すべて選択',
+  'config.tools.clear': 'すべて解除',
+  'config.tools.reset': 'デフォルトに戻す',
+  'config.tools.customGroup': 'カスタムツール',
+  'config.tools.customGroup.description': '既知ツール以外の名前（旧設定や手入力）。引き続き有効です。',
+  'config.tools.customPlaceholder': 'ツール名を入力、例: my_mcp_tool',
+  'config.tools.add': '追加',
+  'config.tools.remove': '削除',
+  'config.tools.duplicate': 'このツールは既に登録されています',
+  'config.toolGroup.write': 'ファイル書き込み',
+  'config.toolGroup.shell': 'シェル実行',
+  'config.toolGroup.search': '検索',
+  'config.toolGroup.image': '画像処理',
+  'config.toolGroup.workflow': 'ワークフロードキュメント',
+  'config.tool.write.description': 'ファイルを書き込む',
+  'config.tool.edit.description': 'ファイルを編集（旧パッチ形式）',
+  'config.tool.str_replace_editor.description': '正確な文字列置換編集',
+  'config.tool.delete_code.description': 'コード断片を削除',
+  'config.tool.bash.description': 'Bash コマンドを実行',
+  'config.tool.pwsh.description': 'PowerShell コマンドを実行',
+  'config.tool.grep.description': '正規表現でファイル内容を検索',
+  'config.tool.glob.description': 'ファイル名パターン照合',
+  'config.tool.crop_image.description': '画像を切り抜き',
+  'config.tool.resize_image.description': '画像をリサイズ',
+  'config.tool.rotate_image.description': '画像を回転',
+  'config.tool.generate_image.description': '画像を生成・編集',
+  'config.tool.remove_background.description': '画像の背景を削除',
+  'config.tool.create_plan.description': '計画ドキュメントを作成',
+  'config.tool.update_plan.description': '計画ドキュメントを更新',
+  'config.tool.create_design.description': '設計ドキュメントを作成',
+  'config.tool.update_design.description': '設計ドキュメントを更新',
+  'config.tool.create_progress.description': '進捗ドキュメントを作成',
+  'config.tool.update_progress.description': '進捗ドキュメントを更新',
+  'config.tool.record_progress_milestone.description': '進捗マイルストーンを記録',
+  'config.tool.create_review.description': 'レビュードキュメントを作成',
+  'config.tool.record_review_milestone.description': 'レビューマイルストーンを記録',
+  'config.tool.finalize_review.description': 'レビューを確定',
+  'config.tool.reopen_review.description': 'レビューを再開',
   'config.localOnly': '設定チャンネルに接続されていません。変更はローカルのみに保存されます',
   'config.saveError': '保存に失敗しました',
 }

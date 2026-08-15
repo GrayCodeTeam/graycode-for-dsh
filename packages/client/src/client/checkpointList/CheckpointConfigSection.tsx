@@ -9,23 +9,32 @@
  * same contract the settings update channel (`store.set`) uses, so the host
  * page can wire it straight through.
  *
- * Tool lists are edited as one-name-per-line textareas with a local draft:
- * blur (or Ctrl/Cmd+Enter) validates the text and commits the parsed array;
- * invalid lines surface an inline hint and are not committed.
+ * Tool lists render as a grouped checkbox matrix (known DSH tools ×
+ * 执行前/执行后 columns, quick actions 全选/全不选/恢复默认, plus a
+ * custom-tool row for stored names outside the catalog) — the raw
+ * one-name-per-line textareas proved hostile to users. Unknown stored names
+ * are never dropped: they keep their own editable rows.
  *
  * Replay/boundary rules: no I/O here — `onChange` is the only escape hatch.
  */
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useState, type CSSProperties, type ReactNode } from 'react'
 import {
+  CHECKPOINT_TOOL_CATALOG,
+  CHECKPOINT_TOOL_GROUP_ORDER,
   checkpointConfigAbsolutePath,
   checkpointConfigMessageKindEnabled,
-  checkpointConfigTextFromToolList,
   checkpointConfigToolIssueLabelKey,
-  checkpointConfigToolListFromText,
-  validateCheckpointConfigToolText,
+  checkpointConfigUnknownTools,
+  validateCheckpointConfigToolLine,
   withCheckpointConfigMessageKind,
+  withCheckpointKnownTools,
+  withCheckpointToolFlag,
+  withCheckpointToolsReset,
+  withoutCheckpointTool,
   type CheckpointConfigMessageSlot,
   type CheckpointConfigValues,
+  type CheckpointToolGroup,
+  type CheckpointToolSlot,
 } from './configModel.ts'
 
 export interface CheckpointConfigSectionProps {
@@ -102,7 +111,12 @@ const labelStyle: CSSProperties = {
   fontSize: '12px',
 }
 
-const textareaStyle: CSSProperties = {
+const monoTextStyle: CSSProperties = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+  fontSize: '11px',
+}
+
+const inputStyle: CSSProperties = {
   fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
   fontSize: '11px',
   padding: '0.25rem 0.375rem',
@@ -110,6 +124,67 @@ const textareaStyle: CSSProperties = {
   border: '1px solid var(--dsh-border-color, #333)',
   background: 'var(--dsh-surface-color, #1e1e1e)',
   color: 'inherit',
+}
+
+const matrixHeaderRowStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr) 4.5rem 4.5rem',
+  alignItems: 'center',
+  gap: '0.5rem',
+}
+
+const matrixRowStyle: CSSProperties = {
+  ...matrixHeaderRowStyle,
+  padding: '0.2rem 0.375rem',
+  borderRadius: '0.25rem',
+}
+
+const matrixRowHoverStyle: CSSProperties = {
+  ...matrixRowStyle,
+  background: 'rgba(127, 127, 127, 0.08)',
+}
+
+const toolNameStyle: CSSProperties = {
+  ...monoTextStyle,
+  fontWeight: 600,
+}
+
+const columnHeaderStyle: CSSProperties = {
+  fontSize: '11px',
+  textAlign: 'center',
+  opacity: 0.75,
+}
+
+const columnCellStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'center',
+}
+
+const groupTitleStyle: CSSProperties = {
+  fontSize: '11px',
+  opacity: 0.7,
+  marginTop: '0.375rem',
+}
+
+const quickActionRowStyle: CSSProperties = {
+  display: 'flex',
+  gap: '0.5rem',
+  flexWrap: 'wrap',
+}
+
+const quickActionButtonStyle: CSSProperties = {
+  fontSize: '11px',
+  padding: '0.15rem 0.5rem',
+  borderRadius: '999px',
+  border: '1px solid var(--dsh-border-color, #333)',
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+}
+
+const removeButtonStyle: CSSProperties = {
+  ...quickActionButtonStyle,
+  marginLeft: 'auto',
 }
 
 const errorStyle: CSSProperties = {
@@ -132,77 +207,193 @@ const switchInputStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
-/** One name-per-line tool editor with a local draft and blur-time validation. */
-function ToolListEditor({
+/**
+ * Grouped checkbox matrix over the known tool surface. Each row carries two
+ * checkboxes (执行前 / 执行后) bound to `beforeTools` / `afterTools`
+ * membership; quick actions set the whole matrix at once. Stored names
+ * outside the catalog render as custom rows (removable) so no value is ever
+ * silently dropped. Stateless: every change is one declarative commit of the
+ * full resulting array.
+ */
+function ToolMatrixEditor({
   t,
-  path,
-  labelKey,
-  descriptionKey,
-  placeholderKey,
-  tools,
+  config,
   disabled,
   onCommit,
 }: {
   t: (key: string) => string
-  path: readonly string[]
-  labelKey: string
-  descriptionKey: string
-  placeholderKey: string
-  tools: readonly string[]
+  config: CheckpointConfigValues
   disabled: boolean
   onCommit: (path: readonly string[], value: unknown) => void
 }): ReactNode {
-  const [draft, setDraft] = useState(() => checkpointConfigTextFromToolList(tools))
-  const [issue, setIssue] = useState('')
-  const dirtyRef = useRef(false)
+  const [customDraft, setCustomDraft] = useState('')
+  const [customIssue, setCustomIssue] = useState('')
+  const [hoveredTool, setHoveredTool] = useState('')
 
-  useEffect(() => {
-    // Never overwrite a newer local edit with an acknowledged snapshot.
-    if (dirtyRef.current) return
-    setDraft(checkpointConfigTextFromToolList(tools))
-  }, [tools])
-
-  const commit = (): void => {
-    dirtyRef.current = false
-    const issues = validateCheckpointConfigToolText(draft)
-    if (issues.length > 0) {
-      const first = issues[0]!
-      const message = t(checkpointConfigToolIssueLabelKey(first.issue))
-      setIssue(first.issue === 'empty' ? message : `${message}: ${first.line}`)
-      return
+  const commitLists = (next: CheckpointConfigValues): void => {
+    if (JSON.stringify(next.beforeTools) !== JSON.stringify(config.beforeTools)) {
+      onCommit(['beforeTools'], [...next.beforeTools])
     }
-    setIssue('')
-    const parsed = checkpointConfigToolListFromText(draft)
-    // Skip no-op commits (an acknowledged snapshot may normalize the text).
-    if (JSON.stringify(parsed) !== JSON.stringify(tools)) {
-      onCommit(path, parsed)
+    if (JSON.stringify(next.afterTools) !== JSON.stringify(config.afterTools)) {
+      onCommit(['afterTools'], [...next.afterTools])
     }
   }
 
+  const toggle = (tool: string, slot: CheckpointToolSlot, on: boolean): void => {
+    commitLists(withCheckpointToolFlag(config, tool, slot, on))
+  }
+
+  const setKnownAll = (on: boolean): void => {
+    let next = withCheckpointKnownTools(config, 'before', on)
+    next = withCheckpointKnownTools(next, 'after', on)
+    commitLists(next)
+  }
+
+  const addCustom = (): void => {
+    const issue = validateCheckpointConfigToolLine(customDraft)
+    if (issue !== null) {
+      setCustomIssue(t(checkpointConfigToolIssueLabelKey(issue)))
+      return
+    }
+    const name = customDraft.trim()
+    if (config.beforeTools.includes(name) || config.afterTools.includes(name)) {
+      setCustomIssue(t('config.tools.duplicate'))
+      return
+    }
+    setCustomIssue('')
+    setCustomDraft('')
+    // 新自定义工具默认两列都勾上（最常见意图：前后都想存档）。
+    commitLists(withCheckpointToolFlag(withCheckpointToolFlag(config, name, 'before', true), name, 'after', true))
+  }
+
+  const unknown = checkpointConfigUnknownTools(config)
+
   return (
-    <div style={fieldStyle} data-graycode-checkpoint-config={path[path.length - 1]}>
-      <label style={labelStyle}>{t(labelKey)}</label>
-      <span style={rowDescriptionStyle}>{t(descriptionKey)}</span>
-      <textarea
-        style={textareaStyle}
-        rows={3}
-        placeholder={t(placeholderKey)}
-        value={draft}
-        disabled={disabled}
-        onChange={event => {
-          dirtyRef.current = true
-          setDraft(event.target.value)
-        }}
-        onBlur={commit}
-        onKeyDown={event => {
-          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-            event.preventDefault()
-            event.currentTarget.blur()
-          }
-        }}
-      />
-      {issue !== '' && <span style={errorStyle}>{issue}</span>}
-    </div>
+    <fieldset style={groupStyle} data-graycode-checkpoint-config="toolsMatrix">
+      <legend>{t('config.toolsGroup')}</legend>
+      <span style={rowDescriptionStyle}>{t('config.toolsGroup.description')}</span>
+      <div style={quickActionRowStyle} data-graycode-checkpoint-config="toolsQuickActions">
+        <button type="button" style={quickActionButtonStyle} disabled={disabled} onClick={() => setKnownAll(true)}>
+          {t('config.tools.selectAll')}
+        </button>
+        <button type="button" style={quickActionButtonStyle} disabled={disabled} onClick={() => setKnownAll(false)}>
+          {t('config.tools.clear')}
+        </button>
+        <button type="button" style={quickActionButtonStyle} disabled={disabled} onClick={() => commitLists(withCheckpointToolsReset(config))}>
+          {t('config.tools.reset')}
+        </button>
+      </div>
+      <div style={matrixHeaderRowStyle}>
+        <span style={columnHeaderStyle}>{t('config.matrix.tool')}</span>
+        <span style={columnHeaderStyle}>{t('config.matrix.before')}</span>
+        <span style={columnHeaderStyle}>{t('config.matrix.after')}</span>
+      </div>
+      {CHECKPOINT_TOOL_GROUP_ORDER.map(group => (
+        <div key={group} style={fieldStyle} data-graycode-checkpoint-config={`toolGroup-${group}`}>
+          <span style={groupTitleStyle}>{t(`config.toolGroup.${group}`)}</span>
+          {CHECKPOINT_TOOL_CATALOG.filter(entry => entry.group === (group as CheckpointToolGroup)).map(entry => {
+            const hovered = hoveredTool === entry.name
+            return (
+              <div
+                key={entry.name}
+                style={hovered ? matrixRowHoverStyle : matrixRowStyle}
+                data-graycode-checkpoint-config={`tool-${entry.name}`}
+                onMouseEnter={() => setHoveredTool(entry.name)}
+                onMouseLeave={() => setHoveredTool('')}
+              >
+                <span style={copyStyle}>
+                  <span style={toolNameStyle}>{entry.name}</span>
+                  <span style={rowDescriptionStyle}>{t(entry.descriptionKey)}</span>
+                </span>
+                <span style={columnCellStyle}>
+                  <input
+                    type="checkbox"
+                    style={switchInputStyle}
+                    checked={config.beforeTools.includes(entry.name)}
+                    disabled={disabled}
+                    onChange={event => toggle(entry.name, 'before', event.target.checked)}
+                  />
+                </span>
+                <span style={columnCellStyle}>
+                  <input
+                    type="checkbox"
+                    style={switchInputStyle}
+                    checked={config.afterTools.includes(entry.name)}
+                    disabled={disabled}
+                    onChange={event => toggle(entry.name, 'after', event.target.checked)}
+                  />
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      ))}
+      <div style={fieldStyle} data-graycode-checkpoint-config="customTools">
+        <span style={groupTitleStyle}>{t('config.tools.customGroup')}</span>
+        <span style={rowDescriptionStyle}>{t('config.tools.customGroup.description')}</span>
+        {unknown.map(name => (
+          <div
+            key={name}
+            style={hoveredTool === name ? matrixRowHoverStyle : matrixRowStyle}
+            data-graycode-checkpoint-config={`customTool-${name}`}
+            onMouseEnter={() => setHoveredTool(name)}
+            onMouseLeave={() => setHoveredTool('')}
+          >
+            <span style={toolNameStyle}>{name}</span>
+            <span style={columnCellStyle}>
+              <input
+                type="checkbox"
+                style={switchInputStyle}
+                checked={config.beforeTools.includes(name)}
+                disabled={disabled}
+                onChange={event => toggle(name, 'before', event.target.checked)}
+              />
+            </span>
+            <span style={columnCellStyle}>
+              <input
+                type="checkbox"
+                style={switchInputStyle}
+                checked={config.afterTools.includes(name)}
+                disabled={disabled}
+                onChange={event => toggle(name, 'after', event.target.checked)}
+              />
+            </span>
+            <button
+              type="button"
+              style={removeButtonStyle}
+              disabled={disabled}
+              title={t('config.tools.remove')}
+              onClick={() => commitLists(withoutCheckpointTool(config, name))}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <div style={quickActionRowStyle}>
+          <input
+            type="text"
+            style={inputStyle}
+            placeholder={t('config.tools.customPlaceholder')}
+            value={customDraft}
+            disabled={disabled}
+            onChange={event => {
+              setCustomDraft(event.target.value)
+              setCustomIssue('')
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                addCustom()
+              }
+            }}
+          />
+          <button type="button" style={quickActionButtonStyle} disabled={disabled} onClick={addCustom}>
+            {t('config.tools.add')}
+          </button>
+        </div>
+        {customIssue !== '' && <span style={errorStyle}>{customIssue}</span>}
+      </div>
+    </fieldset>
   )
 }
 
@@ -298,6 +489,23 @@ export function CheckpointConfigSection({
             }}
           />
         </label>
+        <label style={rowStyle} data-graycode-checkpoint-config="beforeModel">
+          <span style={copyStyle}>
+            <span>{t('config.beforeModelMessage')}</span>
+            <span style={rowDescriptionStyle}>{t('config.beforeModelMessage.description')}</span>
+          </span>
+          <input
+            type="checkbox"
+            style={switchInputStyle}
+            checked={checkpointConfigMessageKindEnabled(config, 'beforeModel')}
+            disabled={switchDisabled}
+            onChange={event => {
+              const slot: CheckpointConfigMessageSlot = 'beforeModel'
+              const next = withCheckpointConfigMessageKind(config, slot, event.target.checked)
+              commit(['messageCheckpoint', 'beforeMessages'], next.messageCheckpoint.beforeMessages)
+            }}
+          />
+        </label>
         <label style={rowStyle} data-graycode-checkpoint-config="afterModel">
           <span style={copyStyle}>
             <span>{t('config.afterModelMessage')}</span>
@@ -315,25 +523,12 @@ export function CheckpointConfigSection({
             }}
           />
         </label>
+        <span style={rowDescriptionStyle}>{t('config.afterUserMessageUnavailable')}</span>
       </fieldset>
 
-      <ToolListEditor
+      <ToolMatrixEditor
         t={t}
-        path={['beforeTools']}
-        labelKey="config.beforeTools"
-        descriptionKey="config.beforeTools.description"
-        placeholderKey="config.toolPlaceholder"
-        tools={config.beforeTools}
-        disabled={switchDisabled}
-        onCommit={commit}
-      />
-      <ToolListEditor
-        t={t}
-        path={['afterTools']}
-        labelKey="config.afterTools"
-        descriptionKey="config.afterTools.description"
-        placeholderKey="config.toolPlaceholder"
-        tools={config.afterTools}
+        config={config}
         disabled={switchDisabled}
         onCommit={commit}
       />

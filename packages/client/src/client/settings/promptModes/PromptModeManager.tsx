@@ -21,6 +21,7 @@ import { createPromptModesTransport, type PromptModesTransport } from './api.ts'
 import {
   buildCreateModeArgs,
   parseImportPayload,
+  readImportFileText,
   serializeExportPayload,
 } from './logic.ts'
 import type { PromptMode, PromptModePatch } from './types.ts'
@@ -313,6 +314,22 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
     setExportOpen(true)
   }
 
+  /**
+   * Load a picked JSON file into the import textarea (the file is NOT sent
+   * anywhere — the user reviews the text and presses Import like a paste).
+   * The input's value is reset afterwards so re-picking the same file fires
+   * another change event.
+   */
+  const handleImportFile = async (file: File | null): Promise<void> => {
+    const text = await readImportFileText(file)
+    if (text === null) {
+      setImportError(t('promptModes.importError.file-read'))
+      return
+    }
+    setImportText(text)
+    setImportError('')
+  }
+
   const importModes = async (): Promise<void> => {
     const parsed = parseImportPayload(importText)
     if (!parsed.ok) {
@@ -494,6 +511,26 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
                   onChange={event => setImportText(event.target.value)}
                 />
               </label>
+              {/* File picker (web platform): reads the file into the textarea
+                  above — the host owns the semantic mapping either way. A
+                  <label> wrapping a hidden input keeps the button reachable
+                  by keyboard, unlike a programmatic input.click(). */}
+              <div>
+                <label style={{ ...buttonStyle, cursor: 'pointer' }} title={t('promptModes.importFromFile.title')}>
+                  {t('promptModes.importFromFile')}
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: 'none' }}
+                    onChange={event => {
+                      const input = event.currentTarget
+                      void handleImportFile(input.files?.[0] ?? null).finally(() => {
+                        input.value = ''
+                      })
+                    }}
+                  />
+                </label>
+              </div>
               {importError !== '' && <div style={errorStyle}>{importError}</div>}
               {importWarnings.length > 0 && (
                 <div style={metaStyle}>

@@ -1,62 +1,50 @@
 /**
  * Reroll / edit-turn (F1/F2) — node-environment tests of the pure decision
- * logic and the locale alignment. React is intentionally not imported (both
- * components are thin shells over `turnOfMessage` / `editTargetOfTurn`).
+ * logic, the edit-action node Definition, and the locale alignment. React is
+ * intentionally not imported (the seat components are thin shells over
+ * isRerollableTurn / editTargetOfTurn / editNode).
  */
 import { describe, expect, it } from 'vitest'
 import {
   BRANCH_NO_PREVIOUS_TURN_CODE,
   editTargetOfTurn,
   isNoPreviousTurnFailure,
+  isRerollableTurn,
   textOfBlocks,
-  turnOfMessage,
   type EditSnapshotLike,
-  type RerollSnapshotLike,
 } from '../src/client/rerollEdit/logic.ts'
+import {
+  EDIT_ACTION_KIND,
+  buildEditActionViewNode,
+  createEditActionDefinition,
+  matchEditActionEvent,
+  startEditActionNode,
+  turnOfLocation,
+  type EditActionEventLike,
+} from '../src/client/rerollEdit/editNode.ts'
 import {
   GRAYCODE_REROLL_NS,
   graycodeRerollEditDictionaries,
   graycodeRerollEditJaPlaceholder,
 } from '../src/client/rerollEdit/locales.ts'
 
-describe('turnOfMessage (regenerate)', () => {
-  it('resolves the session turn of the addressed assistant message', () => {
-    const snapshot: RerollSnapshotLike = {
-      nodes: [
-        { kind: 'user', messageId: undefined, turn: undefined },
-        { kind: 'assistant', messageId: 'msg-1', turn: 2 },
-        { kind: 'assistant', messageId: 'msg-2', turn: 4 },
-      ],
-    }
-    expect(turnOfMessage(snapshot, 'msg-2')).toBe(4)
-    expect(turnOfMessage(snapshot, 'msg-1')).toBe(2)
+describe('isRerollableTurn (regenerate/edit visibility defense)', () => {
+  it('accepts completed turns after the first (integer turn > 1)', () => {
+    expect(isRerollableTurn(2)).toBe(true)
+    expect(isRerollableTurn(17)).toBe(true)
   })
 
-  it('matches message ids by string form', () => {
-    const snapshot: RerollSnapshotLike = {
-      nodes: [{ kind: 'assistant', messageId: '42', turn: 3 }],
-    }
-    expect(turnOfMessage(snapshot, 42)).toBe(3)
-  })
-
-  it('is defensive against absent nodes, non-assistant kinds, and drifted turns', () => {
-    expect(turnOfMessage(undefined, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: undefined }, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [null, undefined] }, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [{ kind: 'user', messageId: 'x' }] }, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'x', turn: 1.5 }] }, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'x', turn: '2' }] }, 'x')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', turn: 1 }] }, 'x')).toBeUndefined()
-  })
-
-  it('hides the regenerate action for the first turn (turn <= 1 has no prefix to fork before)', () => {
+  it('rejects the first turn and drifted turn shapes', () => {
     // The host rejects turn 1 (and any turn <= 1) with GRAY_BRANCH_NO_PREVIOUS_TURN
-    // — nothing to fork before it — so the action resolves to undefined and the
-    // button renders nothing instead of surfacing the raw English error.
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm1', turn: 1 }] }, 'm1')).toBeUndefined()
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm0', turn: 0 }] }, 'm0')).toBeUndefined()
-    // Later turns still resolve normally.
-    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm2', turn: 2 }] }, 'm2')).toBe(2)
+    // — nothing to fork before it — so the actions resolve to invisible instead
+    // of surfacing the raw English error.
+    expect(isRerollableTurn(1)).toBe(false)
+    expect(isRerollableTurn(0)).toBe(false)
+    expect(isRerollableTurn(-3)).toBe(false)
+    expect(isRerollableTurn(1.5)).toBe(false)
+    expect(isRerollableTurn('2')).toBe(false)
+    expect(isRerollableTurn(undefined)).toBe(false)
+    expect(isRerollableTurn(null)).toBe(false)
   })
 })
 
@@ -96,7 +84,7 @@ describe('textOfBlocks', () => {
 })
 
 describe('editTargetOfTurn (edit user message)', () => {
-  it('resolves the user message that opened the turn through the Location index', () => {
+  it('resolves the turn-opening user message (turn, seq, text) through the Location index', () => {
     const snapshot: EditSnapshotLike = {
       chat: {
         locations: {
@@ -104,12 +92,12 @@ describe('editTargetOfTurn (edit user message)', () => {
         },
         nodes: {
           get: (key) => key === 'k-user-3'
-            ? { kind: 'user', data: { kind: 'user', content: [{ type: 'text', text: 'fix the bug' }] } }
+            ? { kind: 'user', data: { kind: 'user', seq: 31, content: [{ type: 'text', text: 'fix the bug' }] } }
             : { kind: 'assistant-step', data: { kind: 'assistant', content: [] } },
         },
       },
     }
-    expect(editTargetOfTurn(snapshot, 3)).toEqual({ turn: 3, text: 'fix the bug' })
+    expect(editTargetOfTurn(snapshot, 3)).toEqual({ turn: 3, seq: 31, text: 'fix the bug' })
   })
 
   it('skips non-user renderer kinds and steering/context payload kinds', () => {
@@ -126,12 +114,106 @@ describe('editTargetOfTurn (edit user message)', () => {
     expect(editTargetOfTurn(snapshot, 7)).toBeUndefined()
   })
 
+  it('rejects a user node without a durable integer seq (steering guard input)', () => {
+    const snapshot: EditSnapshotLike = {
+      chat: {
+        locations: { getTurn: () => ['k-user'] },
+        nodes: { get: () => ({ kind: 'user', data: { kind: 'user', seq: '31', content: [] } }) },
+      },
+    }
+    expect(editTargetOfTurn(snapshot, 4)).toBeUndefined()
+  })
+
   it('is defensive against a drifted or incomplete snapshot', () => {
     expect(editTargetOfTurn(undefined, 1)).toBeUndefined()
     expect(editTargetOfTurn({}, 1)).toBeUndefined()
     expect(editTargetOfTurn({ chat: {} }, 1)).toBeUndefined()
     expect(editTargetOfTurn({ chat: { locations: { getTurn: () => undefined }, nodes: { get: () => undefined } } }, 1)).toBeUndefined()
     expect(editTargetOfTurn({ chat: { locations: { getTurn: () => ['k'] }, nodes: { get: () => undefined } } }, 1)).toBeUndefined()
+  })
+})
+
+describe('editAction node Definition', () => {
+  const userEvent = (over: Partial<EditActionEventLike> = {}): EditActionEventLike & { readonly data: unknown } => ({
+    type: 'user/message',
+    seq: 12,
+    time: 1_700_000_000_000,
+    surfaceOp: 'append',
+    data: {
+      id: 'msg-9',
+      content: [{ type: 'text', text: 'hello' }],
+      source: { kind: 'user' },
+    },
+    ...over,
+  })
+
+  it('matches append-surface user messages and derives the edit context id', () => {
+    expect(matchEditActionEvent(userEvent())).toEqual({ id: 'edit:msg-9', role: 'start' })
+  })
+
+  it('ignores other event types, replacement copies, and drifted payloads', () => {
+    expect(matchEditActionEvent(userEvent({ type: 'assistant/message' }))).toBeNull()
+    expect(matchEditActionEvent(userEvent({ surfaceOp: 'replace' }))).toBeNull()
+    expect(matchEditActionEvent(userEvent({ surfaceOp: undefined }))).toBeNull()
+    expect(matchEditActionEvent(userEvent({ data: { id: 7, source: { kind: 'user' } } }))).toEqual({ id: 'edit:7', role: 'start' })
+    expect(matchEditActionEvent(userEvent({ data: { source: { kind: 'user' } } }))).toBeNull()
+    expect(matchEditActionEvent(userEvent({ data: null }))).toBeNull()
+  })
+
+  it('start() snapshots the message facts and derives the turn from the match location', () => {
+    const definition = createEditActionDefinition()
+    expect(definition.kind).toBe(EDIT_ACTION_KIND)
+    expect(definition.target).toBe('chat')
+    const state = definition.start(
+      { key: `${EDIT_ACTION_KIND}:edit:msg-9`, kind: EDIT_ACTION_KIND, id: 'edit:msg-9', matches: [], start: undefined, state: undefined, current: new Map() },
+      {
+        role: 'start',
+        location: { kind: 'turn', turn: { turn: 4, start: undefined, end: undefined, status: 'unknown', steps: [], data: { get: () => undefined } } },
+        event: userEvent() as never,
+        view: undefined,
+      },
+      { previous: () => undefined },
+    )
+    expect(state).toMatchObject({ turn: 4, seq: 12, messageId: 'msg-9', sourceKind: 'user', text: 'hello' })
+  })
+
+  it('buildViewNode anchors right after the user message (seq + 0.05) and keeps the context key', () => {
+    const match = {
+      role: 'start' as const,
+      location: { kind: 'unresolved' as const },
+      event: userEvent({ seq: 40 }) as never,
+      view: undefined,
+    }
+    const node = buildEditActionViewNode({
+      key: `${EDIT_ACTION_KIND}:edit:msg-9`,
+      kind: EDIT_ACTION_KIND,
+      id: 'edit:msg-9',
+      matches: [match],
+      start: match,
+      state: startEditActionNode(match),
+      current: new Map(),
+    })
+    expect(node).not.toBeNull()
+    expect(node?.kind).toBe(EDIT_ACTION_KIND)
+    expect(node?.target).toBe('chat')
+    expect(node?.anchorSeq).toBe(40.05)
+    expect(node?.key).toBe(`${EDIT_ACTION_KIND}:edit:msg-9`)
+    expect(node?.visibility).toBe('visible')
+  })
+
+  it('buildViewNode renders nothing before the start event is in the window', () => {
+    expect(buildEditActionViewNode({
+      key: 'k', kind: EDIT_ACTION_KIND, id: 'edit:x', matches: [], start: undefined, state: undefined, current: new Map(),
+    })).toBeNull()
+  })
+
+  it('turnOfLocation mirrors the host turnLocation helper', () => {
+    const turn = { turn: 5, start: undefined, end: undefined, status: 'unknown' as const, steps: [], data: { get: () => undefined } }
+    expect(turnOfLocation({ kind: 'turn', turn })).toBe(5)
+    expect(turnOfLocation({ kind: 'step', turn, step: { turn: 5, step: 1, start: undefined, end: undefined, status: 'unknown', data: { get: () => undefined } } })).toBe(5)
+    expect(turnOfLocation({ kind: 'session' })).toBeUndefined()
+    expect(turnOfLocation({ kind: 'unresolved' })).toBeUndefined()
+    expect(turnOfLocation(undefined)).toBeUndefined()
   })
 })
 

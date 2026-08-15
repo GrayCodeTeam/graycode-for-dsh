@@ -44,13 +44,18 @@ interface ProjectedMode {
   enabledEntryCount: number
 }
 
-function projectMode(mode: { id: string; name: string; kind: 'builtin' | 'custom'; template: string; promptEntries: { enabled: boolean }[] }, current: boolean): ProjectedMode {
+function projectMode(mode: { id: string; name: string; kind: 'builtin' | 'custom'; template: string; promptEntries: { role: string; content: string; enabled: boolean }[] }, current: boolean): ProjectedMode {
   return {
     id: mode.id,
     name: mode.name,
     kind: mode.kind,
     current,
-    templateLength: mode.template.length,
+    // 系统提示词总长 = 模板 + 启用的 system 条目内容（内置模式种子把系统
+    // 文本放在条目里、模板为空 —— 渲染两者拼接，长度口径保持一致）。
+    templateLength: mode.template.length
+      + mode.promptEntries
+        .filter(entry => entry.enabled && entry.role === 'system')
+        .reduce((total, entry) => total + entry.content.length, 0),
     entryCount: mode.promptEntries.length,
     enabledEntryCount: mode.promptEntries.filter(entry => entry.enabled).length,
   }

@@ -5,7 +5,7 @@ export const AGENT_SCOPES: readonly AgentScope[] = ['roots', 'all', 'disabled']
 /** Kept for the generic field primitive; GrayCode does not expose diagnostics here. */
 export const DIAGNOSTIC_SEVERITIES: readonly { value: string; labelKey: string }[] = []
 
-/** DSH 版默认工具清单（beforeTools / afterTools 共用，24 个）。 */
+/** DSH 版默认工具全集（矩阵目录，24 个）。 */
 export const DSH_TOOL_DEFAULTS: readonly string[] = [
   'write',
   'edit',
@@ -33,6 +33,18 @@ export const DSH_TOOL_DEFAULTS: readonly string[] = [
   'reopen_review',
 ]
 
+/**
+ * 默认「执行前」白名单（用户指定：只勾 执行命令前 + 删除前）：
+ * bash / pwsh（执行命令前）、delete_code（删除前）。写入/差异类默认只在执行后存档。
+ */
+export const DSH_BEFORE_TOOL_DEFAULTS: readonly string[] = ['bash', 'pwsh', 'delete_code']
+
+/**
+ * 默认「执行后」白名单（用户指定：只勾 写入后 + 应用差异后）：
+ * write（写入后）、edit / str_replace_editor（应用差异后）。
+ */
+export const DSH_AFTER_TOOL_DEFAULTS: readonly string[] = ['write', 'edit', 'str_replace_editor']
+
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },
   memory: {
@@ -57,13 +69,13 @@ export const DEFAULTS: GrayCodeConfig = {
     autoCheckpoint: true,
     modelToolsEnabled: true,
     messageCheckpoint: {
-      beforeMessages: ['user'],
+      beforeMessages: ['user', 'model'],
       afterMessages: [],
       modelOuterLayerOnly: true,
       mergeUnchangedCheckpoints: true,
     },
-    beforeTools: [...DSH_TOOL_DEFAULTS],
-    afterTools: [...DSH_TOOL_DEFAULTS],
+    beforeTools: [...DSH_BEFORE_TOOL_DEFAULTS],
+    afterTools: [...DSH_AFTER_TOOL_DEFAULTS],
     agentScope: 'roots',
   },
   images: {
@@ -106,7 +118,7 @@ export const DEFAULTS: GrayCodeConfig = {
   media: { enabled: true, agentScope: 'roots', maxBatch: 10 },
   file: { enabled: true, agentScope: 'roots' },
   todo: { enabled: true, agentScope: 'roots' },
-  subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
+  subagents: { maxHopDepth: 5, maxConcurrent: 3, queueTimeoutSeconds: 600, defaultMaxRuntimeSeconds: 1800, customAgents: [] },
   notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
   thoughts: { enabled: true, sendHistoryThoughts: true },
 }

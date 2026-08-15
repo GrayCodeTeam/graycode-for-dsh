@@ -73,7 +73,11 @@ export function nextEntryOrder(entries: readonly PromptEntry[]): number {
   return entries.reduce((max, entry) => Math.max(max, entry.order), -1) + 1
 }
 
-/** Create a fresh entry draft (assistant entries carry an empty fakeThought). */
+/**
+ * Create a fresh entry draft (assistant entries carry an empty fakeThought).
+ * chat_history entries are position markers: fixed display name ("Chat
+ * History", aligned with the original plugin's marker naming), no content.
+ */
 export function createEntry(
   role: PromptEntryRole,
   entries: readonly PromptEntry[],
@@ -86,11 +90,80 @@ export function createEntry(
     enabled: true,
     // Default display name, editable in the UI (aligned with the original
     // plugin's "Prompt N" naming).
-    name: `Prompt ${entries.length + 1}`,
+    name: role === 'chat_history' ? 'Chat History' : `Prompt ${entries.length + 1}`,
     content: '',
   }
   if (role === 'assistant') entry.fakeThought = ''
   return entry
+}
+
+/**
+ * The default preset-entry skeleton every mode starts from (mirrors the
+ * original Gray Code `convertLegacyTemplatesToEntries` trio): the system
+ * prompt lives in the mode template (visible + editable in the mode editor),
+ * the dynamic-context user entry carries the {{$TODO_LIST}}/{{$MEMORY}}
+ * placeholders, and one chat_history marker anchors real history. Placeholders
+ * are limited to what this port's injector resolves (ENVIRONMENT / TODO_LIST
+ * / MEMORY) — unsupported legacy modules would render as deterministic
+ * notices, so they are deliberately left out.
+ */
+/**
+ * 默认「系统提示词」条目内容：原项目 DEFAULT_SYSTEM_PROMPT_TEMPLATE 的移植裁剪
+ * （仅保留本移植注入器可解析的 {{$ENVIRONMENT}}；TOOLS 等由宿主变量另行承载，
+ * 不可解析的旧模块会渲染成确定性提示文本，故省略）。
+ */
+export const DEFAULT_MINIMAL_SYSTEM_TEMPLATE = `You are a professional programming assistant, proficient in multiple programming languages and frameworks.
+
+{{$ENVIRONMENT}}
+
+====
+
+GUIDELINES
+
+- Use the provided tools to complete tasks. Tools can help you read files, search code, execute commands, and modify files.
+- **IMPORTANT: Avoid blind duplicate tool calls.** Do not repeat the same failed call with identical parameters unless another tool call, a code change, or an external state change could reasonably affect the result. Re-running checks after relevant changes is allowed.
+- When you need to understand the codebase, use read_file to examine specific files or search_in_files to find specific code patterns.
+- For complex, multi-step work, use todo_write once to initialize/replace the TODO list, and todo_update for incremental updates (status/content) as you progress.
+- For parallelizable investigations (or when you need to explore multiple areas quickly), use subagents to delegate focused sub-tasks.
+- If the task is simple and doesn't require tools, just respond directly without calling any tools.
+- Always maintain code readability and maintainability.
+- Do not omit any code.`
+
+/** Default dynamic-context entry body (original DEFAULT_DYNAMIC_CONTEXT_TEMPLATE, port-supported placeholders only). */
+export const DEFAULT_DYNAMIC_CONTEXT_TEMPLATE = `This is the current turn's dynamic context information you can use. It may change between turns. Continue with the previous task if the information is not needed and ignore it.
+
+{{$TODO_LIST}}
+
+{{$MEMORY}}`
+
+/**
+ * 「恢复默认条目」骨架（对齐原项目 convertLegacyTemplatesToEntries 三件套与
+ * 用户指定的顺序）：[系统提示词(system, 0), Chat History 定位条(1), 动态上下文
+ * (user, 2)]。system 内容直接作为条目承载（模板会被「恢复默认」一并清空，避免
+ * 与条目拼接成双份系统文本）。marker id 镜像宿主常量 CHAT_HISTORY_PROMPT_ENTRY_ID
+ * （'chat-history'），保存后保持稳定的标记身份。
+ */
+export function defaultEntries(idFactory: () => string = () => crypto.randomUUID()): PromptEntry[] {
+  const system: PromptEntry = {
+    id: idFactory(),
+    role: 'system',
+    order: 0,
+    enabled: true,
+    name: '系统提示词',
+    content: DEFAULT_MINIMAL_SYSTEM_TEMPLATE,
+  }
+  const marker = createEntry('chat_history', [system], idFactory)
+  marker.id = 'chat-history'
+  marker.order = 1
+  const dynamic: PromptEntry = {
+    id: idFactory(),
+    role: 'user',
+    order: 2,
+    enabled: true,
+    name: '动态上下文',
+    content: DEFAULT_DYNAMIC_CONTEXT_TEMPLATE,
+  }
+  return [system, marker, dynamic]
 }
 
 /** Immutably patch one entry by id. */
@@ -284,6 +357,26 @@ export function serializeExportPayload(result: { version: number; modes: readonl
   return JSON.stringify(result, null, 2)
 }
 
+/**
+ * Read an import file (browser `File` from an `<input type="file">`) into text
+ * for the import textarea. Pure-defensive: a missing/empty file selection or a
+ * failed read resolves to `null` (the caller shows a file-read error), never
+ * throws. Structural typing keeps this unit-testable in a node environment
+ * (any `{ name, text() }` object works).
+ */
+export async function readImportFileText(
+  file: { readonly name: string; text(): Promise<string> } | null | undefined,
+): Promise<string | null> {
+  if (file === null || file === undefined) return null
+  if (typeof file.name !== 'string' || file.name.length === 0) return null
+  try {
+    const text = await file.text()
+    return typeof text === 'string' ? text : null
+  } catch {
+    return null
+  }
+}
+
 // ==================== Create / save patches ====================
 
 /** Build `modes.create` args: trimmed name (host defaults the template). */
@@ -294,6 +387,8 @@ export function buildCreateModeArgs(name: string): { name: string } {
 export interface ModeSavePatchInput {
   /** Trimmed before sending; omitted entirely when `includeName` is false. */
   name: string
+  /** System-prompt template draft (textarea); always part of the patch. */
+  template: string
   entries: readonly PromptEntry[]
   toolPolicyCustomized: boolean
   /** Raw textarea value; parsed only while customization is on. */
@@ -306,15 +401,17 @@ export interface ModeSavePatchInput {
 }
 
 /**
- * Build the `modes.update` patch from the editor draft. The template is NOT
- * part of the patch — the host keeps the stored value (the UI does not edit
- * templates anymore; preset entries are the only composition surface). While
- * customization is off the patch omits `toolPolicy` entirely — the host
+ * Build the `modes.update` patch from the editor draft. The system-prompt
+ * template IS part of the patch (the mode editor exposes it as the「系统
+ * 提示词」textarea — restoring parity with the original Gray template
+ * editor; builtin templates may be edited, only id/kind are immutable).
+ * While customization is off the patch omits `toolPolicy` entirely — the host
  * treats an absent policy as the built-in default (the "customized off ⇒
  * toolPolicy undefined" invariant).
  */
 export function buildModeSavePatch(input: ModeSavePatchInput): PromptModePatch {
   const patch: PromptModePatch = {
+    template: input.template,
     promptEntries: buildEntriesSavePayload(input.entries),
     toolPolicyCustomized: input.toolPolicyCustomized,
   }

@@ -103,7 +103,8 @@ describe('prompt/modes.list', () => {
     expect(value.modes.map(mode => mode.id)).toEqual(['code', 'design', 'plan', 'ask', 'review'])
     for (const mode of value.modes) {
       expect(mode.kind).toBe('builtin')
-      expect(mode.template.length).toBeGreaterThan(0)
+      // 系统内容位于 system 条目（内置种子三件套），模板为空是预期形态。
+      expect(mode.promptEntries.filter(entry => entry.role === 'system').reduce((total, entry) => total + entry.content.length, 0)).toBeGreaterThan(0)
       expect(Array.isArray(mode.promptEntries)).toBe(true)
     }
     expect(value.modes.filter(mode => mode.current)).toHaveLength(1)
@@ -136,7 +137,9 @@ describe('prompt/modes.get', () => {
     expect(value.mode.id).toBe('design')
     expect(value.mode.name).toBe('design')
     expect(value.mode.kind).toBe('builtin')
-    expect(value.mode.template.length).toBeGreaterThan(0)
+    // 系统内容位于 system 条目（内置种子三件套），模板为空是预期形态。
+    const entries = value.mode.promptEntries as Array<{ role?: unknown; content?: unknown }>
+    expect(entries.filter(entry => entry.role === 'system').reduce((total, entry) => total + String(entry.content ?? '').length, 0)).toBeGreaterThan(0)
     expect(Array.isArray(value.mode.promptEntries)).toBe(true)
   })
 
@@ -213,10 +216,12 @@ describe('prompt/modes.create', () => {
     expect(mode.customSuffix).toBe('suf')
     expect(mode.toolPolicy).toEqual(['read_file', 'search_in_files'])
     expect(mode.toolPolicyCustomized).toBe(true)
-    expect(mode.promptEntries).toHaveLength(2)
+    // ensureChatHistoryPromptEntry 自动补 chat_history 标记（order 排末位）
+    expect(mode.promptEntries).toHaveLength(3)
     expect(mode.promptEntries[0]!.id).toMatch(/^entry-/)
     expect(mode.promptEntries[0]).toMatchObject({ role: 'system', order: 0, enabled: true, content: 'sys' })
     expect(mode.promptEntries[1]).toMatchObject({ id: 'keep-me', role: 'user', order: 1, enabled: true, content: 'usr' })
+    expect(mode.promptEntries[2]).toMatchObject({ id: 'chat-history', role: 'chat_history', order: 2, enabled: true, content: '' })
 
     // 已持久化：get 能读回
     const got = await invoke('modes.get', { id: mode.id })
@@ -273,12 +278,14 @@ describe('prompt/modes.update', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     const mode = result.value as {
-      mode: { template: string; customPrefix?: string; promptEntries: Array<{ id: string; content: string }> }
+      mode: { template: string; customPrefix?: string; promptEntries: Array<{ id: string; role: string; content: string }> }
     }
     expect(mode.mode.template).toBe('t2')
     expect(mode.mode.customPrefix).toBeUndefined()
-    expect(mode.mode.promptEntries).toHaveLength(1)
-    expect(mode.mode.promptEntries[0]).toMatchObject({ id: 'keep-me', content: 'b' })
+    // patch 的条目保留 id；ensureChatHistoryPromptEntry 额外补一个 chat_history 标记
+    expect(mode.mode.promptEntries).toHaveLength(2)
+    expect(mode.mode.promptEntries.find(entry => entry.id === 'keep-me')).toMatchObject({ content: 'b' })
+    expect(mode.mode.promptEntries.find(entry => entry.role === 'chat_history')).toMatchObject({ id: 'chat-history', content: '' })
   })
 
   it('内置模式重命名 → GRAY_PROMPT_BUILTIN_IMMUTABLE', async () => {

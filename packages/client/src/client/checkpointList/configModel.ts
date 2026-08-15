@@ -22,7 +22,7 @@
  */
 import { graycodeCheckpointConfigDictionaries } from './locales.ts'
 import type { GrayCodeCheckpointConfigLocaleKey } from './locales.ts'
-import { DSH_TOOL_DEFAULTS } from '../settings/defaults.ts'
+import { DSH_AFTER_TOOL_DEFAULTS, DSH_BEFORE_TOOL_DEFAULTS } from '../settings/defaults.ts'
 
 /** A message side that can carry a checkpoint trigger. */
 export type CheckpointMessageKind = 'user' | 'model'
@@ -56,23 +56,22 @@ const CHECKPOINT_TOOL_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/u
 
 /**
  * Sensible defaults for a fresh/legacy config snapshot (rc.6 has none of the
- * new fields — everything defaults on, matching the old always-on behaviour;
- * the message-level after-model slot and the tool lists mirror the host
- * checkpoints Config defaults: afterMessages off, beforeTools/afterTools =
- * the DSH 24-tool list).
+ * new fields — everything defaults on, matching the old always-on behaviour):
+ * 消息边界默认「用户消息前 + 模型消息前」（afterMessages 关）；工具触发默认只勾
+ * 写入后/应用差异后（afterTools）与执行命令前/删除前（beforeTools），不再全选。
  */
 export const DEFAULT_CHECKPOINT_CONFIG: CheckpointConfigValues = {
   enabled: true,
   autoCheckpoint: true,
   modelToolsEnabled: true,
   messageCheckpoint: {
-    beforeMessages: ['user'],
+    beforeMessages: ['user', 'model'],
     afterMessages: [],
     modelOuterLayerOnly: true,
     mergeUnchangedCheckpoints: true,
   },
-  beforeTools: [...DSH_TOOL_DEFAULTS],
-  afterTools: [...DSH_TOOL_DEFAULTS],
+  beforeTools: [...DSH_BEFORE_TOOL_DEFAULTS],
+  afterTools: [...DSH_AFTER_TOOL_DEFAULTS],
 }
 
 function readBool(value: unknown, fallback: boolean): boolean {
@@ -125,35 +124,41 @@ export function normalizeCheckpointConfig(raw: unknown): CheckpointConfigValues 
   }
 }
 
-/** The two message positions the section exposes as toggles. */
-export type CheckpointConfigMessageSlot = 'beforeUser' | 'afterModel'
+/**
+ * The message positions the section exposes as toggles. Only host-backed
+ * boundaries are offered: pre-step (新用户回合前 = beforeUser), agent/request
+ * (模型调用前 = beforeModel) and turn-stopping (模型回合关闭后 = afterModel).
+ * 「用户消息后」无宿主挂点，不提供。
+ */
+export type CheckpointConfigMessageSlot = 'beforeUser' | 'beforeModel' | 'afterModel'
 
 /** Toggle state of one message slot ("on" = the list contains that kind). */
 export function checkpointConfigMessageKindEnabled(
   config: CheckpointConfigValues,
   slot: CheckpointConfigMessageSlot,
 ): boolean {
-  return slot === 'beforeUser'
-    ? config.messageCheckpoint.beforeMessages.includes('user')
-    : config.messageCheckpoint.afterMessages.includes('model')
+  if (slot === 'beforeUser') return config.messageCheckpoint.beforeMessages.includes('user')
+  if (slot === 'beforeModel') return config.messageCheckpoint.beforeMessages.includes('model')
+  return config.messageCheckpoint.afterMessages.includes('model')
 }
 
 /**
- * Pure toggle update of one message slot: 'beforeUser' edits
- * `messageCheckpoint.beforeMessages` (user membership), 'afterModel' edits
- * `messageCheckpoint.afterMessages` (model membership). Other fields untouched.
+ * Pure toggle update of one message slot: beforeUser/beforeModel edit
+ * `messageCheckpoint.beforeMessages` membership, afterModel edits
+ * `messageCheckpoint.afterMessages`. Other fields untouched.
  */
 export function withCheckpointConfigMessageKind(
   config: CheckpointConfigValues,
   slot: CheckpointConfigMessageSlot,
   enabled: boolean,
 ): CheckpointConfigValues {
-  if (slot === 'beforeUser') {
+  if (slot === 'beforeUser' || slot === 'beforeModel') {
+    const kind: CheckpointMessageKind = slot === 'beforeUser' ? 'user' : 'model'
     const beforeMessages: CheckpointMessageKind[] = enabled
-      ? config.messageCheckpoint.beforeMessages.includes('user')
+      ? config.messageCheckpoint.beforeMessages.includes(kind)
         ? [...config.messageCheckpoint.beforeMessages]
-        : [...config.messageCheckpoint.beforeMessages, 'user']
-      : config.messageCheckpoint.beforeMessages.filter(kind => kind !== 'user')
+        : [...config.messageCheckpoint.beforeMessages, kind]
+      : config.messageCheckpoint.beforeMessages.filter(item => item !== kind)
     return { ...config, messageCheckpoint: { ...config.messageCheckpoint, beforeMessages } }
   }
   const afterMessages: CheckpointMessageKind[] = enabled
@@ -272,4 +277,114 @@ export function checkpointConfigToolIssueLabelKey(issue: CheckpointConfigToolLin
     default:
       return 'config.toolsInvalidChars'
   }
+}
+
+// ==================== Tool matrix (checkbox editor) ====================
+//
+// The raw one-name-per-line textareas were hostile to users (issue: 工具调用
+// 前存档的设置 UI 极其不友好). The editor now renders the known DSH tool
+// surface as a grouped checkbox matrix with 执行前/执行后 columns; unknown
+// names from older configs stay editable as "custom tools" so no stored value
+// is ever dropped. Old Gray presented the same concept as two phase labels
+// (执行前/执行后) over its dangerous-tool surface — the matrix keeps that
+// vocabulary.
+
+/** Display group of a known tool (drives matrix section headers). */
+export type CheckpointToolGroup = 'write' | 'shell' | 'search' | 'image' | 'workflow'
+
+/** One known-tool row of the matrix. */
+export interface CheckpointToolCatalogEntry {
+  readonly name: string
+  readonly group: CheckpointToolGroup
+  /** Locale key of the one-line description shown under the tool name. */
+  readonly descriptionKey: GrayCodeCheckpointConfigLocaleKey
+}
+
+/** Render order of the matrix groups (write first: highest-risk surface). */
+export const CHECKPOINT_TOOL_GROUP_ORDER: readonly CheckpointToolGroup[] = ['write', 'shell', 'search', 'image', 'workflow']
+
+/** The known DSH tool surface (mirrors DSH_TOOL_DEFAULTS, plus copy). */
+export const CHECKPOINT_TOOL_CATALOG: readonly CheckpointToolCatalogEntry[] = [
+  { name: 'write', group: 'write', descriptionKey: 'config.tool.write.description' },
+  { name: 'edit', group: 'write', descriptionKey: 'config.tool.edit.description' },
+  { name: 'str_replace_editor', group: 'write', descriptionKey: 'config.tool.str_replace_editor.description' },
+  { name: 'delete_code', group: 'write', descriptionKey: 'config.tool.delete_code.description' },
+  { name: 'bash', group: 'shell', descriptionKey: 'config.tool.bash.description' },
+  { name: 'pwsh', group: 'shell', descriptionKey: 'config.tool.pwsh.description' },
+  { name: 'grep', group: 'search', descriptionKey: 'config.tool.grep.description' },
+  { name: 'glob', group: 'search', descriptionKey: 'config.tool.glob.description' },
+  { name: 'crop_image', group: 'image', descriptionKey: 'config.tool.crop_image.description' },
+  { name: 'resize_image', group: 'image', descriptionKey: 'config.tool.resize_image.description' },
+  { name: 'rotate_image', group: 'image', descriptionKey: 'config.tool.rotate_image.description' },
+  { name: 'generate_image', group: 'image', descriptionKey: 'config.tool.generate_image.description' },
+  { name: 'remove_background', group: 'image', descriptionKey: 'config.tool.remove_background.description' },
+  { name: 'create_plan', group: 'workflow', descriptionKey: 'config.tool.create_plan.description' },
+  { name: 'update_plan', group: 'workflow', descriptionKey: 'config.tool.update_plan.description' },
+  { name: 'create_design', group: 'workflow', descriptionKey: 'config.tool.create_design.description' },
+  { name: 'update_design', group: 'workflow', descriptionKey: 'config.tool.update_design.description' },
+  { name: 'create_progress', group: 'workflow', descriptionKey: 'config.tool.create_progress.description' },
+  { name: 'update_progress', group: 'workflow', descriptionKey: 'config.tool.update_progress.description' },
+  { name: 'record_progress_milestone', group: 'workflow', descriptionKey: 'config.tool.record_progress_milestone.description' },
+  { name: 'create_review', group: 'workflow', descriptionKey: 'config.tool.create_review.description' },
+  { name: 'record_review_milestone', group: 'workflow', descriptionKey: 'config.tool.record_review_milestone.description' },
+  { name: 'finalize_review', group: 'workflow', descriptionKey: 'config.tool.finalize_review.description' },
+  { name: 'reopen_review', group: 'workflow', descriptionKey: 'config.tool.reopen_review.description' },
+]
+
+/** Names present in either stored list but absent from the catalog. */
+export function checkpointConfigUnknownTools(config: CheckpointConfigValues): string[] {
+  const known = new Set(CHECKPOINT_TOOL_CATALOG.map(entry => entry.name))
+  const seen = new Set<string>()
+  const unknown: string[] = []
+  for (const name of [...config.beforeTools, ...config.afterTools]) {
+    if (known.has(name) || seen.has(name)) continue
+    seen.add(name)
+    unknown.push(name)
+  }
+  return unknown
+}
+
+/** One matrix column (which stored list a checkbox edits). */
+export type CheckpointToolSlot = 'before' | 'after'
+
+/** Toggle one tool in one slot, preserving stored order (immutable). */
+export function withCheckpointToolFlag(
+  config: CheckpointConfigValues,
+  tool: string,
+  slot: CheckpointToolSlot,
+  enabled: boolean,
+): CheckpointConfigValues {
+  const key = slot === 'before' ? 'beforeTools' : 'afterTools'
+  const list = config[key]
+  const has = list.includes(tool)
+  if (enabled === has) return config
+  const next = enabled ? [...list, tool] : list.filter(name => name !== tool)
+  return { ...config, [key]: next }
+}
+
+/** Set EVERY known tool (custom tools untouched) in one slot on/off. */
+export function withCheckpointKnownTools(
+  config: CheckpointConfigValues,
+  slot: CheckpointToolSlot,
+  enabled: boolean,
+): CheckpointConfigValues {
+  let next = config
+  for (const entry of CHECKPOINT_TOOL_CATALOG) {
+    next = withCheckpointToolFlag(next, entry.name, slot, enabled)
+  }
+  return next
+}
+
+/** Remove a custom tool from both slots (immutable). */
+export function withoutCheckpointTool(config: CheckpointConfigValues, tool: string): CheckpointConfigValues {
+  return {
+    ...config,
+    beforeTools: config.beforeTools.filter(name => name !== tool),
+    afterTools: config.afterTools.filter(name => name !== tool),
+  }
+}
+
+/** Both slots back to the selective default lists (「恢复默认」= 写入后/差异后 + 命令前/删除前）。 */
+export function withCheckpointToolsReset(config: CheckpointConfigValues): CheckpointConfigValues {
+  return { ...config, beforeTools: [...DSH_BEFORE_TOOL_DEFAULTS], afterTools: [...DSH_AFTER_TOOL_DEFAULTS] }
 }

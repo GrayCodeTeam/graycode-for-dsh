@@ -1,10 +1,12 @@
 /**
  * GrayCode - subagents 薄适配层（G1/G2/G3）类型化拒绝错误
  *
- * 三个缺口各有明确的拒绝错误，供上层工具/工作流转译与测试断言：
+ * 各缺口/边界有明确的错误，供上层工具/工作流转译与测试断言：
  * - G1 HopDepthExceededError：同线程 hopDepth 超上限（参照老 Gray MAX_HOP_DEPTH=5 硬熔断）；
  * - G2 UnsupportedAddressingError：子→父任意寻址为 DSH seam 的能力边界，fail-closed；
- * - G3 MaxConcurrentSubagentsError：运行中子代理数超 subagents.maxConcurrent；
+ * - G3 排队语义（老 Gray concurrencyLimiter）：超 maxConcurrent 的委派进入每父会话 FIFO
+ *   队列等待名额，而非直接拒绝——排队超 SubagentQueueTimeoutError、排队中被取消
+ *   SubagentQueueCancelledError（委派未启动，均以失败结算回调用方）；
  * - ConcurrencyCheckError：无法枚举运行中数量时 fail-closed（守卫不静默放行）。
  */
 export class HopDepthExceededError extends Error {
@@ -23,19 +25,42 @@ export class HopDepthExceededError extends Error {
   }
 }
 
-export class MaxConcurrentSubagentsError extends Error {
+/**
+ * 排队等待并发名额超时（老 Gray SubAgentQueueTimeoutError 语义）。
+ *
+ * 委派在 FIFO 队列中等待超过 subagents.queueTimeoutSeconds 后以失败结算——
+ * 超时是失败，不是用户取消；此时委派尚未到达宿主（原 start 未被调用）。
+ */
+export class SubagentQueueTimeoutError extends Error {
   readonly parentSessionId: string
-  readonly running: number
-  readonly maxConcurrent: number
+  readonly queueTimeoutSeconds: number
 
-  constructor(parentSessionId: string, running: number, maxConcurrent: number) {
+  constructor(parentSessionId: string, queueTimeoutSeconds: number) {
     super(
-      `subagents G3: delegation rejected — parent ${parentSessionId} already runs ${running} subagents, exceeding subagents.maxConcurrent=${maxConcurrent}`,
+      `subagents G3: delegation failed — parent ${parentSessionId} waited in the concurrency queue longer than subagents.queueTimeoutSeconds=${queueTimeoutSeconds}s (run settled as failed, never started)`,
     )
-    this.name = 'MaxConcurrentSubagentsError'
+    this.name = 'SubagentQueueTimeoutError'
     this.parentSessionId = parentSessionId
-    this.running = running
-    this.maxConcurrent = maxConcurrent
+    this.queueTimeoutSeconds = queueTimeoutSeconds
+  }
+}
+
+/**
+ * 排队等待期间被取消：委派请求的 signal 中止，或守卫安装被拆除（dispose/HMR）。
+ *
+ * 委派同样未到达宿主（原 start 未被调用），以失败结算回调用方。
+ */
+export class SubagentQueueCancelledError extends Error {
+  readonly parentSessionId: string
+  readonly reason: 'signal' | 'guard-disposed'
+
+  constructor(parentSessionId: string, reason: 'signal' | 'guard-disposed') {
+    super(
+      `subagents G3: delegation cancelled while waiting in the concurrency queue on parent ${parentSessionId} (${reason === 'signal' ? 'request signal aborted' : 'guard installation disposed'}; run never started)`,
+    )
+    this.name = 'SubagentQueueCancelledError'
+    this.parentSessionId = parentSessionId
+    this.reason = reason
   }
 }
 

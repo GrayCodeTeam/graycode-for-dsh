@@ -8,9 +8,12 @@
  *
  * Built-in modes (code/design/plan/ask/review) seed the store on first run;
  * they cannot be deleted or renamed (their ids are stable identity), but
- * their templates/entries may be edited like any other mode. The store is
- * lazy-loaded: every public method awaits the load before touching state, so
- * the plugin may fire-and-forget construction (same contract as branches).
+ * their templates/entries may be edited like any other mode. Every mode is
+ * guaranteed to carry exactly one chat_history marker entry after load/save
+ * normalization (see ensureChatHistoryPromptEntry — the original project's
+ * fixed Chat History entry). The store is lazy-loaded: every public method
+ * awaits the load before touching state, so the plugin may fire-and-forget
+ * construction (same contract as branches).
  */
 
 import * as crypto from 'node:crypto'
@@ -18,6 +21,9 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import {
   BUILTIN_MODE_IDS,
+  CHAT_HISTORY_PROMPT_ENTRY_ID,
+  DEFAULT_DYNAMIC_CONTEXT_TEMPLATE,
+  DEFAULT_MINIMAL_SYSTEM_PROMPT,
   PROMPT_MODE_STORE_VERSION,
   PromptError,
   PromptErrorCode,
@@ -274,14 +280,100 @@ REVIEW MODE
 - When the review is complete, use finalize_review to write the final conclusion and stop. After finalization, do not record more milestones unless you explicitly reopen the same review with reopen_review.`,
 }
 
+/**
+ * Guarantee the original project's fixed Chat History entry (1.5.4
+ * PromptSettingsService.ensureChatHistoryPromptEntry): after normalization a
+ * mode carries EXACTLY ONE chat_history marker —
+ * - the FIRST marker (in payload order) is kept and canonicalized: id kept
+ *   for UI identity stability (the appended default uses the fixed
+ *   `chat-history` id; both fall back to a fresh id when that id is already
+ *   claimed by a kept non-marker entry), name defaults to "Chat History",
+ *   always enabled, content forced empty, no fakeThought;
+ * - additional markers are dropped;
+ * - a mode without any marker gets the default marker appended at the end.
+ * Finally the list is sorted by order (id tie-break) and orders renumbered
+ * 0..n-1, mirroring the original sort+renumber step. Runs on every load /
+ * create / update / import path, so the marker can never go missing.
+ */
+export function ensureChatHistoryPromptEntry(entries: readonly PromptEntry[]): PromptEntry[] {
+  const claimedIds = new Set(entries.filter(entry => entry.role !== 'chat_history').map(entry => entry.id))
+  const canonicalId = (preferred: string): string =>
+    preferred.length > 0 && !claimedIds.has(preferred) ? preferred : newEntryId()
+
+  const result: PromptEntry[] = []
+  let hasChatHistory = false
+  for (const entry of entries) {
+    if (entry.role !== 'chat_history') {
+      result.push(entry)
+      continue
+    }
+    if (hasChatHistory) continue
+    hasChatHistory = true
+    const marker: PromptEntry = {
+      id: canonicalId(entry.id.length > 0 ? entry.id : CHAT_HISTORY_PROMPT_ENTRY_ID),
+      name: entry.name !== undefined && entry.name.trim().length > 0 ? entry.name.trim() : 'Chat History',
+      role: 'chat_history',
+      order: entry.order,
+      enabled: true,
+      content: '',
+    }
+    result.push(marker)
+  }
+  if (!hasChatHistory) {
+    result.push({
+      id: canonicalId(CHAT_HISTORY_PROMPT_ENTRY_ID),
+      name: 'Chat History',
+      role: 'chat_history',
+      order: result.length,
+      enabled: true,
+      content: '',
+    })
+  }
+  return result
+    .slice()
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))
+    .map((entry, index) => ({ ...entry, order: index }))
+}
+
 function createBuiltinModes(): PromptMode[] {
   return BUILTIN_MODE_IDS.map(id => ({
     id,
     name: id,
     kind: 'builtin' as const,
-    template: BUILTIN_MODE_TEMPLATES[id],
-    promptEntries: [],
+    // 预设条目承载全部内容：system 条目 = 原内置模板文本（渲染等价——
+    // renderModeSectionText 输出 = 模板 + system 条目拼接，模板为空时即条目
+    // 内容），Chat History 其后，动态上下文殿后（原项目 convertLegacy 三件套
+    // 顺序：system → history → dynamic）。
+    // 预设条目承载全部内容：system 条目 = 原内置模板文本（渲染等价——
+    // renderModeSectionText 输出 = 模板 + system 条目拼接，模板为空时即条目
+    // 内容），Chat History 其后，动态上下文殿后（原项目 convertLegacy 三件套
+    // 顺序：system → history → dynamic）。
+    template: '',
+    promptEntries: createDefaultEntrySeed(BUILTIN_MODE_TEMPLATES[id]),
   }))
+}
+
+/**
+ * 默认三件套骨架：[系统提示词(system, 0), Chat History 定位条(1), 动态上下文
+ * (user, 2)]。内置模式的 system 内容 = 各自内置模板；新建模式 = 极简系统提示词。
+ */
+function createDefaultEntrySeed(systemContent: string): PromptEntry[] {
+  return [
+    { id: newEntryId(), name: '系统提示词', role: 'system', order: 0, enabled: true, content: normalizeTemplate(systemContent) },
+    { id: CHAT_HISTORY_PROMPT_ENTRY_ID, name: 'Chat History', role: 'chat_history', order: 1, enabled: true, content: '' },
+    { id: newEntryId(), name: '动态上下文', role: 'user', order: 2, enabled: true, content: DEFAULT_DYNAMIC_CONTEXT_TEMPLATE },
+  ]
+}
+
+/** createMode 的 P-06 判断：种子条目是否含非空 system 内容（决定模板回退）。 */
+function createModeSeedHasSystem(input: { promptEntries?: readonly unknown[] }): boolean {
+  const entries = input.promptEntries
+  if (!Array.isArray(entries)) return true // 未传条目 → 走三件套种子（含 system）
+  return entries.some(entry => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const record = entry as { role?: unknown; content?: unknown }
+    return record.role === 'system' && typeof record.content === 'string' && record.content.trim().length > 0
+  })
 }
 
 function newModeId(): string {
@@ -517,6 +609,9 @@ function parseModeRecord(raw: unknown, options: ParseModeOptions): PromptMode {
     ]
     options.warnings.push(`mode "${name.trim()}": mapped legacy dynamicTemplate (enabled) to a user preset entry`)
   }
+  // 原项目语义：entries 模式归一化后保证恰好一个 chat_history 定位条目
+  // （store load 与 import 共用本函数，两条路径都获得该保证）。
+  parsedEntries = ensureChatHistoryPromptEntry(parsedEntries)
   return {
     id,
     name: name.trim(),
@@ -546,6 +641,31 @@ function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>, warni
     forceCustomKind: true,
     requireFullShape: false,
   })
+}
+
+/**
+ * Detect the Gray Code 1.5.x frontend export envelope: `{ schema:
+ * 'graycode.promptModes.v1', exportedAt, modes: PromptMode[] }` — note
+ * `modes` is an ARRAY (the SystemPromptConfig below uses a Record). Returns
+ * the modes array when recognized, else undefined.
+ *
+ * Detection is deliberately two-pronged so hand-edited exports still import:
+ * - the explicit `schema` tag, or
+ * - a top-level `modes` array on an object WITHOUT single-mode markers
+ *   (`name`/`id`/`promptEntries` — a mode record never carries a top-level
+ *   `modes` array). This is exactly the shape that used to fall through
+ *   `isSystemPromptConfigShape` (Record-only `modes`) into single-mode
+ *   parsing and fail.
+ */
+function graycodeExportEnvelopeModes(payload: unknown): unknown[] | undefined {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  const record = payload as Record<string, unknown>
+  const hasSingleModeMarker = record.name !== undefined || record.id !== undefined || record.promptEntries !== undefined
+  if (Array.isArray(record.modes)) {
+    return hasSingleModeMarker ? undefined : record.modes
+  }
+  if (record.schema === 'graycode.promptModes.v1') return []
+  return undefined
 }
 
 /**
@@ -817,14 +937,19 @@ export class PromptSettingsService {
         id: newModeId(),
         name,
         kind: 'custom',
-        // P-06：UI 不再提供模板输入，空模板回退内置 code 模板，避免新模式空 section
-        // 被注入器瀑布丢弃（overrideHostPrompt 下模型看不到任何模式内容）。
-        template: normalizeTemplate(input.template ?? '') || BUILTIN_MODE_TEMPLATES.code,
+        // P-06 演进：默认种子 = 三件套（system 条目承载极简系统提示词），模板
+        // 留空（条目已保证 section 非空）；仅当调用方显式传入的条目不含 system
+        // 内容且未传模板时，才回退内置 code 模板避免空 section 被瀑布丢弃。
+        template: normalizeTemplate(input.template ?? '') || (createModeSeedHasSystem(input) ? '' : BUILTIN_MODE_TEMPLATES.code),
         customPrefix: input.customPrefix !== undefined ? normalizeTemplate(input.customPrefix) : undefined,
         customSuffix: input.customSuffix !== undefined ? normalizeTemplate(input.customSuffix) : undefined,
         toolPolicy: normalizeToolPolicy(input.toolPolicy, PromptErrorCode.INVALID_PAYLOAD),
         toolPolicyCustomized: normalizeToolPolicyCustomized(input.toolPolicyCustomized, PromptErrorCode.INVALID_PAYLOAD),
-        promptEntries: (input.promptEntries ?? []).map(entry => normalizeEntry(entry)),
+        // 新建模式默认种子 = 三件套骨架（原项目默认行为）；显式传入
+        // promptEntries 时以传入为准再归一化。
+        promptEntries: ensureChatHistoryPromptEntry(
+          (input.promptEntries ?? createDefaultEntrySeed(DEFAULT_MINIMAL_SYSTEM_PROMPT)).map(entry => normalizeEntry(entry)),
+        ),
       }
       store.modes.push(mode)
       await this.persist()
@@ -880,7 +1005,7 @@ export class PromptSettingsService {
           ? normalizeToolPolicyCustomized(patch.toolPolicyCustomized, PromptErrorCode.INVALID_PAYLOAD)
           : mode.toolPolicyCustomized,
         promptEntries: patch.promptEntries !== undefined
-          ? patch.promptEntries.map(entry => normalizeEntry(entry))
+          ? ensureChatHistoryPromptEntry(patch.promptEntries.map(entry => normalizeEntry(entry)))
           : mode.promptEntries,
       }
       store.modes[store.modes.indexOf(mode)] = next
@@ -933,13 +1058,17 @@ export class PromptSettingsService {
   }
 
   /**
-   * Import modes from a JSON payload. Two payload shapes are accepted:
+   * Import modes from a JSON payload. Three payload shapes are accepted:
    *
    * 1. One or many mode records (array or single object) — imported modes are
    *    always custom; colliding ids are regenerated (including duplicates
    *    inside the same payload); templates and entry content are normalized;
    *    legacy-only fields are dropped / mapped and reported in `warnings`.
-   * 2. A SystemPromptConfig envelope (old Gray `system_prompt` export: `modes`
+   * 2. A Gray Code 1.5.x frontend export envelope (`schema:
+   *    'graycode.promptModes.v1'` with `modes` as an ARRAY — see
+   *    graycodeExportEnvelopeModes): each element goes through
+   *    parseImportedMode under the same legacy-field mapping as (1).
+   * 3. A SystemPromptConfig envelope (old Gray `system_prompt` export: `modes`
    *    as a Record, and/or top-level `currentModeId` / `template` /
    *    `dynamicTemplate`) — folded globally: each mode value goes through
    *    parseImportedMode; the code/default mode falls back to the global
@@ -954,8 +1083,24 @@ export class PromptSettingsService {
       const warnings: string[] = []
       const existingIds = new Set(store.modes.map(mode => mode.id))
       const imported: PromptMode[] = []
+      const importModeRecords = (raws: readonly unknown[]): void => {
+        for (const raw of raws) {
+          const mode = parseImportedMode(raw, existingIds, warnings)
+          // BUG-06: each parsed mode claims its final id inside the loop, so
+          // same-payload duplicates get regenerated instead of colliding.
+          existingIds.add(mode.id)
+          imported.push(mode)
+        }
+      }
 
-      if (isSystemPromptConfigShape(payload)) {
+      const envelopeModes = graycodeExportEnvelopeModes(payload)
+      if (envelopeModes !== undefined) {
+        warnings.push('imported payload is a Gray Code export envelope (graycode.promptModes.v1); importing the modes array')
+        importModeRecords(envelopeModes)
+        if (envelopeModes.length === 0) {
+          warnings.push('export envelope carried no modes; nothing was imported')
+        }
+      } else if (isSystemPromptConfigShape(payload)) {
         const config = payload as Record<string, unknown>
         warnings.push('imported payload is a SystemPromptConfig; folding the global config')
         const globalTemplate = typeof config.template === 'string' ? normalizeTemplate(config.template) : undefined
@@ -997,10 +1142,15 @@ export class PromptSettingsService {
         }
         // Global dynamicTemplate (enabled) maps to a user entry on the default
         // mode, unless that mode already carries the same entry from its own
-        // dynamicTemplate field.
+        // dynamicTemplate field. The fold happens after parseModeRecord, so
+        // re-run the chat_history-marker guarantee (sort + renumber) on the
+        // mutated entry list.
         if (defaultMode && globalDynEnabled && globalDyn !== undefined
           && !defaultMode.promptEntries.some(entry => entry.content === globalDyn)) {
-          defaultMode.promptEntries.push(dynamicTemplateUserEntry(globalDyn, defaultMode.promptEntries))
+          defaultMode.promptEntries = ensureChatHistoryPromptEntry([
+            ...defaultMode.promptEntries,
+            dynamicTemplateUserEntry(globalDyn, defaultMode.promptEntries),
+          ])
           warnings.push(`mode "${defaultMode.id}": mapped global dynamicTemplate (enabled) to a user preset entry`)
         }
         const rawCurrent = config.currentModeId
@@ -1013,14 +1163,7 @@ export class PromptSettingsService {
           }
         }
       } else {
-        const raws = Array.isArray(payload) ? payload : [payload]
-        for (const raw of raws) {
-          const mode = parseImportedMode(raw, existingIds, warnings)
-          // BUG-06: each parsed mode claims its final id inside the loop, so
-          // same-payload duplicates get regenerated instead of colliding.
-          existingIds.add(mode.id)
-          imported.push(mode)
-        }
+        importModeRecords(Array.isArray(payload) ? payload : [payload])
       }
 
       store.modes.push(...imported)

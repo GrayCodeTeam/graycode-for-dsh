@@ -457,6 +457,16 @@
   excludedNote——`additionalProperties: false` 会在 `ctx.tools.execute` 真实分发时
   拒绝未声明字段（`ctx.tools` 实测复现）。已全部补齐。
 
+### Known Issues（已知问题）
+
+- **默认三件套触发 thoughts 请求重写后工具调用不派发（未修复）**：默认提示词模式
+  三件套（system → Chat History → 动态上下文 user 条目）会触发 thoughts 域
+  `llm/stream` 请求重写路径（`src/thoughts/adapters/llmStream.ts` + `domain/rewrite.ts`），
+  重写后 agent 循环收到 assistant/chunk 但工具调用不再派发、回合直接结束；且实测
+  默认三件套从未成功注入——模型看不到系统提示词与动态上下文。复现：
+  `tests/spike/staged-diff.spec.ts` 8 例失败（thoughts 禁用即 8/8 通过）。根因疑在
+  re-enter `ctx.llm.stream` 与 dsh-agent-loop 直接调用路径的交互，待修复。
+
 ### Security（安全）
 
 - 迁移器对设置导出中的明文 secret 一律脱敏（只生成"重新录入"占位），报告不输出密钥。

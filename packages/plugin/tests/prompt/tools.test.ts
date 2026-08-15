@@ -107,9 +107,11 @@ describe('prompt 工具层', () => {
       const current = (await preview.execute({}, makeExec())) as PreviewResult
       expect(current.success).toBe(true)
       expect(current.modeId).toBe('code')
-      // 结构断言：预览文本包含当前模式模板的首行（不绑定具体模板内容）
+      // 结构断言：预览文本包含系统内容首行（模板或 system 条目，不绑定具体内容）
       const currentMode = await service.getCurrentMode()
-      const templateFirstLine = currentMode.template.split('\n').find(line => line.trim().length > 0)!
+      const systemText = currentMode.template
+        + currentMode.promptEntries.filter(entry => entry.role === 'system').map(entry => entry.content).join('\n\n')
+      const templateFirstLine = systemText.split('\n').find(line => line.trim().length > 0)!
       expect(current.text).toContain(templateFirstLine.trim())
 
       const explicit = (await preview.execute({ modeId: 'ask' }, makeExec())) as PreviewResult

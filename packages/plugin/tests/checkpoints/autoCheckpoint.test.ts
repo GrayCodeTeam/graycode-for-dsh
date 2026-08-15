@@ -21,6 +21,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolDispatchExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import {
@@ -28,6 +29,7 @@ import {
   type AutoCheckpointConfig,
   type AutoCheckpointEngine,
   type PreStepPayload,
+  type RequestPayload,
   type TurnStoppingPayload,
 } from '../../src/checkpoints/autoCheckpoint.ts'
 import type { CheckpointService } from '../../src/checkpoints/service.ts'
@@ -69,6 +71,11 @@ function turnStop(agent: Agent, signal = new AbortController().signal): TurnStop
 }
 
 const enter = (): Promise<PreStepDecision> => Promise.resolve({ kind: 'enter', messages: [] as UserMessage[] })
+
+/** `agent/request` payload 夹具（模型调用发起前）。 */
+function modelRequest(agent: Agent, step = 1, signal = new AbortController().signal): RequestPayload {
+  return { agent, turn: 1, step, signal }
+}
 
 /** stub CheckpointService（引擎只调 create/delete/list 三个方法；overrides 宽松接受任意 stub）。 */
 function stubService(overrides: Partial<Record<keyof CheckpointService, unknown>> = {}): CheckpointService {
@@ -228,6 +235,35 @@ describe('agent/pre-step 监听器（user 消息前）', () => {
     const agent = fakeAgent('root')
     await engine.onPreStep(preStep(agent, 1), enter)
     expect(createCheckpoint).not.toHaveBeenCalled()
+  })
+})
+
+describe('agent/request 监听器（model 消息前）', () => {
+  test("beforeMessages 含 'model' → 每次模型调用前创建存档（title auto: before model message）", async () => {
+    const createCheckpoint = vi.fn(async () => null)
+    const engine = makeEngine(
+      stubService({ createCheckpoint }),
+      engineConfig({ messageCheckpoint: { beforeMessages: ['user', 'model'] } }),
+    )
+    const agent = fakeAgent('root')
+    await engine.onRequest(modelRequest(agent, 1), async () => ({ messages: [] as UserMessage[] }) as unknown as LlmCallConfig)
+    expect(createCheckpoint).toHaveBeenCalledTimes(1)
+    expect(createCheckpoint).toHaveBeenCalledWith(WS, { title: 'auto: before model message', origin: 'auto', signal: expect.any(AbortSignal) })
+    // 同回合第二个 step（工具循环中的又一次模型调用）再次触发
+    await engine.onRequest(modelRequest(agent, 2), async () => ({ messages: [] as UserMessage[] }) as unknown as LlmCallConfig)
+    expect(createCheckpoint).toHaveBeenCalledTimes(2)
+  })
+
+  test("beforeMessages 不含 'model' → 不触发；调用配置原样透传", async () => {
+    const createCheckpoint = vi.fn(async () => null)
+    const engine = makeEngine(
+      stubService({ createCheckpoint }),
+      engineConfig({ messageCheckpoint: { beforeMessages: ['user'] } }),
+    )
+    const config = { messages: [] as UserMessage[] } as unknown as LlmCallConfig
+    const returned = await engine.onRequest(modelRequest(fakeAgent('root')), async () => config)
+    expect(createCheckpoint).not.toHaveBeenCalled()
+    expect(returned).toBe(config)
   })
 })
 

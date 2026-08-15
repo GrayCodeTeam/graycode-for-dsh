@@ -11,8 +11,13 @@
  *   payload.turn 变化 = 新用户回合 → beforeMessages 含 'user' 时创建存档。
  *   首次见该 agent 也存档。存档在 `next()` 之后、本挂点返回前创建（决策已定，
  *   但快照 await 完成前 waterfall 不返回——只保证不延迟决策，不承诺不延迟挂点完成）。
+ * - `agent/request`（waterfall，runtime-types.d.ts:254）：模型调用发起前 →
+ *   beforeMessages 含 'model' 时创建存档（每个 step 一次；同回合多次模型调用
+ *   各存一次，依赖 mergeUnchangedCheckpoints 去重无变更档）。
  * - `agent/turn-stopping`（serial，runtime-types.d.ts:301）：模型回合关闭 →
  *   afterMessages 含 'model' 时创建存档。
+ *   「用户消息后」无宿主挂点（pre-step 只在新用户回合触发），故 afterMessages
+ *   的 'user' 成员当前无对应行为，schema 保留字段但不暴露 UI。
  *
  * 语义：
  * - 全部存档 origin='auto'，title 形如 `auto: before <tool>` / `auto: after <tool>` /
@@ -30,6 +35,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { ToolDispatchExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { CheckpointService, CreateCheckpointResult } from './service.ts'
@@ -50,6 +56,14 @@ export interface TurnStoppingPayload {
   readonly signal: AbortSignal
 }
 
+/** `agent/request` 事件 payload（waterfall，dsh-agent runtime-types:254）。 */
+export interface RequestPayload {
+  readonly agent: Agent
+  readonly turn: number
+  readonly step: number
+  readonly signal: AbortSignal
+}
+
 /** 自动存档配置（index.ts 解析 schema 默认值后传入；测试直接构造）。 */
 export interface AutoCheckpointConfig {
   /** 工具执行前存档的工具名白名单（DSH 工具名，见 index.ts 默认 24 工具）。 */
@@ -57,9 +71,9 @@ export interface AutoCheckpointConfig {
   /** 工具执行后存档的工具名白名单。 */
   readonly afterTools: readonly string[]
   readonly messageCheckpoint: {
-    /** pre-step 回合边界存档的消息种类（'user' 有挂点；缺省 ['user']）。 */
+    /** pre-step 回合边界存档的消息种类（'user' 有挂点；缺省 ['user','model']）。 */
     readonly beforeMessages: ReadonlyArray<'user' | 'model'>
-    /** turn-stopping 存档的消息种类（'model' 有挂点；缺省 []）。 */
+    /** turn-stopping 存档的消息种类（'model' 有挂点；'user' 无宿主挂点，缺省 []）。 */
     readonly afterMessages: ReadonlyArray<'user' | 'model'>
     /** 仅根 agent 自动存档（缺省 true）。 */
     readonly modelOuterLayerOnly: boolean
@@ -82,18 +96,21 @@ export interface AutoCheckpointEngineOptions {
 
 /** 自动存档引擎：attach 挂接事件，监听器函数可直接调用（单元测试注入 fake payload）。 */
 export interface AutoCheckpointEngine {
-  /** 在 ctx 上挂接三个事件监听器；返回 detach（index.ts 并入 apply 清理）。 */
+  /** 在 ctx 上挂接事件监听器；返回 detach（index.ts 并入 apply 清理）。 */
   attach(ctx: Context): () => void
   /** `tools/execute` 监听器（beforeTools/afterTools 存档）。 */
   onToolsExecute(exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>): Promise<ToolExecutionResult>
   /** `agent/pre-step` 监听器（user 消息前存档）。 */
   onPreStep(payload: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>
+  /** `agent/request` 监听器（model 消息前存档：beforeMessages 含 'model'）。 */
+  onRequest(payload: RequestPayload, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig>
   /** `agent/turn-stopping` 监听器（model 消息后存档）。 */
   onTurnStopping(payload: TurnStoppingPayload): Promise<void> | void
 }
 
 const TITLE_USER_MESSAGE = 'auto: user message'
 const TITLE_MODEL_MESSAGE = 'auto: model message'
+const TITLE_BEFORE_MODEL_MESSAGE = 'auto: before model message'
 
 /**
  * 创建自动存档引擎（纯函数工厂，无状态挂载：引擎持有 WeakMap 状态，可在多个 ctx
@@ -110,6 +127,7 @@ export function createAutoCheckpointEngine(
   const beforeTools = new Set(config.beforeTools)
   const afterTools = new Set(config.afterTools)
   const beforeUser = config.messageCheckpoint.beforeMessages.includes('user')
+  const beforeModel = config.messageCheckpoint.beforeMessages.includes('model')
   const afterModel = config.messageCheckpoint.afterMessages.includes('model')
   const mergeUnchanged = config.messageCheckpoint.mergeUnchangedCheckpoints
 
@@ -261,6 +279,16 @@ export function createAutoCheckpointEngine(
       return downstream
     })
 
+  /** `agent/request`：模型调用发起前存档（waterfall——先 next() 取回调用配置，快照完成前 waterfall 不返回，落点仍在真实模型调用之前）。 */
+  const onRequest = (payload: RequestPayload, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig> =>
+    runSerialized(payload.agent, async () => {
+      const callConfig = await next()
+      if (beforeModel && shouldArchive(payload.agent)) {
+        await createArchive(payload.agent, TITLE_BEFORE_MODEL_MESSAGE, payload.signal)
+      }
+      return callConfig
+    })
+
   /** `agent/turn-stopping`：模型回合关闭 → afterMessages 含 'model' 时存档。 */
   const onTurnStopping = (payload: TurnStoppingPayload): Promise<void> | void => {
     if (!afterModel || !shouldArchive(payload.agent)) return
@@ -272,6 +300,7 @@ export function createAutoCheckpointEngine(
       const disposers = [
         ctx.on('tools/execute', onToolsExecute),
         ctx.on('agent/pre-step', onPreStep),
+        ctx.on('agent/request', onRequest),
         ctx.on('agent/turn-stopping', onTurnStopping),
       ]
       return () => {
@@ -282,6 +311,7 @@ export function createAutoCheckpointEngine(
     },
     onToolsExecute,
     onPreStep,
+    onRequest,
     onTurnStopping,
   }
 }

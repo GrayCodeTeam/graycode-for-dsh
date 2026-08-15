@@ -14,6 +14,7 @@ import {
   graycodeWorkflowJaPlaceholder,
 } from '../src/client/workflowNode/locales.ts'
 import { GRAYCODE_REROLL_NS } from '../src/client/rerollEdit/locales.ts'
+import { EDIT_ACTION_KIND } from '../src/client/rerollEdit/editNode.ts'
 
 /** Minimal client-context double covering exactly what apply() touches. */
 function makeFakeCtx(options: { sessions?: { open: (sessionId: string) => void } } = {}) {
@@ -68,14 +69,14 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Sixteen namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = thirty-two registrations. Covers the base `graycode` ns,
+    // Seventeen namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = thirty-four registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
     // activity heatmap surface (C6), the notifications surface (C4), the
     // migration scope-map surface (D-1/D-2), the subagent back-to-main
-    // action (S1), the reroll/edit-turn actions (F1/F2), the summarize
-    // action and the settings panel ns.
-    expect(localeRegister).toHaveBeenCalledTimes(32)
+    // action (S1), the reroll/edit-turn actions (F1/F2), the branch-candidate
+    // switcher, the summarize action and the settings panel ns.
+    expect(localeRegister).toHaveBeenCalledTimes(34)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -92,6 +93,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.scopeMap',
       'graycode.subagentBack',
       'graycode.rerollEdit',
+      'graycode.branchSwitch',
       'graycode.summarize',
       'settings.graycode',
     ]) {
@@ -103,7 +105,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers the workflow conversation node Definition', () => {
     const { ctx, conversationEventsRegister } = makeFakeCtx()
     apply(ctx)
-    expect(conversationEventsRegister).toHaveBeenCalledTimes(1)
+    // Two Definitions: the workflow card (P4-01) and the edit-action pencil
+    // node (F2). The workflow one is registered first.
+    expect(conversationEventsRegister).toHaveBeenCalledTimes(2)
     const definition = conversationEventsRegister.mock.calls[0]?.[0] as
       | { kind: string; target: string; match: unknown; start: unknown; update: unknown; buildViewNode: unknown }
       | undefined
@@ -116,13 +120,13 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(typeof definition?.buildViewNode).toBe('function')
   })
 
-  it('ties the Definition disposer to the fiber via ctx.effect', () => {
+  it('ties the Definition disposers to the fiber via ctx.effect', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
-    // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (16 × dict + ja placeholder) plus the
-    // connection/reset refresh subscription = 1 + 32 + 1.
-    expect(effect).toHaveBeenCalledTimes(34)
+    // One ctx.effect per registration disposer: the two Definitions (workflow
+    // + editAction) plus every locale namespace (17 × dict + ja placeholder)
+    // plus the connection/reset refresh subscription = 2 + 34 + 1.
+    expect(effect).toHaveBeenCalledTimes(37)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -233,29 +237,28 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(() => options?.inject?.().open('session-parent')).not.toThrow()
   })
 
-  it('registers the regenerate action into assistant-actions (F1)', () => {
-    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open: () => {} } })
+  it('registers the edit pencil into the keyed chat node seat (F2, beside the user message)', () => {
+    const { ctx, slotInject, slotRegister } = makeFakeCtx()
     apply(ctx)
-    expect(slotInject).toHaveBeenCalledWith('conversation.chat.assistant-actions', expect.any(Function))
-    const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.chat.assistant-actions')
-    expect(actionCall).toBeDefined()
-    const options = actionCall?.[0] as {
-      id?: string
-      order?: number
+    expect(slotInject).toHaveBeenCalledWith('conversation.chat.node', expect.any(Function))
+    const nodeCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.chat.node')
+    expect(nodeCall).toBeDefined()
+    const options = nodeCall?.[0] as {
+      key?: string
       locale?: string
-      inject?: () => { remote: unknown; open?: (sessionId: string) => void }
+      inject?: () => { remote: unknown; onCommitted?: () => void }
     }
-    expect(options.id).toBe('graycode.regenerate')
-    expect(options.order).toBe(20)
+    // The payload kind merges into ChatNodeDataMap; the keyed entry anchors a
+    // pencil right after each user message.
+    expect(options.key).toBe('graycode.editAction')
     expect(options.locale).toBe(GRAYCODE_REROLL_NS)
-    // The injected seat carries the /graycode remote dispatcher and (with the
-    // sessions service present) the branch-session navigator.
     expect(typeof options.inject?.().remote).toBe('function')
-    expect(typeof options.inject?.().open).toBe('function')
+    expect(typeof options.inject?.().onCommitted).toBe('function')
   })
 
-  it('registers the edit-turn seat into the turn-tail chain (F2)', () => {
-    const { ctx, slotInject, slotRegister } = makeFakeCtx()
+  it('registers the branch switcher into the turn-tail chain (regenerate lives on the user-message row)', () => {
+    const open = vi.fn()
+    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open } })
     apply(ctx)
     expect(slotInject).toHaveBeenCalledWith('conversation.chat.turnTail', expect.any(Function))
     const chainCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.chat.turnTail')
@@ -263,13 +266,57 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const options = chainCall?.[0] as {
       locale?: string
       select?: (owner: { turn: { turn: number } }) => unknown
-      inject?: () => { remote: unknown }
+      inject?: () => { remote: unknown; open?: (sessionId: string) => void; branchT: unknown }
     }
     expect(options.locale).toBe(GRAYCODE_REROLL_NS)
     expect(typeof options.inject?.().remote).toBe('function')
     // The chain selector hands the completed turn's session turn number to
     // the entry as `matched`.
     expect(options.select?.({ turn: { turn: 3 } })).toEqual({ turn: 3 })
+    // The injected seat carries the /graycode remote dispatcher, the
+    // branch-session navigator, and the switcher's bound translate seat.
+    expect(typeof options.inject?.().open).toBe('function')
+    expect(typeof options.inject?.().branchT).toBe('function')
+    options.inject?.().open?.('session-branch')
+    expect(open).toHaveBeenCalledWith('session-branch')
+  })
+
+  it('registers the user-message action row (edit pencil + regenerate) with the branch navigator', () => {
+    const open = vi.fn()
+    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open } })
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('conversation.chat.node', expect.any(Function))
+    const nodeCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string; key?: string }).name === 'conversation.chat.node' && (call[0] as { key?: string }).key === EDIT_ACTION_KIND)
+    expect(nodeCall).toBeDefined()
+    const options = nodeCall?.[0] as {
+      locale?: string
+      inject?: () => { remote: unknown; open?: (sessionId: string) => void; onCommitted?: () => void }
+    }
+    expect(options.locale).toBe(GRAYCODE_REROLL_NS)
+    expect(typeof options.inject?.().remote).toBe('function')
+    expect(typeof options.inject?.().open).toBe('function')
+    expect(typeof options.inject?.().onCommitted).toBe('function')
+    options.inject?.().open?.('session-branch')
+    expect(open).toHaveBeenCalledWith('session-branch')
+  })
+
+  it('registers the session-level branch switcher into the header actions', () => {
+    const open = vi.fn()
+    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open } })
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
+    const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string; id?: string }).name === 'conversation.session.header.actions' && (call[0] as { id?: string }).id === 'graycode.branch-switch')
+    expect(actionCall).toBeDefined()
+    const options = actionCall?.[0] as {
+      order?: number
+      locale?: string
+      inject?: () => { remote: unknown; open?: (sessionId: string) => void }
+    }
+    expect(options.order).toBe(40)
+    expect(options.locale).toBe('graycode.branchSwitch')
+    expect(typeof options.inject?.().remote).toBe('function')
+    options.inject?.().open?.('session-candidate')
+    expect(open).toHaveBeenCalledWith('session-candidate')
   })
 })
 

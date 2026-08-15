@@ -4,7 +4,8 @@
  * - golden：`BUILTIN_MODE_TEMPLATES` 与旧版 `backend/modules/settings/promptModes.ts`
  *   的五个内置模板逐字节一致（旧仓库为 CRLF，本仓库为 LF；JS 模板字面量的
  *   cooked 值会把 CRLF 归一化为 LF，因此两侧最终文本字节一致）。
- * - 种子 store 的模板就是对齐后的内置模板。
+ * - 种子 store 的模板就是对齐后的内置模板；每个内置模式种子自带一个
+ *   chat_history 定位条目（原项目默认行为，ensureChatHistoryPromptEntry）。
  * - 渲染冒烟：旧模板携带的 `{{$MODULE}}` 占位符在新渲染管道下的行为
  *   （ENVIRONMENT 由注入层提供值；TOOLS/MEMORY 未提供值时替换为确定性
  *   "not available in DSH" 说明；MCP_TOOLS / CONTEXT_BADGE_FORMAT 被确定性
@@ -79,14 +80,26 @@ describe('内置 5 模式模板对齐 Gray Code 1.5.4（D-1 / H1）', () => {
     }
   })
 
-  test('种子 store 使用对齐后的内置模板', async () => {
+  test('种子 store 使用对齐后的内置模板，且每个内置模式自带一个 chat_history 定位条目', async () => {
     tmpDir = await mkdtemp(path.join(os.tmpdir(), 'graycode-prompt-'))
     const service = new PromptSettingsService({ dataRoot: tmpDir })
     await service.getCurrentMode() // 触发 lazy load + seed
     const modes = await service.listModes()
     expect(modes).toHaveLength(BUILTIN_MODE_IDS.length)
     for (const mode of modes) {
-      expect(mode.template).toBe(BUILTIN_MODE_TEMPLATES[mode.id as (typeof BUILTIN_MODE_IDS)[number]])
+      // D-1 审计（字节级对齐）目标迁移：内置模板文本原样进入「系统提示词」
+      // system 条目（渲染等价：模板 + system 条目拼接，模板清空后即条目内容）。
+      expect(mode.template).toBe('')
+      const systemEntry = mode.promptEntries.find(entry => entry.role === 'system')
+      expect(systemEntry?.content).toBe(BUILTIN_MODE_TEMPLATES[mode.id as (typeof BUILTIN_MODE_IDS)[number]])
+      // 原项目默认行为：三件套骨架 [system, Chat History, 动态上下文]
+      expect(mode.promptEntries.map(entry => entry.role)).toEqual(['system', 'chat_history', 'user'])
+      expect(mode.promptEntries[1]).toMatchObject({
+        id: 'chat-history',
+        name: 'Chat History',
+        enabled: true,
+        content: '',
+      })
     }
   })
 

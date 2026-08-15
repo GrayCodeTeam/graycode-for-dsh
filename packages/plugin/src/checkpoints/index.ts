@@ -65,16 +65,16 @@ export interface Config {
   autoCheckpoint?: boolean
   /** 7 个 checkpoint 模型工具开关（缺省 true；false → 工具不注册，自动存档仍可用）。 */
   modelToolsEnabled?: boolean
-  /** 工具执行前自动存档的工具名白名单（缺省 DSH 版 24 工具，见 DEFAULT_AUTO_CHECKPOINT_TOOLS）。 */
+  /** 工具执行前自动存档的工具名白名单（缺省 = 执行命令前/删除前，见 DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS）。 */
   beforeTools?: string[]
-  /** 工具执行后自动存档的工具名白名单（缺省同上）。 */
+  /** 工具执行后自动存档的工具名白名单（缺省 = 写入后/应用差异后，见 DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS）。 */
   afterTools?: string[]
   /** 消息边界自动存档配置（缺省见各字段）。 */
   messageCheckpoint?: MessageCheckpointConfig
 }
 
 /**
- * 默认 beforeTools/afterTools（DSH 版 24 工具）：
+ * 默认 beforeTools/afterTools（DSH 版 24 工具全集）：
  * - 7 个 DSH host 内建工具（deepseek-harness 源码核实）：write / edit /
  *   str_replace_editor / bash / pwsh / grep / glob；
  * - 本插件注册工具（modeToolsPolicy 白名单同名核实）：delete_code（file 域）、
@@ -109,6 +109,18 @@ export const DEFAULT_AUTO_CHECKPOINT_TOOLS: readonly string[] = [
   'reopen_review',
 ]
 
+/**
+ * 默认「执行前」白名单（用户指定：只勾 执行命令前 + 删除前）：
+ * bash / pwsh（执行命令前）、delete_code（删除前）。写入/差异类默认只在执行后存档。
+ */
+export const DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS: readonly string[] = ['bash', 'pwsh', 'delete_code']
+
+/**
+ * 默认「执行后」白名单（用户指定：只勾 写入后 + 应用差异后）：
+ * write（写入后）、edit / str_replace_editor（应用差异后）。
+ */
+export const DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS: readonly string[] = ['write', 'edit', 'str_replace_editor']
+
 const MESSAGE_KIND_SCHEMA = z.union(['user', 'model'] as const)
 
 export const Config: z<Config> = z.object({
@@ -123,17 +135,17 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   autoCheckpoint: z.boolean().default(true),
   modelToolsEnabled: z.boolean().default(true),
-  beforeTools: z.array(z.string()).default([...DEFAULT_AUTO_CHECKPOINT_TOOLS]),
-  afterTools: z.array(z.string()).default([...DEFAULT_AUTO_CHECKPOINT_TOOLS]),
+  beforeTools: z.array(z.string()).default([...DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS]),
+  afterTools: z.array(z.string()).default([...DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS]),
   messageCheckpoint: z
     .object({
-      beforeMessages: z.array(MESSAGE_KIND_SCHEMA).default(['user']),
+      beforeMessages: z.array(MESSAGE_KIND_SCHEMA).default(['user', 'model']),
       afterMessages: z.array(MESSAGE_KIND_SCHEMA).default([]),
       modelOuterLayerOnly: z.boolean().default(true),
       mergeUnchangedCheckpoints: z.boolean().default(true),
     })
     .default({
-      beforeMessages: ['user'],
+      beforeMessages: ['user', 'model'],
       afterMessages: [],
       modelOuterLayerOnly: true,
       mergeUnchangedCheckpoints: true,
@@ -144,10 +156,10 @@ export const Config: z<Config> = z.object({
 export function resolveAutoCheckpointConfig(config: Config): AutoCheckpointConfig {
   const messageCheckpoint = config.messageCheckpoint ?? {}
   return {
-    beforeTools: config.beforeTools ?? DEFAULT_AUTO_CHECKPOINT_TOOLS,
-    afterTools: config.afterTools ?? DEFAULT_AUTO_CHECKPOINT_TOOLS,
+    beforeTools: config.beforeTools ?? DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS,
+    afterTools: config.afterTools ?? DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS,
     messageCheckpoint: {
-      beforeMessages: messageCheckpoint.beforeMessages ?? ['user'],
+      beforeMessages: messageCheckpoint.beforeMessages ?? ['user', 'model'],
       afterMessages: messageCheckpoint.afterMessages ?? [],
       modelOuterLayerOnly: messageCheckpoint.modelOuterLayerOnly ?? true,
       mergeUnchangedCheckpoints: messageCheckpoint.mergeUnchangedCheckpoints ?? true,

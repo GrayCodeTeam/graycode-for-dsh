@@ -1,7 +1,7 @@
 /** Standalone defaults used by settings-domain unit tests. */
 
 import type { GrayCodeConfig } from './types.ts'
-import { DEFAULT_AUTO_CHECKPOINT_TOOLS } from '../checkpoints/index.ts'
+import { DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS, DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS } from '../checkpoints/index.ts'
 import { DEFAULT_IMAGE_API_URL, DEFAULT_IMAGE_MODEL } from '../images/domain/types.ts'
 import { DEFAULT_KEEP_RECENT_ROUNDS, DEFAULT_KEEP_RECENT_TOKENS } from '../summary/policy.ts'
 
@@ -20,10 +20,10 @@ export const DEFAULTS: GrayCodeConfig = {
     enabled: true,
     autoCheckpoint: true,
     modelToolsEnabled: true,
-    beforeTools: [...DEFAULT_AUTO_CHECKPOINT_TOOLS],
-    afterTools: [...DEFAULT_AUTO_CHECKPOINT_TOOLS],
+    beforeTools: [...DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS],
+    afterTools: [...DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS],
     messageCheckpoint: {
-      beforeMessages: ['user'],
+      beforeMessages: ['user', 'model'],
       afterMessages: [],
       modelOuterLayerOnly: true,
       mergeUnchangedCheckpoints: true,
@@ -48,7 +48,7 @@ export const DEFAULTS: GrayCodeConfig = {
   media: { enabled: true, agentScope: 'roots', maxBatch: 10 },
   file: { enabled: true, agentScope: 'roots' },
   todo: { enabled: true, agentScope: 'roots' },
-  subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
+  subagents: { maxHopDepth: 5, maxConcurrent: 3, queueTimeoutSeconds: 600, defaultMaxRuntimeSeconds: 1800, customAgents: [] },
   notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
   thoughts: { enabled: true, sendHistoryThoughts: true },
   images: {

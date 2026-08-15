@@ -270,6 +270,7 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.scopeMap',
   'graycode.subagentBack',
   'graycode.rerollEdit',
+  'graycode.branchSwitch',
   'graycode.summarize',
   'settings.graycode',
 ]
@@ -418,8 +419,8 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     await flushMicrotasks()
     expect(harness.definitions).toHaveLength(once * 2)
     // Every namespace stays a single map key across both applies (dict + ja
-    // placeholder accumulate inside it) — exactly the thirteen namespaces,
-    // not a best-effort "at least" floor (3.18-M2).
+    // placeholder accumulate inside it) — exactly the EXPECTED_LOCALE_NS
+    // namespaces, not a best-effort "at least" floor (3.18-M2).
     expect(harness.locale.size).toBe(EXPECTED_LOCALE_NS.length)
   })
 
@@ -428,9 +429,11 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     for (let cycle = 0; cycle < 3; cycle++) {
       apply(harness.ctx)
       await flushMicrotasks()
-      // Exactly one definition per apply (the workflow Definition is the only
-      // conversationEvents.register) — precise count, not a presence floor.
-      expect(harness.definitions).toHaveLength(1)
+      // Exactly two definitions per apply (the workflow card Definition and
+      // the editAction pencil node Definition are the only
+      // conversationEvents.register calls) — precise count, not a presence
+      // floor.
+      expect(harness.definitions).toHaveLength(2)
       harness.unload()
       expect(harness.definitions).toHaveLength(0)
     }
@@ -479,17 +482,19 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
     await flushMicrotasks()
-    // Six injections: the shell.overlay marker, the settings.section entry,
-    // the subagent back-to-main header action, the F1/F2 regenerate/edit-turn
-    // seats (conversation.chat.assistant-actions + conversation.chat.turnTail)
-    // and the summarize header action (conversation.session.header.actions).
-    expect(harness.overlayEntries).toHaveLength(6)
+    // Seven injections: the shell.overlay marker, the settings.section entry,
+    // the subagent back-to-main header action, the F2 edit pencil keyed node
+    // seat (conversation.chat.node), the F1 turn-tail composite
+    // (conversation.chat.turnTail), the session-level branch switcher header
+    // action (conversation.session.header.actions) and the summarize header
+    // action (conversation.session.header.actions).
+    expect(harness.overlayEntries).toHaveLength(7)
     // Declaration teardown calls the inject disposer (apply() leaves it to the
     // declaration lifetime by design — see the index.ts comment).
     const injectDisposer = harness.slotInject.mock.results[0]?.value as () => void
     expect(typeof injectDisposer).toBe('function')
     injectDisposer()
-    expect(harness.overlayEntries).toHaveLength(5)
+    expect(harness.overlayEntries).toHaveLength(6)
 
     // Fiber unload alone does NOT remove the injection while the declaration
     // lives — documented declaration-lifetime semantics.
@@ -498,6 +503,6 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     await flushMicrotasks()
     other.unload()
     expect(other.definitions).toHaveLength(0)
-    expect(other.overlayEntries).toHaveLength(6)
+    expect(other.overlayEntries).toHaveLength(7)
   })
 })

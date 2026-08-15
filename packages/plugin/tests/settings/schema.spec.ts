@@ -14,7 +14,7 @@ describe('GrayCode native settings schema', () => {
     expect(GrayCodeSchema()).toEqual(DEFAULTS)
     expect(Object.keys(GrayCodeSchema()).sort()).toEqual(Object.keys(DEFAULTS).sort())
     expect(GrayCodeSchema().checkpoints.restoreProtectionPoint).toBe(true)
-    expect(GrayCodeSchema().subagents.maxConcurrent).toBe(2)
+    expect(GrayCodeSchema().subagents.maxConcurrent).toBe(3)
   })
 
   it('reuses the authoritative child-plugin schemas', () => {

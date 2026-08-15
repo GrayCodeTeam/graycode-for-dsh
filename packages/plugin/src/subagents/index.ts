@@ -14,7 +14,11 @@
  * 三个缺口：
  * - G1 maxHopDepth（默认 5，老 Gray MAX_HOP_DEPTH）：followup/reportFrom 外层 hop 熔断；
  * - G2 任意寻址：DSH reportFrom 仅直接父代理（能力边界），sendToAgent fail-closed；
- * - G3 maxConcurrent（默认 2，老 Gray subagents.maxConcurrent）：委派前并发上限检查。
+ * - G3 maxConcurrent（默认 3，对齐老 Gray subagents.maxConcurrentAgents=3）：委派前
+ *   并发上限检查，超出的进入每父会话 FIFO 队列等待（老 Gray 全局配置语义）：
+ *   queueTimeoutSeconds 排队超时（默认 600，-1 不限，超时以失败结算）、
+ *   defaultMaxRuntimeSeconds 默认运行时间（默认 1800，-1 不限，到时 dispose run 句柄
+ *   取消并失败结算；continuable 无取消句柄，不适用）。
  * 0 均表示关闭对应守卫。
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -37,10 +41,25 @@ export interface Config {
    */
   maxHopDepth: number
   /**
-   * G3：每父会话同时运行子代理上限（老 Gray settings subagents.maxConcurrent
-   * 默认 2）。超限拒绝新委派并说明。0 = 不限。
+   * G3：每父会话同时运行子代理上限（对齐老 Gray settings
+   * subagents.maxConcurrentAgents 默认 3）。超出的新委派进入每父会话 FIFO 队列
+   * 等待名额释放（排队而不是拒绝）。0 = 不限（不排队）。
    */
   maxConcurrent: number
+  /**
+   * G3：排队等待并发名额的超时（秒，对齐老 Gray subagents.queueTimeoutSeconds
+   * 默认 600）。排队超过该时长的委派以失败结算（SubagentQueueTimeoutError，
+   * 委派未启动）。-1 = 无限等待。
+   */
+  queueTimeoutSeconds: number
+  /**
+   * G3：one-shot 委派的默认最大运行时间（秒，对齐老 Gray
+   * subagents.defaultMaxRuntimeSeconds 默认 1800）。到时 dispose run 句柄（seam
+   * 公开取消手段）→ 以非 completed stopReason 失败结算。-1 = 不限。
+   * continuable 子代理无 run 句柄（宿主 continuation manager 持有全生命周期，
+   * 无取消口），不适用本项。
+   */
+  defaultMaxRuntimeSeconds: number
   /**
    * S2 自定义子代理：每个 enabled 条目注册一个委托给宿主 `spawn` 的 provider
    * 与一个模型可见工具（`subagent_<name>`，身份 = 名称/描述/systemPrompt）。
@@ -59,7 +78,9 @@ const customAgentSchema = z.object({
 
 export const Config: z<Config> = z.object({
   maxHopDepth: z.number().step(1).min(0).default(5),
-  maxConcurrent: z.number().step(1).min(0).default(2),
+  maxConcurrent: z.number().step(1).min(0).default(3),
+  queueTimeoutSeconds: z.number().step(1).min(-1).default(600),
+  defaultMaxRuntimeSeconds: z.number().step(1).min(-1).default(1800),
   customAgents: z.array(customAgentSchema).default([]),
 })
 
@@ -107,6 +128,8 @@ export function apply(ctx: Context, config: Config): void {
     {
       maxHopDepth: config.maxHopDepth,
       maxConcurrent: config.maxConcurrent,
+      queueTimeoutSeconds: config.queueTimeoutSeconds,
+      defaultMaxRuntimeSeconds: config.defaultMaxRuntimeSeconds,
       countRunning: countRunningChildrenViaList(seam),
       isRootSession: (id) => ctx.agents.roots().some((root) => String(root.id) === id),
       logger: { warn: (message) => ctx.logger.warn(message) },

@@ -1,41 +1,20 @@
 /**
- * Edit user message (F2).
+ * 编辑用户消息弹窗（F2 的对话框部分，供 EditUserAction 复用）。
  *
- * Registered into the host's additive `conversation.chat.turnTail` chain slot
- * (rendered per completed turn, before the closing assistant's IconActions):
- * the chain selector hands the completed turn's session turn number as
- * `matched`, the editable user message of that turn is resolved from the
- * conversation snapshot via {@link editTargetOfTurn}, and the click opens a
- * lightweight modal (textarea prefilled with the original text + confirm /
- * cancel — the same inline-style scrim/dialog pattern as the memory edit
- * overlay). Confirm calls the plugin's `branches/editRetry` endpoint through
- * the trusted `/graycode` remote dispatcher; an endpoint error stays inside
- * the dialog (readable warning + console.warn), never silent.
+ * 轻量模态：textarea 预填原用户消息 + 确认/取消（与 memory 编辑浮层相同的
+ * 内联样式 scrim/dialog 模式）。确认调用插件的 `branches/editRetry` 端点
+ * （可信 `/graycode` remote 通道）；端点错误留在弹窗内可读展示（warning +
+ * console.warn），绝不静默。成功后关闭弹窗并回调 `onCommitted`（分支候选
+ * 缓存失效，让切换器立即看到新候选）。
  *
- * The component is a thin presentational shell: the turn → message mapping
- * lives in the pure {@link editTargetOfTurn} reader, so the node-environment
- * tests cover the decision logic without React.
+ * 本文件只保留弹窗本体与共享样式；F2 的入口按钮（原 turnTail 链壳）已由
+ * 贴近用户消息的 EditUserAction（key 化 chat 节点渲染器）取代。
  */
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { GrayRemoteInvoke } from '../settings/types.ts'
-import { editTargetOfTurn, isNoPreviousTurnFailure, type EditSnapshotLike } from './logic.ts'
-
-const buttonStyle: CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '0.25rem',
-  padding: '0.125rem 0.5rem',
-  borderRadius: '0.25rem',
-  border: '1px solid var(--dsh-border-color, #333)',
-  background: 'transparent',
-  color: 'inherit',
-  fontSize: '11px',
-  lineHeight: '1.6',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-}
+import { isNoPreviousTurnFailure } from './logic.ts'
 
 const scrimStyle: CSSProperties = {
   position: 'fixed',
@@ -132,70 +111,6 @@ const actionDisabledStyle: CSSProperties = {
   cursor: 'not-allowed',
 }
 
-function PencilIcon({ size = 12 }: { size?: number }): ReactNode {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z" />
-      <path d="M13.5 6.5l3 3" />
-    </svg>
-  )
-}
-
-/** Injected seat: the `/graycode` remote dispatcher. */
-export interface EditTurnInjected {
-  readonly remote: GrayRemoteInvoke
-}
-
-export interface EditTurnButtonProps extends EditTurnInjected {
-  /** Chain selector result: the completed turn's session turn number. */
-  readonly matched: { readonly turn: number }
-  /** Framework-injected current session id. */
-  readonly sessionId: string
-  /** Framework-injected conversation snapshot selector. */
-  readonly useSession: <T>(selector: (state: EditSnapshotLike) => T) => T
-  /** Framework-injected translate seat for the `graycode.rerollEdit` namespace. */
-  readonly t: TranslateNS<'graycode.rerollEdit'>
-}
-
-/** Edit action for one completed turn (renders nothing when its user message is unresolvable). */
-export function EditTurnButton({ matched, sessionId, useSession, remote, t }: EditTurnButtonProps): ReactNode {
-  const snapshot = useSession((state) => state)
-  const target = editTargetOfTurn(snapshot, matched.turn)
-  const [open, setOpen] = useState(false)
-
-  if (target === undefined) return null
-
-  return (
-    <>
-      <button type="button" data-graycode-reroll="edit-turn" style={buttonStyle} onClick={() => setOpen(true)}>
-        <PencilIcon size={12} />
-        <span>{t('edit.label')}</span>
-      </button>
-      {open && (
-        <EditTurnOverlay
-          key={`${sessionId}:${matched.turn}`}
-          t={t}
-          sessionId={sessionId}
-          turn={matched.turn}
-          initialText={target.text}
-          remote={remote}
-          onClose={() => setOpen(false)}
-        />
-      )}
-    </>
-  )
-}
-
 export interface EditTurnOverlayProps {
   t: TranslateNS<'graycode.rerollEdit'>
   sessionId: string
@@ -203,13 +118,15 @@ export interface EditTurnOverlayProps {
   /** Original user message text (the textarea prefill). */
   initialText: string
   remote: GrayRemoteInvoke
+  /** editRetry 成功后的回调（分支候选缓存失效等）。 */
+  onCommitted?: () => void
   onClose: () => void
 }
 
 type EditPhase = 'idle' | 'working' | 'failed'
 
 /** Modal edit dialog: textarea + confirm/cancel; failures stay visible. */
-export function EditTurnOverlay({ t, sessionId, turn, initialText, remote, onClose }: EditTurnOverlayProps): ReactNode {
+export function EditTurnOverlay({ t, sessionId, turn, initialText, remote, onCommitted, onClose }: EditTurnOverlayProps): ReactNode {
   const [text, setText] = useState(initialText)
   const [phase, setPhase] = useState<EditPhase>('idle')
   const [failure, setFailure] = useState<string | null>(null)
@@ -224,6 +141,7 @@ export function EditTurnOverlay({ t, sessionId, turn, initialText, remote, onClo
     try {
       const result = await remote('branches', 'editRetry', { sessionId, turn, text })
       if (result.ok) {
+        if (onCommitted !== undefined) onCommitted()
         onClose()
         return
       }

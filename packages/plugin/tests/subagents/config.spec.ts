@@ -2,8 +2,10 @@
  * subagents 薄适配层 - Config（Schemastery）校验测试
  *
  * 断言 root Config 嵌套 `subagents: subagents.Config` 的默认值与边界：
- * - maxHopDepth 默认 5（老 Gray MAX_HOP_DEPTH），maxConcurrent 默认 2（老 Gray
- *   subagents.maxConcurrent）；0 表示关闭对应守卫；
+ * - maxHopDepth 默认 5（老 Gray MAX_HOP_DEPTH），maxConcurrent 默认 3（老 Gray
+ *   subagents.maxConcurrentAgents=3），queueTimeoutSeconds 默认 600（老 Gray
+ *   subagents.queueTimeoutSeconds），defaultMaxRuntimeSeconds 默认 1800（老 Gray
+ *   subagents.defaultMaxRuntimeSeconds）；0/-1 语义见各字段注释；
  * - customAgents 默认空数组（S2 自定义子代理）；
  * - 负值 / 非整数被 schemastery 拒绝；customAgents 条目缺 id/name 被拒绝。
  */
@@ -11,14 +13,32 @@ import { describe, expect, it } from 'vitest'
 import { Config, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
 
 describe('subagents Config（Schemastery）', () => {
-  it('缺省：maxHopDepth=5（老 Gray MAX_HOP_DEPTH）、maxConcurrent=2（老 Gray subagents.maxConcurrent）、customAgents=[]', () => {
-    expect(Config({} as SubagentsConfig)).toEqual({ maxHopDepth: 5, maxConcurrent: 2, customAgents: [] })
+  it('缺省：maxHopDepth=5、maxConcurrent=3、queueTimeoutSeconds=600、defaultMaxRuntimeSeconds=1800、customAgents=[]', () => {
+    expect(Config({} as SubagentsConfig)).toEqual({
+      maxHopDepth: 5,
+      maxConcurrent: 3,
+      queueTimeoutSeconds: 600,
+      defaultMaxRuntimeSeconds: 1800,
+      customAgents: [],
+    })
   })
 
   it('显式覆盖生效', () => {
-    expect(Config({ maxHopDepth: 3, maxConcurrent: 4 } as SubagentsConfig)).toEqual({ maxHopDepth: 3, maxConcurrent: 4, customAgents: [] })
-    // 0 = 关闭对应守卫。
-    expect(Config({ maxHopDepth: 0, maxConcurrent: 0 } as SubagentsConfig)).toEqual({ maxHopDepth: 0, maxConcurrent: 0, customAgents: [] })
+    expect(Config({ maxHopDepth: 3, maxConcurrent: 4 } as SubagentsConfig)).toEqual({
+      maxHopDepth: 3,
+      maxConcurrent: 4,
+      queueTimeoutSeconds: 600,
+      defaultMaxRuntimeSeconds: 1800,
+      customAgents: [],
+    })
+    // 0 = 关闭对应守卫（并发/排队/预算均不限）。
+    expect(Config({ maxHopDepth: 0, maxConcurrent: 0, queueTimeoutSeconds: -1, defaultMaxRuntimeSeconds: -1 } as SubagentsConfig)).toEqual({
+      maxHopDepth: 0,
+      maxConcurrent: 0,
+      queueTimeoutSeconds: -1,
+      defaultMaxRuntimeSeconds: -1,
+      customAgents: [],
+    })
   })
 
   it('负值 / 非整数被拒绝', () => {

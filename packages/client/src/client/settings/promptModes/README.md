@@ -10,10 +10,10 @@ Connection RPC 通道的 `prompt` Remote 命名空间操作宿主
 | --- | --- |
 | `types.ts` | 宿主契约的结构性客户端镜像（PromptMode / PromptEntry / 结果形状）+ 防御性 `read*` 收窄（wire 是 `unknown`，不信任形状） |
 | `api.ts` | `createPromptModesTransport`：把 `GrayRemoteInvoke` 包装成类型化 transport；端点名逐字（`modes.list` 等）；业务错误以信封返回，绝不 throw |
-| `logic.ts` | 纯函数（无 React / 无 I/O）：条目排序/移动/增删改、校验、保存 payload 构造、toolPolicy 文本转换与预置清单、导入导出 JSON 解析/序列化、create/save patch 构造 |
+| `logic.ts` | 纯函数（无 React；`readImportFileText` 只依赖结构化 `{ text() }`）：条目排序/移动/增删改、校验、保存 payload 构造、toolPolicy 文本转换与预置清单、导入导出 JSON 解析/序列化、导入文件文本读取、create/save patch 构造 |
 | `PromptModeManager.tsx` | 模式列表（当前高亮）/ 切换 / CRUD / 导入导出 / 编辑器挂载；每次变更后重新拉取列表（list→edit→save→list 一致） |
 | `ModeEditor.tsx` | 单模式编辑草稿：名称（内置禁改）、主模板 textarea、entries 编辑器、toolPolicy 编辑器、保存/取消 |
-| `EntriesEditor.tsx` | 预设条目列表：启用开关、角色（chat_history 固定）、content 多行、assistant 的 fakeThought、上移/下移/删除、底部新增（选角色） |
+| `EntriesEditor.tsx` | 预设条目列表：启用开关、角色（chat_history 固定）、content 多行、assistant 的 fakeThought、上移/下移/删除、底部新增（选角色 + 专用「插入 Chat History 占位」按钮；宿主保证每模式恰好一个标记条目，已存在时按钮禁用） |
 | `ToolPolicyEditor.tsx` | 「自定义工具策略」toggle + 工具名 textarea（每行一个）+ 「全选常用工具」预置并集 |
 
 ## 关键不变量
@@ -21,6 +21,9 @@ Connection RPC 通道的 `prompt` Remote 命名空间操作宿主
 - **内置模式保护**：`kind === 'builtin'` 的模式（code/design/plan/ask/review）在 UI
   上禁删、名称禁改（host 侧 `updateMode` 对 builtin 改名会抛
   `GRAY_PROMPT_BUILTIN_IMMUTABLE`，UI 先于 RPC 拦截）。
+- **Chat History 恒在**：宿主对每个模式（load/create/update/import 与内置种子）归一化
+  保证恰好一个 chat_history 定位条目（无则自动补 `chat-history`，多则只留第一个，
+  内容强制为空）；编辑器的「插入 Chat History 占位」按钮在已存在标记时禁用。
 - **toolPolicy 语义**：`toolPolicyCustomized` 开 → patch 携带解析后的
   `toolPolicy`；关 → patch **省略** `toolPolicy` 键（host 语义：缺省 = 使用内置
   默认策略，即“未自定义 ⇒ toolPolicy undefined”）。

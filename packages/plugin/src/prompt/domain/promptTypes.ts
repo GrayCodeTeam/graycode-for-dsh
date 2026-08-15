@@ -68,6 +68,47 @@ export const BUILTIN_MODE_IDS = ['code', 'design', 'plan', 'ask', 'review'] as c
 
 export type BuiltinModeId = (typeof BUILTIN_MODE_IDS)[number]
 
+/**
+ * 固定的 chat_history 定位条目 id（对齐原项目 1.5.4
+ * backend/modules/settings/types/promptTypes.ts:63）。每个模式经归一化后
+ * 恰好携带一个 chat_history 条目（service.ensureChatHistoryPromptEntry），
+ * 自动补齐时使用本 id。
+ */
+export const CHAT_HISTORY_PROMPT_ENTRY_ID = 'chat-history'
+
+/**
+ * 默认动态上下文条目内容（原项目 DEFAULT_DYNAMIC_CONTEXT_TEMPLATE 的移植裁剪：
+ * 仅保留本移植注入器可解析的 TODO_LIST / MEMORY 占位符——不可解析的旧模块会
+ * 渲染成确定性提示文本）。镜像于 client 侧 promptModes/logic.ts 的同名常量。
+ */
+export const DEFAULT_DYNAMIC_CONTEXT_TEMPLATE = `This is the current turn's dynamic context information you can use. It may change between turns. Continue with the previous task if the information is not needed and ignore it.
+
+{{$TODO_LIST}}
+
+{{$MEMORY}}`
+
+/**
+ * 默认「系统提示词」条目内容（原项目 DEFAULT_SYSTEM_PROMPT_TEMPLATE 的移植
+ * 裁剪：仅保留可解析的 {{$ENVIRONMENT}}）。镜像于 client 侧 promptModes/
+ * logic.ts 的 DEFAULT_MINIMAL_SYSTEM_TEMPLATE。
+ */
+export const DEFAULT_MINIMAL_SYSTEM_PROMPT = `You are a professional programming assistant, proficient in multiple programming languages and frameworks.
+
+{{$ENVIRONMENT}}
+
+====
+
+GUIDELINES
+
+- Use the provided tools to complete tasks. Tools can help you read files, search code, execute commands, and modify files.
+- **IMPORTANT: Avoid blind duplicate tool calls.** Do not repeat the same failed call with identical parameters unless another tool call, a code change, or an external state change could reasonably affect the result. Re-running checks after relevant changes is allowed.
+- When you need to understand the codebase, use read_file to examine specific files or search_in_files to find specific code patterns.
+- For complex, multi-step work, use todo_write once to initialize/replace the TODO list, and todo_update for incremental updates (status/content) as you progress.
+- For parallelizable investigations (or when you need to explore multiple areas quickly), use subagents to delegate focused sub-tasks.
+- If the task is simple and doesn't require tools, just respond directly without calling any tools.
+- Always maintain code readability and maintainability.
+- Do not omit any code.`
+
 export function isBuiltinModeId(id: string): boolean {
   return (BUILTIN_MODE_IDS as readonly string[]).includes(id)
 }

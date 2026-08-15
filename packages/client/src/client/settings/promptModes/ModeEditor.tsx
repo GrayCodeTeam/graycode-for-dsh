@@ -3,9 +3,12 @@
  *
  * Edits one mode: name (disabled for builtin modes — the host rejects
  * renames with BUILTIN_IMMUTABLE), the preset entries editor and the tool
- * policy editor. The main template is intentionally NOT editable anymore:
- * preset entries are the only composition surface (aligned with the original
- * Gray Code "entries" assembly mode).
+ * policy editor. The system prompt lives AS AN ENTRY (「系统提示词」in the
+ * default skeleton [system, Chat History, 动态上下文]) — entries are the
+ * only composition surface. The mode template stays internal draft state
+ * with no visible editor: it is sent in the save patch (so「恢复默认条目」
+ * can clear a legacy stored template alongside seeding the default entries,
+ * avoiding double system text) but is not user-editable here.
  *
  * The draft is local state initialized once per mounted mode (the manager
  * remounts the editor via `key={mode.id}`); saving builds the `modes.update`
@@ -17,7 +20,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { GcTranslate } from '../fields.tsx'
-import { buildModeSavePatch, toolPolicyText, validateEntries } from './logic.ts'
+import { buildModeSavePatch, defaultEntries, toolPolicyText, validateEntries } from './logic.ts'
 import type { PromptMode, PromptModePatch } from './types.ts'
 import { EntriesEditor } from './EntriesEditor.tsx'
 import { ToolPolicyEditor } from './ToolPolicyEditor.tsx'
@@ -88,6 +91,7 @@ export const ModeEditor = forwardRef<ModeEditorHandle, ModeEditorProps>(function
 ): ReactNode {
   const builtin = mode.kind === 'builtin'
   const [name, setName] = useState(mode.name)
+  const [template, setTemplate] = useState(mode.template)
   const [entries, setEntries] = useState<PromptEntry[]>(() => structuredClone(mode.promptEntries))
   const [customized, setCustomized] = useState(mode.toolPolicyCustomized === true)
   const [toolsText, setToolsText] = useState(() => toolPolicyText(mode.toolPolicy ?? []))
@@ -96,6 +100,7 @@ export const ModeEditor = forwardRef<ModeEditorHandle, ModeEditorProps>(function
   const issues = useMemo(() => validateEntries(entries), [entries])
 
   const dirty = name !== mode.name
+    || template !== mode.template
     || customized !== (mode.toolPolicyCustomized === true)
     || toolsText !== toolPolicyText(mode.toolPolicy ?? [])
     || !entriesEqual(entries, mode.promptEntries)
@@ -108,6 +113,7 @@ export const ModeEditor = forwardRef<ModeEditorHandle, ModeEditorProps>(function
     if (issues.length > 0) return
     const patch = buildModeSavePatch({
       name,
+      template,
       entries,
       toolPolicyCustomized: customized,
       toolPolicyText: toolsText,
@@ -140,7 +146,16 @@ export const ModeEditor = forwardRef<ModeEditorHandle, ModeEditorProps>(function
         />
         {builtin && <span style={metaStyle}>{t('promptModes.builtinProtected')}</span>}
       </div>
-      <EntriesEditor t={t} entries={entries} onChange={setEntries} />
+      <EntriesEditor
+        t={t}
+        entries={entries}
+        onChange={setEntries}
+        onResetToDefault={() => {
+          setEntries(defaultEntries())
+          // 旧模板里的系统文本与新 system 条目会拼接成双份 —— 一并清空。
+          setTemplate('')
+        }}
+      />
       <ToolPolicyEditor
         t={t}
         customized={customized}

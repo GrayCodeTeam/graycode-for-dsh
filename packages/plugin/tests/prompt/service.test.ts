@@ -35,7 +35,7 @@ async function serviceOf(root: string): Promise<PromptSettingsService> {
 }
 
 describe('内置模式种子', () => {
-  test('首次运行种子化 5 个内置模式，currentModeId 默认 code', async () => {
+  test('首次运行种子化 5 个内置模式，currentModeId 默认 code；每个内置模式自带一个 chat_history 条目', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
     const modes = await service.listModes()
@@ -43,13 +43,82 @@ describe('内置模式种子', () => {
     for (const mode of modes) {
       expect(mode.kind).toBe('builtin')
       expect(mode.name).toBe(mode.id)
-      expect(mode.template.length).toBeGreaterThan(0)
+      // 预设条目承载全部内容：模板清空，system 条目 = 原内置模板文本
+      // （渲染等价：renderModeSectionText = 模板 + system 条目拼接）。
+      expect(mode.template).toBe('')
+      expect(mode.promptEntries.map(entry => [entry.role, entry.order, entry.name])).toEqual([
+        ['system', 0, '系统提示词'],
+        ['chat_history', 1, 'Chat History'],
+        ['user', 2, '动态上下文'],
+      ])
+      expect(mode.promptEntries[0]!.content.length).toBeGreaterThan(0)
+      expect(mode.promptEntries[1]).toMatchObject({ id: 'chat-history', enabled: true, content: '' })
+      expect(mode.promptEntries[2]!.content).toContain('{{$TODO_LIST}}')
     }
     expect((await service.getCurrentMode()).id).toBe('code')
     // 种子已持久化
     const raw = JSON.parse(await readFile(storePath(root), 'utf8'))
     expect(raw.version).toBe(1)
     expect(raw.modes).toHaveLength(5)
+  })
+
+  test('ensureChatHistoryPromptEntry：无标记自动补（order 排末位）、多标记只留第一个、内容强制为空、order 重编号', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+
+    // create：新模式自动补标记（id 固定 chat-history，order 排末位）
+    const created = await service.createMode({
+      name: 'No Marker',
+      promptEntries: [{ id: 'u1', role: 'user', order: 0, enabled: true, content: 'a' }],
+    })
+    expect(created.promptEntries.map(entry => [entry.role, entry.order])).toEqual([['user', 0], ['chat_history', 1]])
+    expect(created.promptEntries[1]).toMatchObject({ id: 'chat-history', name: 'Chat History', enabled: true, content: '' })
+
+    // update：多标记只保留第一个（按条目数组顺序），marker 内容清空、恒启用
+    const updated = await service.updateMode(created.id, {
+      promptEntries: [
+        { id: 'm1', role: 'chat_history', order: 0, enabled: false, content: 'stale', name: 'My History' },
+        { id: 'u1', role: 'user', order: 1, enabled: true, content: 'a' },
+        { id: 'm2', role: 'chat_history', order: 2, enabled: true, content: '' },
+      ],
+    })
+    const markers = updated.promptEntries.filter(entry => entry.role === 'chat_history')
+    expect(markers).toHaveLength(1)
+    expect(markers[0]).toMatchObject({ id: 'm1', name: 'My History', enabled: true, content: '', order: 0 })
+    expect(updated.promptEntries.map(entry => entry.id).includes('m2')).toBe(false)
+    // order 重编号 0..n-1
+    expect(updated.promptEntries.map(entry => entry.order)).toEqual([0, 1])
+
+    // update：显式清空条目也会被补回（原项目固定条目语义）
+    const emptied = await service.updateMode(created.id, { promptEntries: [] })
+    expect(emptied.promptEntries).toHaveLength(1)
+    expect(emptied.promptEntries[0]).toMatchObject({ id: 'chat-history', role: 'chat_history', content: '', order: 0 })
+  })
+
+  test('store load 归一化：旧版无 chat_history 条目的存量 store 读取时自动补齐', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'code',
+        modes: [
+          {
+            id: 'code',
+            name: 'code',
+            kind: 'builtin',
+            template: 'Code tpl',
+            promptEntries: [{ id: 'e1', role: 'user', order: 0, enabled: true, content: 'c' }],
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const service = await serviceOf(root)
+    const code = await service.getMode('code')
+    expect(code?.promptEntries.map(entry => entry.role)).toEqual(['user', 'chat_history'])
+    expect(code?.promptEntries[1]).toMatchObject({ id: 'chat-history', name: 'Chat History', enabled: true, content: '' })
   })
 })
 
@@ -88,8 +157,11 @@ describe('模式 CRUD', () => {
     })
     expect(updated.template).toBe('t2')
     expect(updated.customPrefix).toBeUndefined()
-    expect(updated.promptEntries[0]?.id).toBe('keep-me')
-    expect(updated.promptEntries[0]?.content).toBe('b')
+    // 条目 id 保留（ensureChatHistoryPromptEntry 会额外补一个 chat_history 标记，
+    // 因此按 id 定位而非下标）
+    const kept = updated.promptEntries.find(entry => entry.id === 'keep-me')
+    expect(kept?.role).toBe('user')
+    expect(kept?.content).toBe('b')
   })
 
   test('renameMode：custom 可重命名；builtin 拒绝（BUILTIN_IMMUTABLE）', async () => {
@@ -211,9 +283,12 @@ describe('导入 / 导出', () => {
     expect(mode.toolPolicyCustomized).toBe(true)
 
     // dynamicTemplate（enabled）→ user 预设条目：order 在首个 chat_history 标记前一位
+    // （ensureChatHistoryPromptEntry 排序重编号后落在 0）
     const dyn = mode.promptEntries.find(entry => entry.role === 'user' && entry.content === 'dyn {{$WORKSPACE_FILES}}')!
     expect(dyn.enabled).toBe(true)
-    expect(dyn.order).toBe(-1)
+    expect(dyn.order).toBe(0)
+    // 首个 chat_history 标记紧随其后（重编号后 order 1）
+    expect(mode.promptEntries.find(entry => entry.role === 'chat_history')?.order).toBe(1)
 
     // 渲染层面：user/assistant 条目与 fakeThought 不进系统文本（entries-first）
     const rendered = renderModeSectionText(mode, { sendHistoryThoughts: true })
@@ -231,6 +306,74 @@ describe('导入 / 导出', () => {
     expect(result.warnings.filter(w => w.includes('dropped legacy field(s)'))).toHaveLength(1) // 仅模式级（条目 name 现在保留）
   })
 
+
+  test('旧版前端导出信封（graycode.promptModes.v1，modes 为数组）逐元素导入；无 schema 标签的同形负载也可识别', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+    // 1.5.4 前端 PromptSettings.buildPromptModeExportPayload 的真实信封：
+    // { schema, exportedAt, modes: PromptMode[] }；模板片段取自
+    // backend/modules/settings/promptModes.ts（DEFAULT_SYSTEM_PROMPT_TEMPLATE 开头）
+    const legacyMode = {
+      id: 'imported-code',
+      name: 'Code',
+      icon: 'symbol-method',
+      template: 'You are a professional programming assistant, proficient in multiple programming languages and frameworks.\n\n{{$ENVIRONMENT}}',
+      promptAssemblyMode: 'entries',
+      dynamicTemplateEnabled: true,
+      dynamicTemplate: 'This is the current turn\'s dynamic context information you can use.\n\n{{$TODO_LIST}}',
+      dynamicContextStrategy: 'single',
+      promptEntries: [
+        { id: 'chat-history', name: 'Chat History', type: 'chat_history', enabled: true, role: 'user', content: '', order: 0 },
+        { id: 'e1', name: 'Prompt 1', type: 'prompt', enabled: true, role: 'assistant', content: 'body', fakeThought: 'think', order: 1 },
+      ],
+      toolPolicy: ['read_file', 'list_files'],
+    }
+    const envelope = {
+      schema: 'graycode.promptModes.v1',
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      modes: [legacyMode, { id: 'imported-ask', name: 'Ask', template: 'ask tpl', promptEntries: [] }],
+    }
+    const result = await service.importModes(envelope)
+    expect(result.modes).toHaveLength(2)
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      'imported payload is a Gray Code export envelope (graycode.promptModes.v1); importing the modes array',
+      'mode "Code": dropped legacy field(s): icon, promptAssemblyMode, dynamicContextStrategy',
+      'entry mapped legacy type:chat_history to role:chat_history',
+    ]))
+    const code = result.modes.find(mode => mode.name === 'Code')!
+    expect(code.kind).toBe('custom')
+    expect(code.id).toBe('imported-code')
+    expect(code.template).toContain('{{$ENVIRONMENT}}')
+    expect(code.toolPolicy).toEqual(['read_file', 'list_files'])
+    // type:chat_history → role 映射 + dynamicTemplate → user 条目（order 在标记前一位；
+    // ensureChatHistoryPromptEntry 排序重编号后为 0/1）
+    expect(code.promptEntries.find(entry => entry.id === 'chat-history')?.role).toBe('chat_history')
+    const dyn = code.promptEntries.find(entry => entry.role === 'user')!
+    expect(dyn.order).toBe(0)
+    expect(code.promptEntries.find(entry => entry.role === 'chat_history')?.order).toBe(1)
+    const ask = result.modes.find(mode => mode.name === 'Ask')!
+    expect(ask.template).toBe('ask tpl')
+    expect((await service.listModes()).map(mode => mode.id)).toContain('imported-ask')
+
+    // 无 schema 标签但顶层 modes 为数组（且无单模式标记）→ 同样走信封路径
+    const root2 = await makeDataRoot()
+    const service2 = await serviceOf(root2)
+    const bare = await service2.importModes({ exportedAt: 'x', modes: [{ id: 'bare-1', name: 'Bare', promptEntries: [] }] })
+    expect(bare.modes.map(mode => mode.name)).toEqual(['Bare'])
+    expect(bare.warnings[0]).toBe('imported payload is a Gray Code export envelope (graycode.promptModes.v1); importing the modes array')
+
+    // 带单模式标记的对象不误判为信封（name/promptEntries 属于模式自身字段时，
+    // 顶层多余的 modes 数组被忽略，仍走单模式解析）
+    const root3 = await makeDataRoot()
+    const service3 = await serviceOf(root3)
+    const single = await service3.importModes({ name: 'X', promptEntries: [], modes: [] })
+    expect(single.modes).toHaveLength(1)
+    expect(single.modes[0]?.name).toBe('X')
+    // 空信封：导入 0 个模式并给出提示（不抛错）
+    const empty = await service3.importModes({ schema: 'graycode.promptModes.v1', modes: [] })
+    expect(empty.modes).toEqual([])
+    expect(empty.warnings).toContain('export envelope carried no modes; nothing was imported')
+  })
 
   test('D-4：toolPolicy / toolPolicyCustomized 经 createMode/updateMode 保存并在导入后保留', async () => {
     const root = await makeDataRoot()
@@ -292,10 +435,12 @@ describe('导入 / 导出', () => {
     const c1 = result.modes.find(mode => mode.id === 'custom-1')!
     // 无自有 template → 回退全局 template
     expect(c1.template).toBe('GLOBAL TPL')
-    // 全局 dynamicTemplate（enabled）→ 映射为 user 预设条目（无 chat_history 标记 → order 0）
+    // 全局 dynamicTemplate（enabled）→ 映射为 user 预设条目（排在 chat_history 标记前，
+    // ensureChatHistoryPromptEntry 重编号后 order 0）
     const dyn = c1.promptEntries.find(entry => entry.role === 'user' && entry.content === 'global dyn context')!
     expect(dyn.enabled).toBe(true)
     expect(dyn.order).toBe(0)
+    expect(c1.promptEntries.find(entry => entry.role === 'chat_history')?.order).toBe(1)
     // 有自有 template 的模式不受全局回退影响
     const c2 = result.modes.find(mode => mode.id === 'custom-2')!
     expect(c2.template).toBe('own tpl')

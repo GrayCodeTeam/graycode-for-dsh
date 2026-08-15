@@ -5,8 +5,11 @@
  * and `{{$MODULE}}` variable insertion).
  *
  * chat_history is a special positioning marker: always enabled, fixed role,
- * no content, cannot be deleted/duplicated — but it can be reordered (drag or
- * move buttons) to control where real history is inserted.
+ * no content, not duplicable — it can be reordered (drag or move buttons) to
+ * control where real history is inserted. The HOST guarantees exactly one
+ * marker per mode on every load/create/update/import (the original project's
+ * fixed Chat History entry): the add button below is disabled while a marker
+ * exists, and removing it just makes the host re-append it on save.
  *
  * All mutations are pure (logic.ts) and flow up through `onChange`; the
  * parent owns the draft and the save button. This surface is USER-ONLY: the
@@ -18,6 +21,7 @@ import type { GcTranslate } from '../fields.tsx'
 import { Switch } from '../fields.tsx'
 import {
   createEntry,
+  defaultEntries,
   moveEntry,
   removeEntry,
   reorderEntries,
@@ -41,10 +45,24 @@ export interface EntriesEditorProps {
   t: GcTranslate
   entries: readonly PromptEntry[]
   onChange: (entries: PromptEntry[]) => void
+  /**
+   * 「恢复默认条目」的完整重置动作（ModeEditor 提供：种子三件套条目并清空
+   * 模板草稿）。缺省时退化为仅重置条目（本地 fallback，测试/独立使用）。
+   */
+  onResetToDefault?: () => void
 }
 
-/** Roles a user may pick for a new entry (chat_history is a fixed marker, not addable). */
+/**
+ * Roles a user may pick for a new regular entry. chat_history is added through
+ * its own dedicated button (it is a position marker, not a content role), so
+ * the role dropdowns stay clean.
+ */
 const ADDABLE_ROLES: readonly PromptEntryRole[] = ['system', 'user', 'assistant']
+
+/** Whether the draft already carries the (host-guaranteed, single) marker. */
+function hasChatHistoryMarker(entries: readonly PromptEntry[]): boolean {
+  return entries.some(entry => entry.role === 'chat_history')
+}
 
 /** Insertable `{{$MODULE}}` placeholders, grouped static (cacheable) / dynamic (live). */
 const STATIC_MODULES = ['ENVIRONMENT', 'TOOLS', 'MCP_TOOLS', 'CONTEXT_BADGE_FORMAT', 'MEMORY'] as const
@@ -140,20 +158,39 @@ const addRowStyle: CSSProperties = {
   flexWrap: 'wrap',
 }
 
-/** Drop indicator state for drag & drop reordering. */
-interface DropIndicator {
+export interface DropIndicator {
   id: string
   position: 'before' | 'after'
 }
 
-export function EntriesEditor({ t, entries, onChange }: EntriesEditorProps): ReactNode {
+export function EntriesEditor({ t, entries, onChange, onResetToDefault }: EntriesEditorProps): ReactNode {
   const [newRole, setNewRole] = useState<PromptEntryRole>('system')
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null)
   const dragSourceRef = useRef<string | null>(null)
   const sorted = sortEntries(entries)
+  const markerPresent = hasChatHistoryMarker(entries)
 
   const addEntry = (): void => {
     onChange([...entries, createEntry(newRole, entries)])
+  }
+
+  /** Append a chat_history marker (empty content by construction; see createEntry). */
+  const addChatHistoryEntry = (): void => {
+    onChange([...entries, createEntry('chat_history', entries)])
+  }
+
+  /**
+   * 「恢复默认条目」：把草稿重置为默认骨架（系统提示词 + Chat History + 动态
+   * 上下文）。破坏性操作（丢弃全部自定义条目），先经确认；保存前仍是草稿，
+   * 可取消放弃。宿主回调同时清空模板（避免模板与 system 条目双份拼接）。
+   */
+  const resetToDefaultEntries = (): void => {
+    if (!window.confirm(t('promptModes.resetEntriesConfirm'))) return
+    if (onResetToDefault !== undefined) {
+      onResetToDefault()
+      return
+    }
+    onChange(defaultEntries())
   }
 
   const handleDragStart = (event: DragEvent, id: string): void => {
@@ -292,16 +329,17 @@ export function EntriesEditor({ t, entries, onChange }: EntriesEditorProps): Rea
                     {t('promptModes.duplicateEntry')}
                   </button>
                 )}
-                {!isChatHistory && (
-                  <button
-                    type="button"
-                    style={buttonDangerStyle}
-                    title={t('promptModes.removeEntry')}
-                    onClick={() => onChange(removeEntry(entries, entry.id))}
-                  >
-                    {t('promptModes.removeEntry')}
-                  </button>
-                )}
+                {/* Markers are removable like any entry (they carry no
+                    content; a stray marker added by mistake must not be a
+                    dead end), but never duplicable or disablable. */}
+                <button
+                  type="button"
+                  style={buttonDangerStyle}
+                  title={t('promptModes.removeEntry')}
+                  onClick={() => onChange(removeEntry(entries, entry.id))}
+                >
+                  {t('promptModes.removeEntry')}
+                </button>
               </div>
             </div>
             {isChatHistory ? (
@@ -374,6 +412,28 @@ export function EntriesEditor({ t, entries, onChange }: EntriesEditorProps): Rea
         </select>
         <button type="button" style={buttonStyle} onClick={addEntry}>
           {t('promptModes.addEntry')}
+        </button>
+        {/* Dedicated marker button: a chat_history entry is an insertion
+            anchor (no content), not a regular content role — keeping it out
+            of the role dropdowns keeps the editor unambiguous. The host
+            normalizes every mode to exactly one marker, so the button is only
+            usable to restore a marker deleted from the current draft. */}
+        <button
+          type="button"
+          style={buttonStyle}
+          disabled={markerPresent}
+          title={markerPresent ? t('promptModes.addChatHistory.exists') : t('promptModes.addChatHistory.title')}
+          onClick={addChatHistoryEntry}
+        >
+          {t('promptModes.addChatHistory')}
+        </button>
+        <button
+          type="button"
+          style={buttonDangerStyle}
+          title={t('promptModes.resetEntries.title')}
+          onClick={resetToDefaultEntries}
+        >
+          {t('promptModes.resetEntries')}
         </button>
       </div>
     </div>

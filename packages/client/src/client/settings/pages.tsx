@@ -16,8 +16,8 @@ import {
 import { AGENT_SCOPES } from './defaults.ts'
 import { CheckpointManager } from './CheckpointManager.tsx'
 import { CustomAgentsSection } from './CustomAgentsSection.tsx'
-import { FieldSection, type FieldSpec, type GcTranslate } from './fields.tsx'
-import { buttonDangerStyle, noteStyle } from './styles.ts'
+import { FieldSection, Switch, type FieldSpec, type GcTranslate } from './fields.tsx'
+import { buttonDangerStyle, noteStyle, rowCopyStyle, rowDescriptionStyle, rowLabelStyle, rowStyle, sectionBodyStyle, sectionDescriptionStyle, sectionStyle, sectionTitleStyle } from './styles.ts'
 import type { GrayCodeConfig, GrayRemoteInvoke } from './types.ts'
 import { ActivityHeatmapPanel } from '../activityHeatmap/ActivityHeatmapPanel.tsx'
 import { ConnectionActivityTokensDataSource, RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
@@ -84,17 +84,9 @@ export const commaListTransform = {
     : [],
 }
 
-/** messageCheckpoint.beforeMessages ↔ “用户消息前自动存档”开关（user ∈ 数组）。 */
-export const userBeforeTransform = {
-  toInput: (value: unknown): boolean => Array.isArray(value) ? value.includes('user') : false,
-  fromInput: (value: unknown): Array<'user' | 'model'> => value === true ? ['user'] : [],
-}
-
-/** messageCheckpoint.afterMessages ↔ “模型回复后自动存档”开关（model ∈ 数组）。 */
-export const modelAfterTransform = {
-  toInput: (value: unknown): boolean => Array.isArray(value) ? value.includes('model') : false,
-  fromInput: (value: unknown): Array<'user' | 'model'> => value === true ? ['model'] : [],
-}
+/** messageCheckpoint 消息槽开关（beforeUser/beforeModel/afterModel）已下放到
+ * CheckpointConfigSection（下方 CheckpointManager 内）——2×2 边界选择需要读写
+ * 完整数组，页面层的单路径 transform 会互相覆盖成员，故不再在此重复。 */
 
 /** 可选字符串 ↔ 空串（select 的「自动」选项）：'' 提交为 undefined。 */
 export const optionalSelectTransform = {
@@ -120,10 +112,10 @@ const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWor
           scope('checkpoints', t),
           { kind: 'boolean', path: ['checkpoints', 'autoCheckpoint'], labelKey: 'fields.autoCheckpoint', descriptionKey: 'fields.autoCheckpoint.description' },
           { kind: 'boolean', path: ['checkpoints', 'modelToolsEnabled'], labelKey: 'fields.modelToolsEnabled', descriptionKey: 'fields.modelToolsEnabled.description' },
-          { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'beforeMessages'], labelKey: 'fields.checkpointBeforeUserMessage', descriptionKey: 'fields.checkpointBeforeUserMessage.description', transform: userBeforeTransform },
-          { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'afterMessages'], labelKey: 'fields.checkpointAfterModelMessage', descriptionKey: 'fields.checkpointAfterModelMessage.description', transform: modelAfterTransform },
-          { kind: 'text', path: ['checkpoints', 'beforeTools'], labelKey: 'fields.beforeTools', descriptionKey: 'fields.beforeTools.description', monospace: true, transform: commaListTransform },
-          { kind: 'text', path: ['checkpoints', 'afterTools'], labelKey: 'fields.afterTools', descriptionKey: 'fields.afterTools.description', monospace: true, transform: commaListTransform },
+          // 消息触发存档（用户消息前/模型消息前/模型消息后）由下方 CheckpointManager
+          // 内的 CheckpointConfigSection 编辑（需要读写完整成员数组，见其上注释）。
+          // beforeTools / afterTools 由下方 CheckpointManager 内的勾选矩阵编辑
+          // （CheckpointConfigSection 工具触发存档），此处不再重复裸文本入口。
           { kind: 'number', path: ['checkpoints', 'maxCheckpoints'], labelKey: 'fields.maxCheckpoints', descriptionKey: 'fields.maxCheckpoints.description', min: -1, step: 1 },
           { kind: 'number', path: ['checkpoints', 'maxFileSizeBytes'], labelKey: 'fields.maxFileSizeMiB', min: 0, step: 1, transform: mebibytesTransform },
           { kind: 'number', path: ['checkpoints', 'blobGracePeriodDays'], labelKey: 'fields.blobGraceDays', min: 0, step: 1 },
@@ -293,8 +285,9 @@ const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
       title={t('pages.subagents.title')}
       description={t('pages.subagents.description')}
       fields={[
-        { kind: 'number', path: ['subagents', 'maxHopDepth'], labelKey: 'fields.maxHopDepth', min: 0, step: 1 },
-        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', min: 0, step: 1 },
+        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', descriptionKey: 'fields.maxConcurrent.description', min: 0, step: 1 },
+        { kind: 'number', path: ['subagents', 'queueTimeoutSeconds'], labelKey: 'fields.queueTimeoutSeconds', descriptionKey: 'fields.queueTimeoutSeconds.description', min: -1, step: 1 },
+        { kind: 'number', path: ['subagents', 'defaultMaxRuntimeSeconds'], labelKey: 'fields.defaultMaxRuntimeSeconds', descriptionKey: 'fields.defaultMaxRuntimeSeconds.description', min: -1, step: 1 },
       ]}
       config={config}
       onChange={onChange}
@@ -314,11 +307,10 @@ const PromptPage: GrayCodePage = ({ t, config, onChange, remote }) => (
       title={t('pages.prompt.title')}
       description={t('pages.prompt.description')}
       fields={[
-        { kind: 'boolean', path: ['persona', 'enabled'], labelKey: 'fields.personaEnabled' },
+        { kind: 'boolean', path: ['persona', 'enabled'], labelKey: 'fields.personaEnabled', descriptionKey: 'fields.personaEnabled.description' },
         scope('persona', t),
-        { kind: 'boolean', path: ['prompt', 'enabled'], labelKey: 'fields.promptEnabled' },
         scope('prompt', t),
-        { kind: 'boolean', path: ['prompt', 'modeToolPolicy'], labelKey: 'fields.modeToolPolicy' },
+        { kind: 'boolean', path: ['prompt', 'modeToolPolicy'], labelKey: 'fields.modeToolPolicy', descriptionKey: 'fields.modeToolPolicy.description' },
         { kind: 'boolean', path: ['prompt', 'sendHistoryThoughts'], labelKey: 'fields.sendHistoryThoughts' },
         { kind: 'boolean', path: ['prompt', 'requestLayer'], labelKey: 'fields.requestLayer', descriptionKey: 'fields.requestLayer.description' },
         { kind: 'boolean', path: ['prompt', 'overrideHostPrompt'], labelKey: 'fields.overrideHostPrompt', descriptionKey: 'fields.overrideHostPrompt.description' },
@@ -361,14 +353,35 @@ const ToolsPage: GrayCodePage = ({ t, config, onChange }) => (
 
 const AdvancedPage: GrayCodePage = ({ t, config, onChange, onReset }) => {
   const dataRoots = ['workflows', 'memory', 'checkpoints', 'branches', 'prompt', 'migration', 'stagedDiff', 'activity'] as const
+  // 迁移双闸门（enabled=装载迁移工具；allowLegacyReaders=授权读取旧数据目录）
+  // 在 UI 上折叠为一个开关：对用户而言「启用旧版迁移」意味着同时装载工具并
+  // 授权读取，两个 config 字段与宿主契约保持不变（高级用户仍可在 settings.yaml
+  // 里分开配置）。写入经 store 的串行队列，两次 set 各自基于最新已确认快照 rebase。
+  const migrationOn = config.migration.enabled && config.migration.allowLegacyReaders
+  const setMigration = (on: boolean): void => {
+    void Promise.resolve(onChange(['migration', 'enabled'], on))
+      .then(() => onChange(['migration', 'allowLegacyReaders'], on))
+      .catch(() => undefined)
+  }
   return (
     <div>
+      <section style={sectionStyle}>
+        <h3 style={sectionTitleStyle}>{t('pages.migration.title')}</h3>
+        <p style={sectionDescriptionStyle}>{t('pages.migration.description')}</p>
+        <div style={sectionBodyStyle}>
+          <label style={rowStyle}>
+            <span style={rowCopyStyle}>
+              <span style={rowLabelStyle}>{t('fields.migrationToggle')}</span>
+              <span style={rowDescriptionStyle}>{t('fields.migrationToggle.description')}</span>
+            </span>
+            <Switch checked={migrationOn} onChange={setMigration} />
+          </label>
+        </div>
+      </section>
       <FieldSection
         title={t('pages.advanced.title')}
         description={t('pages.advanced.description')}
         fields={[
-          { kind: 'boolean', path: ['migration', 'enabled'], labelKey: 'fields.migrationEnabled' },
-          { kind: 'boolean', path: ['migration', 'allowLegacyReaders'], labelKey: 'fields.allowLegacyReaders', descriptionKey: 'fields.allowLegacyReaders.description' },
           ...dataRoots.map((module): FieldSpec => ({
             kind: 'text',
             path: [module, 'dataRoot'],

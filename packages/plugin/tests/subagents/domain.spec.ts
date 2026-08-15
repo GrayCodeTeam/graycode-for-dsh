@@ -10,7 +10,8 @@ import { shouldAllowDelegation } from '../../src/subagents/domain/concurrencyPol
 import {
   ConcurrencyCheckError,
   HopDepthExceededError,
-  MaxConcurrentSubagentsError,
+  SubagentQueueCancelledError,
+  SubagentQueueTimeoutError,
   UnsupportedAddressingError,
 } from '../../src/subagents/domain/errors.ts'
 import { ThreadHopCounter } from '../../src/subagents/domain/hopPolicy.ts'
@@ -162,13 +163,22 @@ describe('类型化拒绝错误', () => {
     expect(error.message).toContain('MAX_HOP_DEPTH')
   })
 
-  it('MaxConcurrentSubagentsError 携带父会话/运行数/上限', () => {
-    const error = new MaxConcurrentSubagentsError('parent-1', 2, 2)
-    expect(error.name).toBe('MaxConcurrentSubagentsError')
+  it('SubagentQueueTimeoutError 携带父会话/超时秒数（排队超时=失败结算）', () => {
+    const error = new SubagentQueueTimeoutError('parent-1', 600)
+    expect(error.name).toBe('SubagentQueueTimeoutError')
     expect(error.parentSessionId).toBe('parent-1')
-    expect(error.running).toBe(2)
-    expect(error.maxConcurrent).toBe(2)
-    expect(error.message).toContain('maxConcurrent=2')
+    expect(error.queueTimeoutSeconds).toBe(600)
+    expect(error.message).toContain('parent-1')
+    expect(error.message).toContain('queueTimeoutSeconds=600')
+  })
+
+  it('SubagentQueueCancelledError 携带取消来源（signal / guard-disposed）', () => {
+    const signal = new SubagentQueueCancelledError('parent-1', 'signal')
+    expect(signal.name).toBe('SubagentQueueCancelledError')
+    expect(signal.parentSessionId).toBe('parent-1')
+    expect(signal.reason).toBe('signal')
+    const disposed = new SubagentQueueCancelledError('parent-1', 'guard-disposed')
+    expect(disposed.reason).toBe('guard-disposed')
   })
 
   it('UnsupportedAddressingError 说明能力边界（G2 fail-closed 文案）', () => {

@@ -5,12 +5,15 @@
  * 此处用同等形状的 fake seam 验证：
  * - G1：followup/reportFrom 外层 hop 熔断边界（≤5 放行、>5 拒绝、被拒不消耗预算、
  *   subagent/start 重置、subagent/end 清理、maxHopDepth=0 不限）；
- * - G3：start/startContinuable 委派前并发上限（超 maxConcurrent 拒绝、计数失败 fail-closed、
- *   maxConcurrent=0 不查询计数）、listChildren 计数口径；
+ * - G3：start/startContinuable 委派前并发准入——超 maxConcurrent 进入每父会话 FIFO
+ *   队列等待（老 Gray 排队语义，不拒绝）：release/subagent/end 唤醒、FIFO 顺序、
+ *   排队超时（SubagentQueueTimeoutError）、排队中 signal 中止与 dispose 清队
+ *   （SubagentQueueCancelledError）、计数失败 fail-closed（直接与唤醒路径）、
+ *   maxConcurrent=0 不查询计数、one-shot 默认运行时间预算（到时 dispose）；
  * - G2：sendToAgent 到直接父/（'main' 且父 root）走 reportFrom，其余 fail-closed；
  * - dispose 恢复原方法、事件注销。
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -24,6 +27,7 @@ import {
 import type {
   SubagentFollowupOptionsLike,
   SubagentReportOptionsLike,
+  SubagentRunLike,
   SubagentStartContinuableSpecLike,
   SubagentStartRequestLike,
   SubagentsSeamLike,
@@ -31,7 +35,8 @@ import type {
 import {
   ConcurrencyCheckError,
   HopDepthExceededError,
-  MaxConcurrentSubagentsError,
+  SubagentQueueCancelledError,
+  SubagentQueueTimeoutError,
   UnsupportedAddressingError,
 } from '../../src/subagents/domain/errors.ts'
 
@@ -136,6 +141,47 @@ const followupArgs = (content = 'hi'): [Agent, SessionId, Array<{ type: 'text'; 
   return [parent, childId, [{ type: 'text', text: content }], { source: { kind: 'user' }, signal: new AbortController().signal }]
 }
 
+/** 手动结算的 promise（控制 run.result 的落定时机）。 */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+/** 断言 promise 仍处于 pending（排队的委派未结算、原方法未收到调用）。 */
+async function assertPending(promise: Promise<unknown>): Promise<void> {
+  await expect(Promise.race([promise.then(() => 'settled', () => 'settled'), Promise.resolve('pending')])).resolves.toBe('pending')
+}
+
+/** fake-timer 下冲一轮微任务（串行准入链是纯 microtask 链，无真实定时器）。 */
+async function flushAdmission(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0)
+}
+
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+/** 可控 run 的 fake seam.start（每个 run 的 result/dispose 均可手动驱动）。 */
+interface ScriptedRun {
+  result: Promise<unknown>
+  resolveResult: () => void
+  dispose: ReturnType<typeof vi.fn>
+}
+function scriptedStart(fake: FakeSeam): ScriptedRun[] {
+  const runs: ScriptedRun[] = []
+  fake.seam.start = ((name: string, request: SubagentStartRequestLike) => {
+    fake.calls.start.push([name, request])
+    const deferredResult = deferred<unknown>()
+    const dispose = vi.fn(async () => {})
+    runs.push({ result: deferredResult.promise, resolveResult: () => deferredResult.resolve({ stopReason: 'completed' }), dispose })
+    const run: SubagentRunLike = { id: sid(`run-${runs.length}`), result: deferredResult.promise, dispose }
+    return Promise.resolve(run)
+  }) as SubagentsSeamLike['start']
+  return runs
+}
+
 /* ------------------------------------------------------------------ *
  * G1：hop 熔断（followup / reportFrom 包装）                          *
  * ------------------------------------------------------------------ */
@@ -234,21 +280,169 @@ describe('G1 hop 熔断（seam 包装）', () => {
  * G3：并发上限（start / startContinuable 包装）                       *
  * ------------------------------------------------------------------ */
 
-describe('G3 并发上限（seam 包装）', () => {
-  it('start 超 maxConcurrent=2 → MaxConcurrentSubagentsError，原方法未被调用', async () => {
-    const { seam, calls } = fakeSeam()
-    const countRunning = vi.fn(async () => 2)
-    install({ seam, calls }, { maxConcurrent: 2, countRunning })
+describe('G3 并发准入与 FIFO 排队（seam 包装）', () => {
+  it('start 超 maxConcurrent → 排队等待而非拒绝；名额释放后 FIFO 唤醒并透传', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
     const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
-    await expect(seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
-    await expect(seam.start('spawn', request)).rejects.toMatchObject({
+    // 第一次：准入（occupied 1/1）。
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    // 第二次：超限 → 排队（老 Gray 语义：排队而不是拒绝），原方法未被调用。
+    const queued = fake.seam.start('fork', request)
+    await flushAdmission()
+    expect(fake.calls.start).toHaveLength(1)
+    await assertPending(queued)
+    // 第一次结算 → release → 唤醒排队者 → 原方法收到第二个委派。
+    runs[0]!.resolveResult()
+    await flushAdmission()
+    await expect(queued).resolves.toMatchObject({ id: 'run-2' })
+    expect(fake.calls.start).toHaveLength(2)
+    expect(fake.calls.start[1]![0]).toBe('fork')
+  })
+
+  it('FIFO 顺序：多个排队者按到达顺序被唤醒，不插队', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    const second = fake.seam.start('spawn', request)
+    const third = fake.seam.start('spawn', request)
+    await flushAdmission()
+    expect(fake.calls.start).toHaveLength(1)
+    runs[0]!.resolveResult()
+    await flushAdmission()
+    // 队首 second 先准入；third 仍排队（容量 1/1 又被 second 占用）。
+    await expect(second).resolves.toMatchObject({ id: 'run-2' })
+    await assertPending(third)
+    expect(fake.calls.start).toHaveLength(2)
+    runs[1]!.resolveResult()
+    await flushAdmission()
+    await expect(third).resolves.toMatchObject({ id: 'run-3' })
+    expect(fake.calls.start).toHaveLength(3)
+  })
+
+  it('排队超过 queueTimeoutSeconds → SubagentQueueTimeoutError（失败结算，原方法未被调用）', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0, queueTimeoutSeconds: 5 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    const queued = fake.seam.start('spawn', request)
+    // 提前挂断言：超时定时器在 advance 内部触发，先 attach handler 避免 unhandled。
+    const queuedRejection = expect(queued).rejects.toBeInstanceOf(SubagentQueueTimeoutError)
+    await flushAdmission()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await queuedRejection
+    await expect(queued).rejects.toMatchObject({
       parentSessionId: 'session://parent-1',
-      running: 2,
-      maxConcurrent: 2,
+      queueTimeoutSeconds: 5,
     })
-    // M3：父会话 id 统一为 session:// 前缀后再交给计数端口（按 scheme 匹配）。
-    expect(countRunning).toHaveBeenCalledWith(sid('session://parent-1'))
-    expect(calls.start).toHaveLength(0)
+    expect(fake.calls.start).toHaveLength(1)
+    // 超时的等待者已出队：名额释放后不会复活。
+    runs[0]!.resolveResult()
+    await flushAdmission()
+    expect(fake.calls.start).toHaveLength(1)
+  })
+
+  it('queueTimeoutSeconds=-1（缺省同）→ 无限等待（不设排队定时器）', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    scriptedStart(fake)
+    // 缺省 queueTimeoutSeconds = 不限。
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    const queued = fake.seam.start('spawn', request)
+    await flushAdmission()
+    await vi.advanceTimersByTimeAsync(2 ** 31 - 1)
+    await assertPending(queued)
+    expect(fake.calls.start).toHaveLength(1)
+  })
+
+  it('排队中 signal 中止 → SubagentQueueCancelledError（signal），原方法未被调用', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    scriptedStart(fake)
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
+    const controller = new AbortController()
+    await expect(fake.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: controller.signal }))
+      .resolves.toMatchObject({ id: 'run-1' })
+    const queued = fake.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: controller.signal })
+    await flushAdmission()
+    controller.abort()
+    await expect(queued).rejects.toBeInstanceOf(SubagentQueueCancelledError)
+    await expect(queued).rejects.toMatchObject({ reason: 'signal' })
+    expect(fake.calls.start).toHaveLength(1)
+  })
+
+  it('dispose 清空队列：挂起等待者以 SubagentQueueCancelledError（guard-disposed）结算', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    scriptedStart(fake)
+    const guard = install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    // 同一父会话的后续委派全部排队（占用已满；不同父会话无占用会被直接放行）。
+    const queued = fake.seam.start('spawn', request)
+    const queuedToo = fake.seam.start('spawn', request)
+    await flushAdmission()
+    guard.dispose()
+    await expect(queued).rejects.toMatchObject({ reason: 'guard-disposed' })
+    await expect(queuedToo).rejects.toMatchObject({ reason: 'guard-disposed' })
+    expect(fake.calls.start).toHaveLength(1)
+  })
+
+  it('startContinuable 同样排队：subagent/end 释放占用并唤醒', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const events = fakeEvents()
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 }, events.port)
+    const spec = (): SubagentStartContinuableSpecLike => ({
+      provider: 'spawn',
+      label: 'background worker',
+      request: { parent: fakeAgent('parent-1') },
+      signal: new AbortController().signal,
+    })
+    await expect(fake.seam.startContinuable(spec())).resolves.toEqual({ childId: 'child-1', messageId: 'mid:1' })
+    const queued = fake.seam.startContinuable(spec())
+    await flushAdmission()
+    expect(fake.calls.startContinuable).toHaveLength(1)
+    await assertPending(queued)
+    // continuable 无 run 句柄：占用随 subagent/end 释放 → 唤醒排队者。
+    events.emit('subagent/end', { id: sid('child-1') })
+    await flushAdmission()
+    await expect(queued).resolves.toEqual({ childId: 'child-1', messageId: 'mid:1' })
+    expect(fake.calls.startContinuable).toHaveLength(2)
+  })
+
+  it('外部结算触发准入复查：口径仍满则继续排队，口径回落则排队者补位', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const events = fakeEvents()
+    scriptedStart(fake)
+    // countRunning 动态：宿主口径里有两个运行中子代理（非本守卫占用）→ 委派排队。
+    let hostRunning = 2
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 2, countRunning: async () => hostRunning }, events.port)
+    const queued = fake.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: new AbortController().signal })
+    await flushAdmission()
+    expect(fake.calls.start).toHaveLength(0)
+    // 子代理结束但口径仍满（另一个仍在跑）：复查后不误唤醒。
+    hostRunning = 2
+    events.emit('subagent/end', { id: sid('external-child') })
+    await flushAdmission()
+    await assertPending(queued)
+    expect(fake.calls.start).toHaveLength(0)
+    // 口径真正回落：复查后排队者被准入（FIFO 等待者优先）。
+    hostRunning = 0
+    events.emit('subagent/end', { id: sid('external-child-2') })
+    await flushAdmission()
+    await expect(queued).resolves.toMatchObject({ id: 'run-1' })
+    expect(fake.calls.start).toHaveLength(1)
   })
 
   it('start 未超上限 → 放行并透传（原方法收到 name/request）', async () => {
@@ -262,25 +456,7 @@ describe('G3 并发上限（seam 包装）', () => {
     expect(calls.start[0]![1]).toBe(request)
   })
 
-  it('startContinuable 同样受并发上限', async () => {
-    const { seam, calls } = fakeSeam()
-    install({ seam, calls }, { maxConcurrent: 2, countRunning: async () => 2 })
-    const spec: SubagentStartContinuableSpecLike = {
-      provider: 'spawn',
-      label: 'background worker',
-      request: { parent: fakeAgent('parent-1') },
-      signal: new AbortController().signal,
-    }
-    await expect(seam.startContinuable(spec)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
-    expect(calls.startContinuable).toHaveLength(0)
-
-    const seam2 = fakeSeam()
-    install(seam2, { maxConcurrent: 2, countRunning: async () => 0 })
-    await expect(seam2.seam.startContinuable(spec)).resolves.toEqual({ childId: 'child-1', messageId: 'mid:1' })
-    expect(seam2.calls.startContinuable).toHaveLength(1)
-  })
-
-  it('maxConcurrent=0 → 不限且不查询计数', async () => {
+  it('maxConcurrent=0 → 不限且不查询计数（不排队）', async () => {
     const { seam, calls } = fakeSeam()
     const countRunning = vi.fn(async () => 999)
     install({ seam, calls }, { maxConcurrent: 0, countRunning })
@@ -302,6 +478,31 @@ describe('G3 并发上限（seam 包装）', () => {
     })).rejects.toBeInstanceOf(ConcurrencyCheckError)
     expect(calls.start).toHaveLength(0)
     expect(calls.startContinuable).toHaveLength(0)
+  })
+
+  it('唤醒复查时计数失败 → 排队者以 ConcurrencyCheckError 拒绝（fail-closed 同口径）', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const events = fakeEvents()
+    const runs = scriptedStart(fake)
+    let failCount = false
+    install(
+      { seam: fake.seam, calls: fake.calls },
+      { maxConcurrent: 1, countRunning: async () => { if (failCount) throw new Error('store gone'); return 0 } },
+      events.port,
+    )
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    const queued = fake.seam.start('spawn', request)
+    // 提前挂断言：release 触发唤醒复查，失败在 flush 内同步发生（先挂 handler 避免
+    // vitest 记 unhandled rejection）。
+    const queuedRejection = expect(queued).rejects.toBeInstanceOf(ConcurrencyCheckError)
+    await flushAdmission()
+    failCount = true
+    runs[0]!.resolveResult()
+    await flushAdmission()
+    await queuedRejection
+    expect(fake.calls.start).toHaveLength(1)
   })
 
   it('父会话缺 id → ConcurrencyCheckError（fail-closed）', async () => {
@@ -349,19 +550,75 @@ describe('G3 并发上限（seam 包装）', () => {
     await expect(count(sid('parent-1'))).resolves.toBe(2)
   })
 
-  it('M1：listChildren 滞后（countRunning 恒 0）时同步占用仍封顶并发（消除 check-then-act 窗口）', async () => {
+  it('M1：listChildren 滞后（countRunning 恒 0）时同步占用仍封顶并发（超限排队而非放行）', async () => {
+    vi.useFakeTimers()
     const fake = fakeSeam()
-    // run.result 永不结算 → 占用保持，模拟「新子代理尚未出现在 listChildren」。
-    fake.seam.start = vi.fn(async (name: string, request: SubagentStartRequestLike) => {
-      fake.calls.start.push([name, request])
-      return { id: sid('run-1'), result: new Promise<never>(() => {}), dispose: async () => {} }
-    }) as SubagentsSeamLike['start']
+    const runs = scriptedStart(fake)
     install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
     const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
     await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
-    // 第二次委派：countRunning 仍报 0，但本地占用已到上限 → 拒绝。
-    await expect(fake.seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
+    // 第二次委派：countRunning 仍报 0，但本地占用已到上限 → 排队（不放行、不拒绝）。
+    const queued = fake.seam.start('spawn', request)
+    await flushAdmission()
     expect(fake.calls.start).toHaveLength(1)
+    await assertPending(queued)
+    runs[0]!.resolveResult()
+    await flushAdmission()
+    await expect(queued).resolves.toMatchObject({ id: 'run-2' })
+    expect(fake.calls.start).toHaveLength(2)
+  })
+
+  it('默认运行时间预算：超过 defaultMaxRuntimeSeconds → dispose run（取消并失败结算），run 原样透传', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    install(
+      { seam: fake.seam, calls: fake.calls },
+      { maxConcurrent: 0, defaultMaxRuntimeSeconds: 30 },
+    )
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    const run = await fake.seam.start('spawn', request)
+    expect(runs[0]!.dispose).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(29_999)
+    expect(runs[0]!.dispose).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(runs[0]!.dispose).toHaveBeenCalledTimes(1)
+    // run 句柄原样透传（消费方继续按其 result/dispose 语义结算失败）。
+    expect(run.id).toBe('run-1')
+    // result 落定后预算定时器已清：再次推进不再触发 dispose。
+    runs[0]!.resolveResult()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runs[0]!.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('默认运行时间预算：-1（缺省同）不设预算；result 提前落定则清除定时器', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    // 缺省 defaultMaxRuntimeSeconds = 不限。
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 0 })
+    await fake.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: new AbortController().signal })
+    await vi.advanceTimersByTimeAsync(2 ** 31 - 1)
+    expect(runs[0]!.dispose).not.toHaveBeenCalled()
+
+    const fake2 = fakeSeam()
+    const runs2 = scriptedStart(fake2)
+    install({ seam: fake2.seam, calls: fake2.calls }, { maxConcurrent: 0, defaultMaxRuntimeSeconds: 30 })
+    await fake2.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: new AbortController().signal })
+    runs2[0]!.resolveResult()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runs2[0]!.dispose).not.toHaveBeenCalled()
+  })
+
+  it('dispose 清除运行时间预算定时器：拆除守卫不取消仍在运行的 run', async () => {
+    vi.useFakeTimers()
+    const fake = fakeSeam()
+    const runs = scriptedStart(fake)
+    const guard = install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 0, defaultMaxRuntimeSeconds: 30 })
+    await fake.seam.start('spawn', { parent: fakeAgent('parent-1'), signal: new AbortController().signal })
+    guard.dispose()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(runs[0]!.dispose).not.toHaveBeenCalled()
   })
 })
 
@@ -476,14 +733,20 @@ describe('dispose 恢复', () => {
     expect(seam.followup).toBe(originals.followup)
   })
 
-  it('双安装顺序（H-4b）：先卸载第一个实例，start 仍受 G3 约束', async () => {
+  it('双安装顺序（H-4b）：先卸载第一个实例，start 仍受 G3 约束（排队语义）', async () => {
+    vi.useFakeTimers()
     const { seam, calls } = fakeSeam()
     const countRunning = vi.fn(async () => 2)
-    const first = install({ seam, calls }, { maxConcurrent: 2, countRunning })
-    const second = install({ seam, calls }, { maxConcurrent: 2, countRunning })
+    const first = install({ seam, calls }, { maxConcurrent: 2, queueTimeoutSeconds: 1, countRunning })
+    const second = install({ seam, calls }, { maxConcurrent: 2, queueTimeoutSeconds: 1, countRunning })
     first.dispose()
     const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
-    await expect(seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
+    // 超限委派进入 FIFO 队列等待（不再拒绝）；排队超过 queueTimeoutSeconds 以失败结算。
+    const pending = seam.start('spawn', request)
+    const pendingRejection = expect(pending).rejects.toBeInstanceOf(SubagentQueueTimeoutError)
+    await flushAdmission()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await pendingRejection
     expect(calls.start).toHaveLength(0)
     second.dispose()
   })

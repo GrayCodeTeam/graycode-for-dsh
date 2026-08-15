@@ -110,7 +110,15 @@ export interface GrayCodeConfig {
   media: ToggleScopedConfig & { maxBatch: number }
   file: ToggleScopedConfig
   todo: ToggleScopedConfig
-  subagents: { maxHopDepth: number; maxConcurrent: number; customAgents: CustomAgentConfig[] }
+  subagents: {
+    maxHopDepth: number
+    maxConcurrent: number
+    /** 排队等待并发名额的超时（秒，-1 不限，默认 600）。 */
+    queueTimeoutSeconds: number
+    /** one-shot 子代理默认最大运行时间（秒，-1 不限，默认 1800；continuable 不适用）。 */
+    defaultMaxRuntimeSeconds: number
+    customAgents: CustomAgentConfig[]
+  }
   notifications: ToggleScopedConfig & { windowsToast: boolean }
   thoughts: { enabled: boolean; sendHistoryThoughts: boolean }
 }

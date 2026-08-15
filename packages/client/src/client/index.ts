@@ -86,8 +86,16 @@ import {
   graycodeSubagentBackDictionaries,
   graycodeSubagentBackJaPlaceholder,
 } from './subagentBack/locales.ts'
-import { RegenerateButton, type RegenerateInjected } from './rerollEdit/RegenerateButton.tsx'
-import { EditTurnButton, type EditTurnInjected } from './rerollEdit/EditTurnButton.tsx'
+import { TurnTailActions, type TurnTailActionsInjected } from './rerollEdit/TurnTailActions.tsx'
+import { EditUserAction, type EditUserActionInjected } from './rerollEdit/EditUserAction.tsx'
+import { createEditActionDefinition, EDIT_ACTION_KIND } from './rerollEdit/editNode.ts'
+import { SessionBranchSwitcher, type BranchSwitchInjected } from './branchSwitch/BranchSwitcher.tsx'
+import { invalidateBranchGroups } from './branchSwitch/branchData.ts'
+import {
+  GRAYCODE_BRANCH_NS,
+  graycodeBranchSwitchDictionaries,
+  graycodeBranchSwitchJaPlaceholder,
+} from './branchSwitch/locales.ts'
 import {
   GRAYCODE_REROLL_NS,
   graycodeRerollEditDictionaries,
@@ -96,11 +104,11 @@ import {
 import { installSummarize } from './summarize/install.ts'
 
 /**
- * Chain routing for the F2 edit-turn seat: the `conversation.chat.turnTail`
+ * Chain routing for the F1/F2 turn-tail seat: the `conversation.chat.turnTail`
  * seat only exists for completed turns, so every occurrence is claimable; the
  * selector hands the completed turn's session turn number to the entry.
  */
-const selectEditTurn = (owner: TurnTailOwnerProps) => ({ turn: owner.turn.turn })
+const selectTurnTail = (owner: TurnTailOwnerProps) => ({ turn: owner.turn.turn })
 
 // Pluggable renderer surface for `kind: 'graycode.workflow'` chat nodes.
 // DSH rc.6 has no conversation-node renderer mount available to this package
@@ -254,6 +262,12 @@ export function apply(ctx: ClientContext): void {
   const disposeRerollEditJa = ctx.locale.register(GRAYCODE_REROLL_NS, 'ja', graycodeRerollEditJaPlaceholder)
   ctx.effect(() => disposeRerollEditJa)
 
+  // Branch-candidate switcher locale namespace (own ns, same pattern).
+  const disposeBranchSwitch = ctx.locale.register(GRAYCODE_BRANCH_NS, graycodeBranchSwitchDictionaries)
+  ctx.effect(() => disposeBranchSwitch)
+  const disposeBranchSwitchJa = ctx.locale.register(GRAYCODE_BRANCH_NS, 'ja', graycodeBranchSwitchJaPlaceholder)
+  ctx.effect(() => disposeBranchSwitchJa)
+
   const disposeGraycode = ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
   ctx.effect(() => disposeGraycode)
   const disposeGraycodeJa = ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
@@ -349,55 +363,88 @@ export function apply(ctx: ClientContext): void {
       GrayCodeSettingsSection,
     ))
 
-  // F1: regenerate the addressed assistant message. The
-  // `conversation.chat.assistant-actions` list slot is additive (rendered in
-  // the closing message's IconActions row); the addressed turn number is
-  // resolved from the conversation snapshot and the reroll rides the same
-  // trusted `/graycode` remote dispatcher as the settings panel.
-  ctx.slots.inject('conversation.chat.assistant-actions', () =>
+  // F1/F2/branch-switch shared session navigation: the sessions service is
+  // resolved at action time (4.3-L5, same as the subagent back-to-main
+  // action): a late-started host service is honored, and an unwired host
+  // simply no-ops on navigation. L-1: the open() result may be a promise —
+  // guard both throw and rejection.
+  const openSession = (sessionId: string): void => {
+    const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
+    if (sessions === undefined) return
+    try {
+      const result = sessions.open(sessionId) as unknown
+      if (result !== null && typeof result === 'object' && 'catch' in result) {
+        ;(result as { catch(onRejected: () => void): unknown }).catch(() => {})
+      }
+    } catch {
+      /* silent degradation */
+    }
+  }
+
+  // User-message action row (edit pencil + regenerate) beside the user
+  // bubble. DSH rc.6 declares no user-message action seat (the user bubble's
+  // MessageIconActions passes no slot), so the entry materializes its own
+  // chat node: a ConversationNodeDefinition (editNode.ts) anchors a
+  // `graycode.editAction` node right after each append-surface user/message
+  // event, and the keyed `conversation.chat.node` renderer (ChatNodeDataMap
+  // merge) draws the pencil + reroll — the closest possible spot to the host's
+  // copy button on the user message. Disposal is fiber-tied like the workflow
+  // Definition above.
+  const disposeEditActionDefinition = ctx.conversationEvents.register(createEditActionDefinition())
+  ctx.effect(() => disposeEditActionDefinition)
+  ctx.slots.inject('conversation.chat.node', () =>
     ctx.slots.register(
       {
-        name: 'conversation.chat.assistant-actions',
-        id: 'graycode.regenerate',
-        order: 20,
+        name: 'conversation.chat.node',
+        key: EDIT_ACTION_KIND,
         locale: GRAYCODE_REROLL_NS,
-        inject: (): RegenerateInjected => ({
+        inject: (): EditUserActionInjected => ({
           remote,
-          // The sessions service is resolved at action time (4.3-L5, same as
-          // the subagent back-to-main action): a late-started host service is
-          // honored, and an unwired host simply no-ops on navigation. L-1: the
-          // open() result may be a promise — guard both throw and rejection
-          // (same pattern as the back-to-main action above).
-          open: (sessionId: string) => {
-            const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
-            if (sessions === undefined) return
-            try {
-              const result = sessions.open(sessionId) as unknown
-              if (result !== null && typeof result === 'object' && 'catch' in result) {
-                ;(result as { catch(onRejected: () => void): unknown }).catch(() => {})
-              }
-            } catch {
-              /* silent degradation */
-            }
-          },
+          open: openSession,
+          onCommitted: invalidateBranchGroups,
         }),
       },
-      RegenerateButton,
+      EditUserAction,
     ))
 
-  // F2: edit the user message that opened a completed turn and retry it via
-  // `branches/editRetry`. The `conversation.chat.turnTail` chain seat renders
-  // per completed turn; the selector hands the turn number to the entry.
+  // Per-turn branch switcher riding the `conversation.chat.turnTail` chain
+  // seat. The seat elects ONE entry per occurrence (first non-null selector
+  // wins), so the entry is the fork-turn candidate switcher ‹ 2/3 › alone —
+  // regenerate moved to the user-message action row (EditUserAction above),
+  // where the user expects it next to the copy/edit controls.
+  const branchT = ctx.locale.bind(GRAYCODE_BRANCH_NS) as TurnTailActionsInjected['branchT']
   ctx.slots.inject('conversation.chat.turnTail', () =>
     ctx.slots.register(
       {
         name: 'conversation.chat.turnTail',
-        select: selectEditTurn,
+        select: selectTurnTail,
         priority: 0,
         locale: GRAYCODE_REROLL_NS,
-        inject: (): EditTurnInjected => ({ remote }),
+        inject: (): TurnTailActionsInjected => ({
+          remote,
+          open: openSession,
+          branchT,
+        }),
       },
-      EditTurnButton,
+      TurnTailActions,
+    ))
+
+  // Session-level branch switcher (fallback/companion of the per-turn one):
+  // `conversation.session.header.actions` list entry cycling the whole group's
+  // candidates — covers the group-root session and unmappable fork turns.
+  ctx.slots.inject('conversation.session.header.actions', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.session.header.actions',
+        id: 'graycode.branch-switch',
+        order: 40,
+        locale: GRAYCODE_BRANCH_NS,
+        inject: (): BranchSwitchInjected => ({
+          remote,
+          open: openSession,
+        }),
+      },
+      SessionBranchSwitcher,
     ))
 
   // Manual conversation summary: `graycode.summarize` locale namespace + the

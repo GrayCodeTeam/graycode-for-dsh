@@ -31,11 +31,13 @@ import {
   buildEntriesSavePayload,
   buildModeSavePatch,
   createEntry,
+  defaultEntries,
   mergeToolPolicy,
   moveEntry,
   nextEntryOrder,
   parseImportPayload,
   parseToolPolicyText,
+  readImportFileText,
   removeEntry,
   reorderEntries,
   serializeExportPayload,
@@ -123,6 +125,26 @@ describe('createEntry / updateEntry / removeEntry', () => {
     expect(assistant.fakeThought).toBe('')
     const marker = createEntry('chat_history', [], () => 'id-c')
     expect('fakeThought' in marker).toBe(false)
+  })
+
+  it('defaultEntries builds the reset trio: system → Chat History → dynamic context', () => {
+    const defaults = defaultEntries()
+    expect(defaults.map(entry => [entry.role, entry.order, entry.name])).toEqual([
+      ['system', 0, '系统提示词'],
+      ['chat_history', 1, 'Chat History'],
+      ['user', 2, '动态上下文'],
+    ])
+    expect(defaults[0]!.content).toContain('{{$ENVIRONMENT}}')
+    expect(defaults[2]!.content).toContain('{{$TODO_LIST}}')
+    expect(defaults[1]).toMatchObject({ id: 'chat-history', enabled: true, content: '' })
+    expect(validateEntries(defaults)).toEqual([])
+  })
+
+  it('creates chat_history markers with the fixed display name and empty content', () => {
+    const marker = createEntry('chat_history', [entry('a', 'user', 2)], () => 'marker-id')
+    expect(marker).toEqual({ id: 'marker-id', role: 'chat_history', order: 3, enabled: true, name: 'Chat History', content: '' })
+    // Empty content keeps the existing chat-history-content validation green.
+    expect(validateEntries([marker])).toEqual([])
   })
 
   it('reorders an entry before/after a target and renumbers orders (drag & drop)', () => {
@@ -295,12 +317,35 @@ describe('parseImportPayload', () => {
     expect(parseImportPayload('[{"id":"a"}]')).toEqual({ ok: true, payload: [{ id: 'a' }] })
   })
 
+  it('accepts the Gray Code export envelope (object with a modes array)', () => {
+    const envelope = JSON.stringify({
+      schema: 'graycode.promptModes.v1',
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      modes: [{ id: 'code', name: 'Code', template: 't', promptEntries: [] }],
+    })
+    expect(parseImportPayload(envelope)).toEqual({ ok: true, payload: JSON.parse(envelope) })
+  })
+
   it('rejects invalid JSON, empty input and non-object payloads', () => {
     expect(parseImportPayload('{nope')).toEqual({ ok: false, reason: 'invalid-json' })
     expect(parseImportPayload('   ')).toEqual({ ok: false, reason: 'empty-payload' })
     expect(parseImportPayload('"just a string"')).toEqual({ ok: false, reason: 'not-object' })
     expect(parseImportPayload('42')).toEqual({ ok: false, reason: 'not-object' })
     expect(parseImportPayload('null')).toEqual({ ok: false, reason: 'not-object' })
+  })
+})
+
+describe('readImportFileText', () => {
+  it('reads a file-like object into text (structural { name, text } typing)', async () => {
+    const file = { name: 'graycode-prompt-modes.json', text: async () => '{"schema":"graycode.promptModes.v1"}' }
+    await expect(readImportFileText(file)).resolves.toBe('{"schema":"graycode.promptModes.v1"}')
+  })
+
+  it('resolves null for a missing selection, an empty file name, or a failed read', async () => {
+    await expect(readImportFileText(null)).resolves.toBeNull()
+    await expect(readImportFileText(undefined)).resolves.toBeNull()
+    await expect(readImportFileText({ name: '', text: async () => 'x' })).resolves.toBeNull()
+    await expect(readImportFileText({ name: 'bad.json', text: async () => { throw new Error('boom') } })).resolves.toBeNull()
   })
 })
 
@@ -326,6 +371,7 @@ describe('buildCreateModeArgs', () => {
 describe('buildModeSavePatch', () => {
   const input = {
     name: '  Mode A  ',
+    template: 'You are {{$TOOLS}}',
     entries: [
       entry('x', 'user', 5, 'hi'),
       entry('y', 'assistant', 1, 'a', { fakeThought: 't' }),
@@ -338,9 +384,10 @@ describe('buildModeSavePatch', () => {
   it('builds the full update patch while customization is on', () => {
     const patch = buildModeSavePatch(input)
     expect(patch.name).toBe('Mode A')
-    // The template is NOT part of the patch anymore — the host keeps the
-    // stored value (preset entries are the only composition surface).
-    expect('template' in patch).toBe(false)
+    // The template rides the patch as internal draft state: the editor has no
+    // visible template field, but「恢复默认条目」clears it here to avoid
+    // double system text next to the seeded system entry.
+    expect(patch.template).toBe('You are {{$TOOLS}}')
     expect(patch.toolPolicyCustomized).toBe(true)
     expect(patch.toolPolicy).toEqual(['read_file', 'search_in_files'])
     expect(patch.promptEntries).toEqual([
@@ -538,6 +585,7 @@ describe('prompt modes transport', () => {
 
     const patch = buildModeSavePatch({
       name: 'Mode A',
+      template: 'You are {{$TOOLS}}',
       entries: [
         entry('e1', 'system', 0, 'be concise'),
         entry('e3', 'chat_history', 1, ''),

@@ -13,10 +13,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   CHECKPOINT_CONFIG_PATH_PREFIX,
+  CHECKPOINT_TOOL_CATALOG,
+  CHECKPOINT_TOOL_GROUP_ORDER,
   CHECKPOINT_TOOL_NAME_MAX_LENGTH,
   DEFAULT_CHECKPOINT_CONFIG,
   checkpointConfigAbsolutePath,
   checkpointConfigMessageKindEnabled,
+  checkpointConfigUnknownTools,
   checkpointConfigTextFromToolList,
   checkpointConfigToolIssueLabelKey,
   checkpointConfigToolListFromText,
@@ -26,9 +29,13 @@ import {
   validateCheckpointConfigToolLine,
   validateCheckpointConfigToolText,
   withCheckpointConfigMessageKind,
+  withCheckpointKnownTools,
+  withCheckpointToolFlag,
+  withCheckpointToolsReset,
+  withoutCheckpointTool,
   type CheckpointConfigValues,
 } from '../src/client/checkpointList/configModel.ts'
-import { DSH_TOOL_DEFAULTS } from '../src/client/settings/defaults.ts'
+import { DSH_AFTER_TOOL_DEFAULTS, DSH_BEFORE_TOOL_DEFAULTS, DSH_TOOL_DEFAULTS } from '../src/client/settings/defaults.ts'
 
 // ---------------------------------------------------------------------------
 // Defaults / normalization
@@ -39,12 +46,12 @@ describe('checkpoint config defaults and normalization', () => {
     expect(DEFAULT_CHECKPOINT_CONFIG.enabled).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.autoCheckpoint).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.modelToolsEnabled).toBe(true)
-    expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.beforeMessages).toEqual(['user'])
-    // The plugin default has the after-model slot off and both tool lists set
-    // to the DSH 24-tool default list (not empty).
+    expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
+    // The plugin default has the after-model slot off; tool lists are the
+    // selective defaults (before: 命令前/删除前; after: 写入后/差异后), not all 24.
     expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.afterMessages).toEqual([])
-    expect(DEFAULT_CHECKPOINT_CONFIG.beforeTools).toEqual([...DSH_TOOL_DEFAULTS])
-    expect(DEFAULT_CHECKPOINT_CONFIG.afterTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(DEFAULT_CHECKPOINT_CONFIG.beforeTools).toEqual([...DSH_BEFORE_TOOL_DEFAULTS])
+    expect(DEFAULT_CHECKPOINT_CONFIG.afterTools).toEqual([...DSH_AFTER_TOOL_DEFAULTS])
     expect(DSH_TOOL_DEFAULTS).toHaveLength(24)
   })
 
@@ -100,37 +107,43 @@ describe('checkpoint config defaults and normalization', () => {
 // ---------------------------------------------------------------------------
 
 describe('message checkpoint slots', () => {
-  it('derives toggle state from list membership', () => {
+  it('derives toggle state from list membership (three host-backed slots)', () => {
     expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser')).toBe(true)
+    expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'beforeModel')).toBe(true)
     // The plugin default has afterMessages off, so the after-model slot is off.
     expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'afterModel')).toBe(false)
     const off = normalizeCheckpointConfig({ messageCheckpoint: { beforeMessages: [], afterMessages: [] } })
     expect(checkpointConfigMessageKindEnabled(off, 'beforeUser')).toBe(false)
+    expect(checkpointConfigMessageKindEnabled(off, 'beforeModel')).toBe(false)
     expect(checkpointConfigMessageKindEnabled(off, 'afterModel')).toBe(false)
   })
 
-  it('turning a slot on appends the kind (idempotent)', () => {
+  it('turning a slot on appends the kind (idempotent) without clobbering other members', () => {
     const next = withCheckpointConfigMessageKind(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser', true)
-    expect(next.messageCheckpoint.beforeMessages).toEqual(['user'])
+    expect(next.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
     const afterModel = withCheckpointConfigMessageKind(next, 'afterModel', true)
     expect(afterModel.messageCheckpoint.afterMessages).toEqual(['model'])
+    const beforeModel = withCheckpointConfigMessageKind(next, 'beforeModel', true)
+    expect(beforeModel.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
   })
 
-  it('turning a slot off removes the kind and leaves the other slot intact', () => {
+  it('turning a slot off removes only that kind and leaves the other members intact', () => {
     const next = withCheckpointConfigMessageKind(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser', false)
-    expect(next.messageCheckpoint.beforeMessages).toEqual([])
+    expect(next.messageCheckpoint.beforeMessages).toEqual(['model'])
     expect(next.messageCheckpoint.afterMessages).toEqual([])
     expect(next.enabled).toBe(true)
     const bothOff = withCheckpointConfigMessageKind(next, 'afterModel', false)
     expect(bothOff.messageCheckpoint.afterMessages).toEqual([])
-    expect(bothOff.messageCheckpoint.beforeMessages).toEqual([])
+    expect(bothOff.messageCheckpoint.beforeMessages).toEqual(['model'])
+    const modelOff = withCheckpointConfigMessageKind(DEFAULT_CHECKPOINT_CONFIG, 'beforeModel', false)
+    expect(modelOff.messageCheckpoint.beforeMessages).toEqual(['user'])
   })
 
   it('re-enabling a slot after removal restores membership', () => {
     const off = withCheckpointConfigMessageKind(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser', false)
-    expect(off.messageCheckpoint.beforeMessages).toEqual([])
+    expect(off.messageCheckpoint.beforeMessages).toEqual(['model'])
     const on = withCheckpointConfigMessageKind(off, 'beforeUser', true)
-    expect(on.messageCheckpoint.beforeMessages).toEqual(['user'])
+    expect(on.messageCheckpoint.beforeMessages).toEqual(['model', 'user'])
   })
 })
 
@@ -223,7 +236,7 @@ describe('checkpoint config commit paths', () => {
     const next = setCheckpointConfigPath(base, ['messageCheckpoint', 'beforeMessages'], [])
     expect(next.messageCheckpoint.beforeMessages).toEqual([])
     expect(next.messageCheckpoint.afterMessages).toEqual([])
-    expect(base.messageCheckpoint.beforeMessages).toEqual(['user'])
+    expect(base.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
 
     const tools = setCheckpointConfigPath(next, ['checkpoints', 'beforeTools'], ['checkpoint_create'])
     expect(tools.beforeTools).toEqual(['checkpoint_create'])
@@ -244,9 +257,9 @@ describe('checkpoint config commit paths', () => {
     config = setCheckpointConfigPath(config, checkpointConfigAbsolutePath(['messageCheckpoint', 'beforeMessages']), slotOff.messageCheckpoint.beforeMessages)
     const parsed = checkpointConfigToolListFromText('checkpoint_create\ncheckpoint_verify\n')
     config = setCheckpointConfigPath(config, checkpointConfigAbsolutePath(['beforeTools']), parsed)
-    expect(config.messageCheckpoint.beforeMessages).toEqual([])
+    expect(config.messageCheckpoint.beforeMessages).toEqual(['model'])
     expect(config.beforeTools).toEqual(['checkpoint_create', 'checkpoint_verify'])
-    expect(config.afterTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(config.afterTools).toEqual([...DSH_AFTER_TOOL_DEFAULTS])
     expect(config.enabled).toBe(true)
   })
 })
@@ -264,5 +277,61 @@ describe('checkpoint config fallback translator', () => {
 
   it('returns the raw key for unknown keys', () => {
     expect(createCheckpointConfigFallbackT('zh')('config.nope')).toBe('config.nope')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tool matrix (checkbox editor) pure semantics
+// ---------------------------------------------------------------------------
+
+describe('tool matrix helpers', () => {
+  const sparse: CheckpointConfigValues = {
+    ...DEFAULT_CHECKPOINT_CONFIG,
+    beforeTools: ['write', 'my_mcp_tool'],
+    afterTools: [],
+  }
+
+  it('toggles one tool in one slot, preserving order and immutability', () => {
+    const on = withCheckpointToolFlag(sparse, 'bash', 'after', true)
+    expect(on.afterTools).toEqual(['bash'])
+    expect(on.beforeTools).toEqual(sparse.beforeTools)
+    expect(sparse.afterTools).toEqual([])
+    const off = withCheckpointToolFlag(sparse, 'write', 'before', false)
+    expect(off.beforeTools).toEqual(['my_mcp_tool'])
+    // 同值幂等：返回原引用。
+    expect(withCheckpointToolFlag(sparse, 'write', 'before', true)).toBe(sparse)
+  })
+
+  it('sets every known tool in one slot without touching custom names', () => {
+    const cleared = withCheckpointKnownTools(sparse, 'before', false)
+    expect(cleared.beforeTools).toEqual(['my_mcp_tool'])
+    const all = withCheckpointKnownTools(cleared, 'after', true)
+    // 全选按目录序追加（分组顺序），与默认清单只比集合不比顺序。
+    expect([...all.afterTools].sort()).toEqual([...DSH_TOOL_DEFAULTS].sort())
+    expect(all.beforeTools).toEqual(['my_mcp_tool'])
+  })
+
+  it('collects unknown stored names across both slots, deduped in order', () => {
+    expect(checkpointConfigUnknownTools(sparse)).toEqual(['my_mcp_tool'])
+    const both = { ...sparse, afterTools: ['my_mcp_tool', 'another_tool'] } as CheckpointConfigValues
+    expect(checkpointConfigUnknownTools(both)).toEqual(['my_mcp_tool', 'another_tool'])
+    expect(checkpointConfigUnknownTools(DEFAULT_CHECKPOINT_CONFIG)).toEqual([])
+  })
+
+  it('removes a custom tool from both slots', () => {
+    const next = withoutCheckpointTool(sparse, 'my_mcp_tool')
+    expect(next.beforeTools).toEqual(['write'])
+    expect(next.afterTools).toEqual([])
+  })
+
+  it('resets both slots to the selective default lists (before: 命令前/删除前; after: 写入后/差异后)', () => {
+    const next = withCheckpointToolsReset(sparse)
+    expect(next.beforeTools).toEqual([...DSH_BEFORE_TOOL_DEFAULTS])
+    expect(next.afterTools).toEqual([...DSH_AFTER_TOOL_DEFAULTS])
+  })
+
+  it('catalog covers the default tool surface exactly', () => {
+    expect([...CHECKPOINT_TOOL_CATALOG.map(entry => entry.name)].sort()).toEqual([...DSH_TOOL_DEFAULTS].sort())
+    expect(CHECKPOINT_TOOL_GROUP_ORDER).toContain('write')
   })
 })

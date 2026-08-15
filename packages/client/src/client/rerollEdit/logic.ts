@@ -1,62 +1,21 @@
 /**
- * Reroll / edit-turn (F1/F2) — pure decision logic, no React, no I/O.
+ * Reroll / edit-turn (F1/F2) — 纯决策逻辑，无 React、无 I/O。
  *
- * Feature 1 (regenerate): the `conversation.chat.assistant-actions` seat only
- * hands the addressed assistant `messageId`. The `branches/reroll` contract
- * needs the session turn number, which is resolved from the conversation
- * snapshot's `nodes` list (the legacy top-level mirror of the Chat
- * definitions): an `assistant` node carries both its durable `messageId` and
- * the owning `turn`.
+ * 功能 1（重新生成）：挂在 `conversation.chat.turnTail` 链座位（每个已完成轮次
+ * 渲染一次），链选择器直接给出该轮的会话轮号；`isRerollableTurn` 承担
+ * 首轮防御（turn ≤ 1 时宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN，按钮直接
+ * 不渲染，避免点击后暴露英文原文错误——见 logic 下方注释）。
  *
- * Feature 2 (edit user message): the `conversation.chat.turnTail` seat hands
- * the completed turn's `TurnLocation` (its `.turn` is the session turn
- * number). `UserMessageNode` itself carries no `turn` field, so the
- * turn → user-message mapping goes through the Chat snapshot's Location index
- * (`chat.locations.getTurn(turn)` → keyed Chat nodes): the `user/message`
- * event lands inside the turn it opens, so the resolved node with `kind:
- * 'user'` is the editable message. The editable text is the concatenation of
- * its `text` content blocks.
+ * 功能 2（编辑用户消息）：编辑入口以独立 chat 节点（见 editNode.ts）锚定在
+ * 用户消息正后方，渲染器经 `editTargetOfTurn` 从会话快照解析该轮「开轮」
+ * 的用户消息：Chat 快照 Location 索引（`chat.locations.getTurn(turn)`）给出
+ * 该轮的节点 key 列表，其中渲染 kind 与载荷 kind 均为 `user` 的第一个节点即
+ * 可编辑消息；返回的 `seq` 用于与节点锚定的用户消息事件比对（steering /
+ * 注入上下文消息不渲染编辑铅笔）。可编辑文本为其 `text` 内容块拼接。
  *
- * CLIENT BOUNDARY RULES: everything here is replay-safe and defensive — a
- * drifted host snapshot shape degrades to `undefined` (the buttons then
- * render nothing) instead of crashing the chat flow.
+ * CLIENT BOUNDARY RULES：这里的一切都可重放且防御式——宿主快照形状漂变时
+ * 一律降级为 `undefined`（按钮随之不渲染），绝不炸聊天流。
  */
-
-export interface RerollNodeLike {
-  readonly kind?: unknown
-  readonly messageId?: unknown
-  readonly turn?: unknown
-}
-
-export interface RerollSnapshotLike {
-  readonly nodes?: readonly (RerollNodeLike | null | undefined)[] | undefined
-}
-
-/**
- * Resolve the session turn number of the finalized assistant message
- * addressed by `messageId`. Defensive: only `assistant` nodes with a
- * non-negative integer `turn` qualify; absent or drifted rows yield
- * `undefined`. Turns ≤ 1 have no earlier turn to fork before — the host
- * rejects them with `GRAY_BRANCH_NO_PREVIOUS_TURN` — so they also resolve to
- * `undefined` and the regenerate action renders nothing on the first turn.
- */
-export function turnOfMessage(snapshot: RerollSnapshotLike | undefined, messageId: unknown): number | undefined {
-  if (snapshot === undefined) return undefined
-  const want = String(messageId)
-  for (const node of snapshot.nodes ?? []) {
-    if (node === null || node === undefined) continue
-    if (node.kind !== 'assistant') continue
-    if (node.messageId === undefined) continue
-    if (String(node.messageId) !== want) continue
-    if (typeof node.turn === 'number' && Number.isInteger(node.turn) && node.turn >= 0) {
-      // 首轮（turn ≤ 1）没有可 fork 的前缀，宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN；
-      // 直接视为不可重生成（按钮不渲染），避免点击后暴露英文原文错误。
-      if (node.turn <= 1) return undefined
-      return node.turn
-    }
-  }
-  return undefined
-}
 
 export interface ContentBlockLike {
   readonly type?: unknown
@@ -65,6 +24,18 @@ export interface ContentBlockLike {
 
 /** Host branch-domain code for “the target turn is the first turn (nothing to fork before it)”. */
 export const BRANCH_NO_PREVIOUS_TURN_CODE = 'GRAY_BRANCH_NO_PREVIOUS_TURN'
+
+/**
+ * True when a completed turn can be rerolled / edit-retried: reroll forks the
+ * prefix BEFORE the turn and resends the turn's user message, so turn ≤ 1 has
+ * no prefix — the host rejects it with `GRAY_BRANCH_NO_PREVIOUS_TURN`. The
+ * 首轮防御（turn ≤ 1 不渲染按钮）保持不变：点击后只会得到英文原文错误。
+ */
+export function isRerollableTurn(turn: unknown): turn is number {
+  if (typeof turn !== 'number') return false
+  if (!Number.isInteger(turn)) return false
+  return turn > 1
+}
 
 /**
  * True when a remote failure envelope carries the host's
@@ -105,6 +76,8 @@ export interface EditSnapshotLike {
 
 export interface EditTurnTarget {
   readonly turn: number
+  /** Durable event seq of the turn-opening user message (steering/context guard). */
+  readonly seq: number
   readonly text: string
 }
 
@@ -126,10 +99,11 @@ export function editTargetOfTurn(snapshot: EditSnapshotLike | undefined, turn: n
     if (node === undefined) continue
     if (node.kind !== 'user') continue
     if (typeof node.data !== 'object' || node.data === null) continue
-    const data = node.data as { readonly kind?: unknown; readonly content?: unknown }
+    const data = node.data as { readonly kind?: unknown; readonly seq?: unknown; readonly content?: unknown }
     if (data.kind !== 'user') continue
+    if (typeof data.seq !== 'number' || !Number.isInteger(data.seq)) continue
     const content = Array.isArray(data.content) ? data.content as readonly (ContentBlockLike | null | undefined)[] : undefined
-    return { turn, text: textOfBlocks(content) }
+    return { turn, seq: data.seq, text: textOfBlocks(content) }
   }
   return undefined
 }

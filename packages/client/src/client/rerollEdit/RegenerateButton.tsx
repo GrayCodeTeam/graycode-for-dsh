@@ -1,25 +1,20 @@
 /**
- * Regenerate assistant message (F1).
+ * 重新生成当前轮（F1 的按钮部分）。
  *
- * Registered into the host's additive `conversation.chat.assistant-actions`
- * list slot (same seat the built-in copy/branch controls share): the owner
- * hands the addressed assistant `messageId`, the session turn is resolved
- * from the conversation snapshot via {@link turnOfMessage}, and the click
- * calls the plugin's `branches/reroll` endpoint through the trusted
- * `/graycode` remote dispatcher. A successful reroll that names a branch
- * session navigates to it (same route as the subagent back-to-main action);
- * an endpoint error is surfaced in place (inline warning + console.warn),
- * never swallowed.
- *
- * The component is a thin presentational shell: visibility and the turn
- * resolution live in the pure {@link turnOfMessage} reader, so the
- * node-environment tests cover the decision logic without React.
+ * 由 TurnTailActions（`conversation.chat.turnTail` 链座位的唯一当选条目）内联
+ * 渲染：链选择器直接给出该轮的会话轮号，不再经 messageId → legacy nodes 反查
+ * （旧路径依赖宿主 IconActions 行对 extraActions 的渲染时机，且首轮防御
+ * turn ≤ 1 时静默不可见——「没有重roll」抱怨的两个来源）。现在每个已完成
+ * 且 turn > 1 的轮次都有稳定可见的按钮；点击调用插件的 `branches/reroll`
+ * 端点（可信 `/graycode` remote 通道），成功后若返回 branchSessionId 则跳转
+ * 打开（与 subagent back-to-main 同路由），并回调 onCommitted 让分支切换器
+ * 刷新候选。端点错误就地展示（行内警告 + console.warn），绝不吞掉。
  */
 import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { GrayRemoteInvoke } from '../settings/types.ts'
-import { isNoPreviousTurnFailure, turnOfMessage, type RerollSnapshotLike } from './logic.ts'
+import { isNoPreviousTurnFailure, isRerollableTurn } from './logic.ts'
 
 const buttonStyle: CSSProperties = {
   display: 'inline-flex',
@@ -71,34 +66,31 @@ function RefreshIcon({ size = 12 }: { size?: number }): ReactNode {
   )
 }
 
-/** Injected seat: the `/graycode` remote dispatcher plus optional branch navigation. */
-export interface RegenerateInjected {
+/** Props：/graycode remote 通道 + 可选跳转与提交回调。 */
+export interface RegenerateActionProps {
+  /** The completed turn's session turn number. */
+  readonly turn: number
+  /** Framework-injected current session id. */
+  readonly sessionId: string
+  /** Framework-injected translate seat for the `graycode.rerollEdit` namespace. */
+  readonly t: TranslateNS<'graycode.rerollEdit'>
   readonly remote: GrayRemoteInvoke
   /** Open a branch session after a successful reroll (absent without the sessions service). */
   readonly open?: (sessionId: string) => void
-}
-
-export interface RegenerateButtonProps extends RegenerateInjected {
-  /** Framework-injected addressed assistant message id. */
-  readonly messageId: unknown
-  /** Framework-injected current session id. */
-  readonly sessionId: string
-  /** Framework-injected conversation snapshot selector. */
-  readonly useSession: <T>(selector: (state: RerollSnapshotLike) => T) => T
-  /** Framework-injected translate seat for the `graycode.rerollEdit` namespace. */
-  readonly t: TranslateNS<'graycode.rerollEdit'>
+  /** reroll 成功后的回调（分支候选缓存失效等）。 */
+  readonly onCommitted?: () => void
 }
 
 type RerollPhase = 'idle' | 'working' | 'failed'
 
-/** Regenerate action for one finalized assistant message (renders nothing when unresolvable). */
-export function RegenerateButton({ messageId, sessionId, useSession, remote, open, t }: RegenerateButtonProps): ReactNode {
-  const snapshot = useSession((state) => state)
-  const turn = turnOfMessage(snapshot, messageId)
+/** Regenerate action for one completed turn (renders nothing on the first turn). */
+export function RegenerateAction({ turn, sessionId, t, remote, open, onCommitted }: RegenerateActionProps): ReactNode {
   const [phase, setPhase] = useState<RerollPhase>('idle')
   const [failure, setFailure] = useState<string | null>(null)
 
-  if (turn === undefined) return null
+  // 首轮（turn ≤ 1）没有可 fork 的前缀，宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN；
+  // 直接不渲染按钮，避免点击后暴露英文原文错误（防御保持不变）。
+  if (!isRerollableTurn(turn)) return null
 
   const start = async (): Promise<void> => {
     if (phase === 'working') return
@@ -108,6 +100,7 @@ export function RegenerateButton({ messageId, sessionId, useSession, remote, ope
       const result = await remote('branches', 'reroll', { sessionId, turn })
       if (result.ok) {
         setPhase('idle')
+        if (onCommitted !== undefined) onCommitted()
         const branchSessionId = (result.value as { branchSessionId?: unknown } | undefined)?.branchSessionId
         if (typeof branchSessionId === 'string' && branchSessionId.length > 0 && open !== undefined) {
           open(branchSessionId)

@@ -28,6 +28,12 @@ src/prompt/
 - **fakeThought 绝不降级为 `[thinking]` 文本前缀**：typed reasoning 块是唯一载体；
   渠道无法承载时思维链不注入（gate 关），而不是降级文本（主人决策，见
   thoughts/README.md 与 ADR-0002 §4b）。
+- **Chat History 定位条目恒在**（原项目 1.5.4 `ensureChatHistoryPromptEntry` 语义）：
+  每个模式经 load/create/update/import 任一归一化路径后都携带**恰好一个**
+  chat_history 条目——没有就自动补（固定 id `chat-history`、name `Chat History`、
+  恒启用、内容为空、order 排末位），有多个只保留第一个，marker 内容强制清空，
+  条目按 order 排序后重编号 0..n-1。内置模式种子同样自带该条目，因此打开
+  「提示词模式管理」默认即可看到 Chat History。
 - D-11=c 的系统文本段落路径（`[GrayCode preset entry: role=...]`）已删除。
 - `renderModeSectionText` 只渲染 `[customPrefix] + [template + system 条目] + [customSuffix]`；
   `{{$MODULE}}` 占位符照旧渲染。`options.sendHistoryThoughts` / `requestLayer` 已标记
@@ -70,8 +76,11 @@ src/prompt/
 
 `importModes` 接受旧版导出负载并做语义映射，返回 `{ modes, warnings }`：
 
-- **`type:'chat_history'` 条目** → `role:'chat_history'`。
-- **`dynamicTemplate`（dynamicTemplateEnabled=true 且非空）→ user 条目**（order 置于
+- **旧版前端导出信封**：`{ schema: 'graycode.promptModes.v1', exportedAt, modes:
+  PromptMode[] }`（注意 `modes` 是**数组**，区别于 SystemPromptConfig 的 Record）——
+  逐元素走 parseImportedMode；无 schema 标签但形状相同（顶层 `modes` 数组且无单模式
+  标记）的负载同样识别。
+- **`type:'chat_history'` 条目** → `role:'chat_history'`。- **`dynamicTemplate`（dynamicTemplateEnabled=true 且非空）→ user 条目**（order 置于
   首个 chat_history 条目之前），不再丢弃。
 - **`toolPolicy` / `toolPolicyCustomized` → 保存**进 PromptMode（不再丢弃），执行链
   `resolveModeToolPolicy` 优先读持久化值。
