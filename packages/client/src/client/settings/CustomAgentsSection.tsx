@@ -18,7 +18,7 @@ import { inputStyle, monoStyle, textareaStyle } from './styles.ts'
 export interface CustomAgentsSectionProps {
   t: GcTranslate
   agents: readonly CustomAgentConfig[]
-  onChange: (agents: CustomAgentConfig[]) => void
+  onChange: (agents: CustomAgentConfig[]) => void | Promise<void>
 }
 
 const panelStyle: CSSProperties = {
@@ -164,19 +164,23 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
   const [draftError, setDraftError] = useState<{ name?: string }>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState<AgentDraft>(EMPTY_DRAFT)
+  const [submitError, setSubmitError] = useState('')
 
   const addAgent = (): void => {
     const error = validateCustomAgentDraft(draft, agents)
     setDraftError(error)
     if (error.name !== undefined) return
-    onChange(upsertCustomAgent(agents, {
+    setSubmitError('')
+    Promise.resolve(onChange(upsertCustomAgent(agents, {
       id: createCustomAgentId(),
       name: draft.name.trim(),
       description: draft.description.trim(),
       systemPrompt: draft.systemPrompt.trim(),
       enabled: true,
-    }))
-    setDraft(EMPTY_DRAFT)
+    }))).then(
+      () => setDraft(EMPTY_DRAFT),
+      (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
+    )
   }
 
   const startEdit = (agent: CustomAgentConfig): void => {
@@ -190,24 +194,33 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       setDraftError(error)
       return
     }
-    onChange(upsertCustomAgent(agents, {
+    setDraftError({})
+    setSubmitError('')
+    Promise.resolve(onChange(upsertCustomAgent(agents, {
       ...agent,
       name: editDraft.name.trim(),
       description: editDraft.description.trim(),
       systemPrompt: editDraft.systemPrompt.trim(),
-    }))
-    setEditingId(null)
-    setDraftError({})
+    }))).then(
+      () => { setEditingId(null); setDraftError({}) },
+      (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
+    )
   }
 
   const deleteAgent = (agent: CustomAgentConfig): void => {
     if (!window.confirm(t('actions.deleteCustomAgentConfirm'))) return
-    onChange(removeCustomAgent(agents, agent.id))
+    setSubmitError('')
+    Promise.resolve(onChange(removeCustomAgent(agents, agent.id))).catch((cause: unknown) => {
+      setSubmitError(cause instanceof Error ? cause.message : String(cause))
+    })
     if (editingId === agent.id) setEditingId(null)
   }
 
   const toggleEnabled = (agent: CustomAgentConfig): void => {
-    onChange(toggleCustomAgentEnabled(agents, agent.id))
+    setSubmitError('')
+    Promise.resolve(onChange(toggleCustomAgentEnabled(agents, agent.id))).catch((cause: unknown) => {
+      setSubmitError(cause instanceof Error ? cause.message : String(cause))
+    })
   }
 
   return (
@@ -254,6 +267,8 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
           </button>
         </div>
       </div>
+
+      {submitError !== '' && <p style={errorStyle}>{t('customAgents.saveFailed')}: {submitError}</p>}
 
       {agents.length === 0 ? (
         <p style={emptyStyle}>{t('customAgents.empty')}</p>

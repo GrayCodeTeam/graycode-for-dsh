@@ -84,6 +84,7 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
   const [title, setTitle] = useState('')
   const [items, setItems] = useState<CheckpointItem[]>([])
   const [total, setTotal] = useState(0)
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -101,6 +102,7 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
   const clearWorkspaceResults = useCallback((): void => {
     setItems([])
     setTotal(0)
+    setNextCursor(undefined)
     setVerify({})
     setPreview(null)
     setGcPreview(null)
@@ -151,6 +153,7 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setItems(result.value.items)
       setTotal(result.value.total)
+      setNextCursor(result.value.nextCursor)
       setListWorkspace(token.workspace)
     } catch (cause) {
       if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
@@ -158,6 +161,27 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
       if (isCurrent(token)) setBusy(false)
     }
   }, [beginRequest, remote])
+
+  const loadMore = useCallback(async (): Promise<void> => {
+    const token = beginRequest(listWorkspace)
+    if (token === null) return
+    const cursor = nextCursor
+    try {
+      const result = await remote<CheckpointListResult>('checkpoints', 'list', argsWithWorkspace(token.workspace, {
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      }))
+      if (!isCurrent(token)) return
+      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+      setItems(current => [...current, ...result.value.items])
+      setTotal(result.value.total)
+      setNextCursor(result.value.nextCursor)
+    } catch (cause) {
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (isCurrent(token)) setBusy(false)
+    }
+  }, [beginRequest, isCurrent, listWorkspace, nextCursor, remote])
 
   useEffect(() => {
     const previousDefault = previousDefaultRef.current
@@ -394,6 +418,11 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
           </article>
         )
       })}
+      {nextCursor !== undefined && (
+        <button type="button" style={buttonStyle} disabled={busy} onClick={() => void loadMore()}>
+          {t('checkpoint.loadMore')}
+        </button>
+      )}
     </section>
   )
 }

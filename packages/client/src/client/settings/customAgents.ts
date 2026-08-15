@@ -30,7 +30,15 @@ export function customAgentToolNamePreview(agent: { name: string; id: string }):
   return `subagent_${stem}`
 }
 
-/** Draft validation: empty name or a duplicate of another entry. */
+/**
+ * Draft validation: empty name, an exact duplicate, or a tool-name slug
+ * collision with another entry. The plugin registers each enabled agent under
+ * `subagent_<slug(name)>` (`deriveToolName` in the plugin's
+ * `subagents/customAgents/domain/plan.ts`) and throws on duplicate tool names,
+ * so two differently-typed names that collapse to the same slug (e.g.
+ * `Code Reviewer` / `Code-Reviewer`) must be rejected here even though the raw
+ * names differ.
+ */
 export function validateCustomAgentDraft(
   draft: { name: string },
   existing: readonly CustomAgentConfig[],
@@ -38,6 +46,8 @@ export function validateCustomAgentDraft(
   if (draft.name.trim().length === 0) return { name: 'invalidName' }
   const normalized = draft.name.trim().toLowerCase()
   if (existing.some(agent => agent.name.trim().toLowerCase() === normalized)) return { name: 'duplicateName' }
+  const draftToolName = customAgentToolNamePreview({ name: draft.name, id: '' })
+  if (existing.some(agent => customAgentToolNamePreview(agent) === draftToolName)) return { name: 'duplicateToolName' }
   return {}
 }
 

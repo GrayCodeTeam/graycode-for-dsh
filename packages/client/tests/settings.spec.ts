@@ -119,6 +119,21 @@ describe('settings workspace and local-draft guards', () => {
     }
     expect(prepareTextCommit('one\n', lines)).toEqual({ value: ['one'], canonical: 'one' })
   })
+
+  it('clamps out-of-range number commits into the declared bounds at commit', () => {
+    expect(prepareNumberCommit('0.5', undefined, 1, 10)).toEqual({ value: 1, canonical: '1' })
+    expect(prepareNumberCommit('42', undefined, 1, 10)).toEqual({ value: 10, canonical: '10' })
+    expect(prepareNumberCommit('5', undefined, 1, 10)).toEqual({ value: 5, canonical: '5' })
+    expect(prepareNumberCommit('5', undefined, undefined, undefined)).toEqual({ value: 5, canonical: '5' })
+    // Bounds are declared in the display domain (seconds here), the stored
+    // value stays in the storage domain (milliseconds).
+    const seconds = {
+      toInput: (value: unknown) => typeof value === 'number' ? value / 1000 : 0,
+      fromInput: (value: unknown) => typeof value === 'number' ? Math.round(value * 1000) : 1000,
+    }
+    expect(prepareNumberCommit('4000', seconds, 1, 3600)).toEqual({ value: 3600000, canonical: '3600' })
+    expect(prepareNumberCommit('0.5', seconds, 1, 3600)).toEqual({ value: 1000, canonical: '1' })
+  })
 })
 
 describe('GrayCodeStore', () => {
@@ -196,6 +211,29 @@ describe('GrayCodeStore', () => {
     release({ ok: true, value: DEFAULTS })
     await Promise.all([first, second])
     expect(call).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a queued refresh alive when an in-flight write succeeds', async () => {
+    let releaseWrite!: (value: { ok: true; value: GrayCodeConfig }) => void
+    const writeGate = new Promise<{ ok: true; value: GrayCodeConfig }>(resolve => { releaseWrite = resolve })
+    let releaseRead!: (value: { ok: true; value: GrayCodeConfig }) => void
+    const readGate = new Promise<{ ok: true; value: GrayCodeConfig }>(resolve => { releaseRead = resolve })
+    const calls: string[] = []
+    const call = vi.fn(async (_channel, endpoint) => {
+      calls.push(endpoint)
+      return endpoint === 'config.get' ? readGate : writeGate
+    })
+    const store = createGrayCodeStore(makeConnection(call))
+    const write = store.patch({ memory: { ...DEFAULTS.memory, wakeLines: 3 } })
+    const refresh = store.refresh()
+    releaseWrite({ ok: true, value: { ...DEFAULTS, memory: { ...DEFAULTS.memory, wakeLines: 3 } } })
+    await write
+    releaseRead({ ok: true, value: DEFAULTS })
+    await refresh
+    // The refresh was queued behind the write; the write's success must NOT
+    // cancel it (previously it cleared `invalidated`), so `config.get` still
+    // fires and re-reads the acknowledged snapshot.
+    expect(calls).toEqual(['config.update', 'config.get'])
   })
 })
 

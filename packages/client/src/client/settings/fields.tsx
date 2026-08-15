@@ -256,7 +256,7 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
           {description !== undefined && <p style={fieldDescriptionStyle}>{description}</p>}
           <DraftControl
             external={external}
-            prepare={raw => prepareNumberCommit(raw, spec.transform)}
+            prepare={raw => prepareNumberCommit(raw, spec.transform, spec.min, spec.max)}
             onCommit={onChange}
             render={draft => (
               <input

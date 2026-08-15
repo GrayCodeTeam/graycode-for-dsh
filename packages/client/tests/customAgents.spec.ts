@@ -87,6 +87,22 @@ describe('validateCustomAgentDraft', () => {
   it('accepts unique names', () => {
     expect(validateCustomAgentDraft({ name: 'New Agent' }, existing)).toEqual({})
   })
+
+  it('rejects names whose tool-name slug collides with another entry (H-15)', () => {
+    // `Code-Reviewer` / `deep_research` slugify to `code-reviewer` /
+    // `deep-research` — the same tool names the plugin's `deriveToolName`
+    // would produce for the existing entries, which must be caught client-side.
+    expect(validateCustomAgentDraft({ name: 'Code-Reviewer' }, existing)).toEqual({ name: 'duplicateToolName' })
+    expect(validateCustomAgentDraft({ name: 'deep_research' }, existing)).toEqual({ name: 'duplicateToolName' })
+    expect(validateCustomAgentDraft({ name: '  Code Reviewer  ' }, existing)).toEqual({ name: 'duplicateName' })
+  })
+
+  it('accepts names whose slug is unique and CJK drafts (id-slug fallback)', () => {
+    expect(validateCustomAgentDraft({ name: 'Code Reviewer Jr.' }, existing)).toEqual({})
+    // CJK names have no ASCII slug, so their tool names fall back to the id
+    // slug — they can never collide with an ASCII entry or each other.
+    expect(validateCustomAgentDraft({ name: '代码审查' }, existing)).toEqual({})
+  })
 })
 
 describe('upsertCustomAgent', () => {

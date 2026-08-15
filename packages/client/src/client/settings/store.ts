@@ -108,9 +108,12 @@ class StoreImpl implements GrayCodeStore {
       try {
         const resolvedPayload = typeof payload === 'function' ? payload() : payload
         const result = await this.connection.rpc.call(GRAYCODE_CHANNEL, endpoint, resolvedPayload)
+        // A write success must NOT clear `invalidated`: a refresh() queued
+        // behind this write would then be silently dropped. The refresh simply
+        // re-reads the acknowledged snapshot afterwards, which is cheap and
+        // keeps the requested refresh honest.
         if (result.ok) {
           this.snapshot = { status: 'ready', config: result.value as GrayCodeConfig }
-          this.invalidated = false
           this.notify()
           return
         }

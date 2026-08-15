@@ -73,15 +73,33 @@ export function prepareTextCommit(raw: string, transform?: FieldValueTransform):
 /**
  * Prepare a number commit. Blank/partial/non-finite input stays local until it
  * becomes valid (or blur resets it), so intermediate states such as "-" are
- * never sent as zero.
+ * never sent as zero. When min/max bounds are given (in the input/display
+ * domain), an out-of-range value is clamped into the bounds before committing,
+ * so a commit never stores a number the declared field cannot represent.
  */
-export function prepareNumberCommit(raw: string, transform?: FieldValueTransform): PreparedFieldCommit | null {
+export function prepareNumberCommit(
+  raw: string,
+  transform?: FieldValueTransform,
+  min?: number,
+  max?: number,
+): PreparedFieldCommit | null {
   if (raw.trim() === '') return null
   const parsed = Number(raw)
   if (!Number.isFinite(parsed)) return null
   const value = transform === undefined ? parsed : transform.fromInput(parsed)
   const display = transform === undefined ? value : transform.toInput(value)
-  return typeof display === 'number' && Number.isFinite(display)
-    ? { value, canonical: String(display) }
+  if (typeof display !== 'number' || !Number.isFinite(display)) return null
+  const clamped = clampNumber(display, min, max)
+  const stored = transform === undefined ? clamped : transform.fromInput(clamped)
+  const canonicalDisplay = transform === undefined ? stored : transform.toInput(stored)
+  return typeof canonicalDisplay === 'number' && Number.isFinite(canonicalDisplay)
+    ? { value: stored, canonical: String(canonicalDisplay) }
     : null
+}
+
+/** Clamp a display-domain number into [min, max] when bounds are given. */
+function clampNumber(value: number, min?: number, max?: number): number {
+  if (min !== undefined && value < min) return min
+  if (max !== undefined && value > max) return max
+  return value
 }
