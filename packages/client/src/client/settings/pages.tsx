@@ -22,6 +22,7 @@ import { ActivityHeatmapPanel } from '../activityHeatmap/ActivityHeatmapPanel.ts
 import { ConnectionActivityTokensDataSource, RemoteActivityStatsDataSource } from '../activityHeatmap/dataSource.ts'
 import { MemoryManagePanel } from '../memoryManage/MemoryManagePanel.tsx'
 import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
+import { PromptModeManager } from './promptModes/PromptModeManager.tsx'
 
 export interface GrayCodePageProps {
   t: GcTranslate
@@ -109,6 +110,14 @@ const MemoryPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspac
           { kind: 'number', path: ['memory', 'entryChars'], labelKey: 'fields.entryChars', min: 1, max: 1000, step: 1 },
           { kind: 'number', path: ['memory', 'partChars'], labelKey: 'fields.partChars', min: 1, max: 1_000_000, step: 1 },
           { kind: 'number', path: ['memory', 'partLines'], labelKey: 'fields.partLines', min: 1, max: 100_000, step: 1 },
+          {
+            kind: 'textarea',
+            path: ['memory', 'systemPrompt'],
+            labelKey: 'label.memory.systemPrompt',
+            descriptionKey: 'desc.memory.systemPrompt',
+            placeholderKey: 'placeholder.memory.systemPrompt',
+            rows: 4,
+          },
         ]}
         config={config}
         onChange={onChange}
@@ -197,7 +206,7 @@ const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
   </div>
 )
 
-const PromptPage: GrayCodePage = ({ t, config, onChange }) => (
+const PromptPage: GrayCodePage = ({ t, config, onChange, remote }) => (
   <div>
     <FieldSection
       title={t('pages.prompt.title')}
@@ -211,6 +220,9 @@ const PromptPage: GrayCodePage = ({ t, config, onChange }) => (
         { kind: 'boolean', path: ['prompt', 'modeToolPolicy'], labelKey: 'fields.modeToolPolicy' },
         { kind: 'boolean', path: ['prompt', 'sendHistoryThoughts'], labelKey: 'fields.sendHistoryThoughts' },
         { kind: 'boolean', path: ['prompt', 'requestLayer'], labelKey: 'fields.requestLayer', descriptionKey: 'fields.requestLayer.description' },
+        { kind: 'boolean', path: ['prompt', 'overrideHostPrompt'], labelKey: 'fields.overrideHostPrompt', descriptionKey: 'fields.overrideHostPrompt.description' },
+        { kind: 'boolean', path: ['prompt', 'dynamicTodo'], labelKey: 'fields.dynamicTodo', descriptionKey: 'fields.dynamicTodo.description' },
+        { kind: 'boolean', path: ['prompt', 'dynamicMemory'], labelKey: 'fields.dynamicMemory', descriptionKey: 'fields.dynamicMemory.description' },
         { kind: 'boolean', path: ['thoughts', 'enabled'], labelKey: 'fields.thoughtsEnabled', descriptionKey: 'fields.thoughtsEnabled.description' },
         { kind: 'boolean', path: ['thoughts', 'sendHistoryThoughts'], labelKey: 'fields.thoughtsHistory' },
       ]}
@@ -218,6 +230,7 @@ const PromptPage: GrayCodePage = ({ t, config, onChange }) => (
       onChange={onChange}
       t={t}
     />
+    <PromptModeManager t={t} remote={remote} />
   </div>
 )
 

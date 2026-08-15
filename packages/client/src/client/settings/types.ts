@@ -22,6 +22,8 @@ export interface GrayCodeConfig {
     entryChars: number
     partChars: number
     partLines: number
+    /** 自定义记忆说明（MEMORY 动态上下文）；留空使用默认说明。 */
+    systemPrompt?: string
   }
   checkpoints: DataRootConfig & ScopedConfig & {
     maxCheckpoints: number
@@ -37,6 +39,12 @@ export interface GrayCodeConfig {
     sendHistoryThoughts: boolean
     modeToolPolicy: boolean
     requestLayer: boolean
+    /** 覆盖 DSH 自带系统提示词（宿主内容以 {{graycode_dsh_prompt}} 变量可引用）。 */
+    overrideHostPrompt: boolean
+    /** 注入 TODO 动态上下文（以宿主注入上下文行显示）。 */
+    dynamicTodo: boolean
+    /** 注入 MEMORY 说明动态上下文。 */
+    dynamicMemory: boolean
   }
   migration: DataRootConfig & {
     enabled: boolean
