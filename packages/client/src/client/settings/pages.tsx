@@ -10,9 +10,11 @@ import {
   IconEnhanceOutline16,
   IconGraphLineOutline16,
   IconSettingsOutline16,
+  IconUserOutline16,
 } from './icons.tsx'
 import { AGENT_SCOPES } from './defaults.ts'
 import { CheckpointManager } from './CheckpointManager.tsx'
+import { CustomAgentsSection } from './CustomAgentsSection.tsx'
 import { FieldSection, type FieldSpec, type GcTranslate } from './fields.tsx'
 import { buttonDangerStyle, noteStyle } from './styles.ts'
 import type { GrayCodeConfig, GrayRemoteInvoke } from './types.ts'
@@ -174,6 +176,27 @@ const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT, co
   )
 }
 
+const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
+  <div>
+    <FieldSection
+      title={t('pages.subagents.title')}
+      description={t('pages.subagents.description')}
+      fields={[
+        { kind: 'number', path: ['subagents', 'maxHopDepth'], labelKey: 'fields.maxHopDepth', min: 0, step: 1 },
+        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', min: 0, step: 1 },
+      ]}
+      config={config}
+      onChange={onChange}
+      t={t}
+    />
+    <CustomAgentsSection
+      t={t}
+      agents={config.subagents.customAgents}
+      onChange={(agents) => onChange(['subagents', 'customAgents'], agents)}
+    />
+  </div>
+)
+
 const PromptPage: GrayCodePage = ({ t, config, onChange }) => (
   <div>
     <FieldSection
@@ -211,8 +234,6 @@ const ToolsPage: GrayCodePage = ({ t, config, onChange }) => (
         scope('file', t),
         { kind: 'boolean', path: ['todo', 'enabled'], labelKey: 'fields.todoEnabled' },
         scope('todo', t),
-        { kind: 'number', path: ['subagents', 'maxHopDepth'], labelKey: 'fields.maxHopDepth', min: 0, step: 1 },
-        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', min: 0, step: 1 },
         { kind: 'boolean', path: ['notifications', 'enabled'], labelKey: 'fields.notificationsEnabled' },
         scope('notifications', t),
         { kind: 'boolean', path: ['notifications', 'windowsToast'], labelKey: 'fields.windowsToast' },
@@ -263,6 +284,7 @@ export const CATEGORIES: readonly GrayCodeCategory[] = [
   { id: 'memory', labelKey: 'tabs.memory', icon: <IconDataOutline16 size={16} />, page: MemoryPage },
   { id: 'workflows', labelKey: 'tabs.workflows', icon: <IconChecklistOutline14 size={16} />, page: WorkflowsPage },
   { id: 'activity', labelKey: 'tabs.activity', icon: <IconGraphLineOutline16 size={16} />, page: ActivityPage },
+  { id: 'subagents', labelKey: 'tabs.subagents', icon: <IconUserOutline16 size={16} />, page: SubagentsPage },
   { id: 'prompt', labelKey: 'tabs.prompt', icon: <IconEnhanceOutline16 size={16} />, page: PromptPage },
   { id: 'tools', labelKey: 'tabs.tools', icon: <IconCodeOutline16 size={16} />, page: ToolsPage },
   { id: 'advanced', labelKey: 'tabs.advanced', icon: <IconSettingsOutline16 size={16} />, page: AdvancedPage },

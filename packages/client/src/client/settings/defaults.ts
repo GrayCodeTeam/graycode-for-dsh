@@ -41,7 +41,7 @@ export const DEFAULTS: GrayCodeConfig = {
   media: { enabled: true, agentScope: 'roots', maxBatch: 10 },
   file: { enabled: true, agentScope: 'roots' },
   todo: { enabled: true, agentScope: 'roots' },
-  subagents: { maxHopDepth: 5, maxConcurrent: 2 },
+  subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
   notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
   thoughts: { enabled: false, sendHistoryThoughts: false },
 }

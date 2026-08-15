@@ -6,6 +6,15 @@ export interface DataRootConfig { dataRoot: string }
 export interface ScopedConfig { agentScope: AgentScope }
 export interface ToggleScopedConfig extends ScopedConfig { enabled: boolean }
 
+/** S2 custom subagent (mirror of the plugin's `customAgents` domain entry). */
+export interface CustomAgentConfig {
+  id: string
+  name: string
+  description: string
+  systemPrompt: string
+  enabled: boolean
+}
+
 export interface GrayCodeConfig {
   workflows: DataRootConfig & ScopedConfig & { documentRoot: string }
   memory: DataRootConfig & ScopedConfig & {
@@ -38,7 +47,7 @@ export interface GrayCodeConfig {
   media: ToggleScopedConfig & { maxBatch: number }
   file: ToggleScopedConfig
   todo: ToggleScopedConfig
-  subagents: { maxHopDepth: number; maxConcurrent: number }
+  subagents: { maxHopDepth: number; maxConcurrent: number; customAgents: CustomAgentConfig[] }
   notifications: ToggleScopedConfig & { windowsToast: boolean }
   thoughts: { enabled: boolean; sendHistoryThoughts: boolean }
 }
