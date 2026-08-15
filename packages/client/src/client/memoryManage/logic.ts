@@ -841,6 +841,21 @@ export function normalizeMemoryNoteText(text: string): { readonly text: string; 
   return { text: collapsed.trim(), changed: collapsed !== text }
 }
 
+/** UTF-8 byte length of a string (TextEncoder in browsers; node fallback). */
+export function utf8Bytes(text: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length
+  return text.length
+}
+
+/**
+ * 3.4-M2 (edit parity): 编辑保存路径的字节计数——按归一化后的单行文本计算
+ * （与 saveEdit 实际提交的内容一致），避免 overlay 计数与提交口径不一致
+ * （原始文本含 \n/\r\n 时字节数虚高，多行文本也会被 host 单行契约拒绝）。
+ */
+export function memoryEditByteLength(text: string): number {
+  return utf8Bytes(normalizeMemoryNoteText(text).text)
+}
+
 /** Stable local validation failure matching the host's over-limit response. */
 export function memoryEntryCharsExceededFailure(actualBytes: number, limit: number): GrayRemoteFailure {
   return {

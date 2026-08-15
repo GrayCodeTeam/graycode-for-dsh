@@ -792,6 +792,12 @@ export function MemoryManagePanel({
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
+    // 3.4-M2 (edit parity): the host `memory/edit` contract rejects line breaks
+    // ("A memory is one line."). Collapse them to spaces before submitting —
+    // same normalization as the add path, so the byte counter (normalized) and
+    // the submitted text stay consistent and multi-line drafts are not rejected.
+    const text = normalizeMemoryNoteText(nextText).text
+    if (text.length === 0) return
     const requestTransport = transport
     setAddNote(null)
     // Capture the list generation the target belongs to; a response landing
@@ -807,7 +813,7 @@ export function MemoryManagePanel({
         scope: target.scope,
         workspace: target.workspace,
         id: target.id,
-        text: nextText,
+        text,
         expectedRevision: target.revision,
       })
     } catch (err) {
@@ -955,6 +961,7 @@ export function MemoryManagePanel({
 
   const onBatchForgetConfirm = useCallback(async () => {
     if (transport === undefined || batchForget.target === null) return
+    const requestTransport = transport
     const submitting = confirmBatchForget(batchForget)
     setBatchForget(submitting)
     const target = submitting.target!
@@ -962,7 +969,7 @@ export function MemoryManagePanel({
     const contextKey = currentContextKeyRef.current
     let result
     try {
-      result = await transport.forgetBatch({
+      result = await requestTransport.forgetBatch({
         ids: target.ids,
         expectedRevision: target.revision,
         confirm: true,
@@ -973,6 +980,13 @@ export function MemoryManagePanel({
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
     if (!mountedRef.current || requestId !== batchForgetSeqRef.current || contextKey !== currentContextKeyRef.current) return
+    if (requestTransport !== currentTransportRef.current) {
+      // Transport swapped mid-flight (HMR): abandon the machine back to idle so
+      // it can never wedge in 'submitting' (the view-reset effect does not run
+      // on a transport change) — same guard as onForgetConfirm.
+      setBatchForget(IDLE_BATCH_FORGET_STATE)
+      return
+    }
     if (result.ok) {
       // Success (or partial success): the store renumbered, so any selection
       // is stale — clear it and refresh. Skipped ids surface as a warning

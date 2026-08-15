@@ -282,4 +282,20 @@ describe('createMemoryPreStepListener', () => {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })
+
+  test('enabled=false → 不注入（原样透传 downstream，M-1）', async () => {
+    const { service, dataRoot } = makeService()
+    try {
+      await service.getGlobal().then(mgr => mgr.note('mem-x'))
+      const listener = createMemoryPreStepListener(service, undefined, { enabled: false })
+      const agent = fakeAgent('agent-1', WS)
+      const decision = await listener(stepPayload(agent), () => enterDecision(1))
+      expect(decision.kind === 'enter' && decision.messages).toHaveLength(1)
+      // 同一 agent 后续步骤仍不注入（去重状态未被触碰）
+      const second = await listener(stepPayload(agent), () => enterDecision(2))
+      expect(second.kind === 'enter' && second.messages).toHaveLength(2)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
 })

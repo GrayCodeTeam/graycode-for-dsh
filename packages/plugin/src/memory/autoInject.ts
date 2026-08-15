@@ -47,6 +47,18 @@ export interface MemoryInjectorLogger {
   warn(message: string): void
 }
 
+/** Options for {@link createMemoryPreStepListener}. */
+export interface MemoryPreStepListenerOptions {
+  /**
+   * Master switch (default true). `false` → the listener passes every pre-step
+   * through untouched: no memory snapshot is ever injected into the agent
+   * context (M-1 parity with the prompt domain's isEnabled() and the tool
+   * gate). Static by construction: HMR rebuilds apply() and creates a fresh
+   * listener with the new config.
+   */
+  readonly enabled?: boolean
+}
+
 const PLUGIN_SOURCE = 'graycode-memory'
 
 /**
@@ -144,7 +156,9 @@ function appendWakeBlocks(lines: string[], blocks: Array<{ lo: number; hi: numbe
 export function createMemoryPreStepListener(
   service: MemoryService,
   logger: MemoryInjectorLogger = { warn: () => {} },
+  options: MemoryPreStepListenerOptions = {},
 ): (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision> {
+  const enabled = options.enabled !== false
   /** Last injected revision per agent; unset agents inject on first qualified step. */
   const lastRevisions = new WeakMap<Agent, string>()
   /** 每 agent 串行链：并发 pre-step 按到达顺序执行，使「检查 revision → 注入 → 写入」成为原子段 */
@@ -166,8 +180,11 @@ export function createMemoryPreStepListener(
     return next
   }
 
-  return (payload, next): Promise<PreStepDecision> =>
-    runSerialized(payload.agent, async () => {
+  return (payload, next): Promise<PreStepDecision> => {
+    // M-1: enabled=false → 短路透传 downstream（不构建快照、不触碰去重状态）。
+    // 静态门控：HMR 重建 apply() 时以新配置创建新 listener。
+    if (!enabled) return next()
+    return runSerialized(payload.agent, async () => {
       const downstream = await next()
       if (downstream.kind !== 'enter' || downstream.messages.length === 0) return downstream
       if (payload.signal.aborted) return downstream
@@ -185,4 +202,5 @@ export function createMemoryPreStepListener(
       lastRevisions.set(payload.agent, snapshot.revision)
       return { kind: 'enter', messages: [...downstream.messages, snapshot.message] }
     })
+  }
 }

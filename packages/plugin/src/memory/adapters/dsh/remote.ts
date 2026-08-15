@@ -371,28 +371,18 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
         if (toDelete.length === 0) {
           return { removed: 0, notFound }
         }
-        try {
-          const result = await manager.deleteEntries(toDelete)
-          return { removed: result.removed, notFound }
-        } catch (err) {
-          // 快照与删除之间的并发收缩：deleteEntries 的 maxId 校验抛
-          // "No memory at index N."——吞掉，按最新快照重算仍存在的 id 再删
-          //（位置 id 语义，重算后为当前正确位置），丢失的并入 notFound。
-          const message = err instanceof Error ? err.message : String(err)
-          if (!/No memory at index/i.test(message)) {
-            throw mapStoreFailure(err, 'memory.forgetBatch')
-          }
-          const retrySnapshot = await manager.listEntriesSnapshot()
-          const stillPresent = new Set(retrySnapshot.entries.map(entry => entry.id))
-          const lost = toDelete.filter(id => !stillPresent.has(id))
-          const stillToDelete = toDelete.filter(id => stillPresent.has(id))
-          if (stillToDelete.length === 0) {
-            return { removed: 0, notFound: [...notFound, ...lost] }
-          }
-          const retry = await manager.deleteEntries(stillToDelete)
-          return { removed: retry.removed, notFound: [...notFound, ...lost] }
-        }
+        // CAS 与删除同锁（deleteEntries 锁内断言 revision）：并发重编号会在此
+        // 抛 MemoryRevisionConflictError → GRAY_CONFLICT，绝不重算后继续删
+        // （位置 id 在重编号后指向的已不是原快照语义的条目）。
+        const result = await manager.deleteEntries(toDelete, expectedRevision)
+        return { removed: result.removed, notFound }
       } catch (err) {
+        // 兼容旧契约：领域层 die 的越界文本（锁内断言后不可达，防御保留）
+        // 归类为冲突而非重试——并发下位置 id 已失效，客户端应刷新重试。
+        const message = err instanceof Error ? err.message : String(err)
+        if (/No memory at index/i.test(message)) {
+          throw new MemoryRevisionConflictError(expectedRevision, expectedRevision)
+        }
         throw mapStoreFailure(err, 'memory.forgetBatch')
       }
     },

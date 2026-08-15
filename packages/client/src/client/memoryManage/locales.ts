@@ -45,6 +45,7 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'entry.forget'
   | 'edit.title'
   | 'edit.required'
+  | 'edit.newlineHint'
   | 'edit.tooLong'
   | 'edit.save'
   | 'edit.cancel'
@@ -126,6 +127,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'entry.forget': '删除',
     'edit.title': '编辑记忆',
     'edit.required': '内容不能为空',
+    'edit.newlineHint': '换行将在保存时合并为空格',
     'edit.tooLong': '超出字节上限',
     'edit.save': '保存',
     'edit.cancel': '取消',
@@ -191,6 +193,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'entry.forget': 'Forget',
     'edit.title': 'Edit memory',
     'edit.required': 'Content is required',
+    'edit.newlineHint': 'Line breaks are collapsed to spaces on save',
     'edit.tooLong': 'Exceeds the byte limit',
     'edit.save': 'Save',
     'edit.cancel': 'Cancel',
@@ -264,6 +267,7 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'entry.forget': '削除',
   'edit.title': 'メモリを編集',
   'edit.required': '内容は必須です',
+  'edit.newlineHint': '保存時に改行はスペースに置き換えられます',
   'edit.tooLong': 'バイト上限を超えています',
   'edit.save': '保存',
   'edit.cancel': 'キャンセル',

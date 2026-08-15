@@ -15,6 +15,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import * as memory from '../../src/memory/index.ts'
 import { GrayRemoteService } from '../../src/remote/service.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const tempDirs: string[] = []
 
@@ -82,8 +83,10 @@ async function waitForEndpoints(ctx: Context, endpoint: string): Promise<void> {
 }
 
 interface MountResult {
+  ctx: Context
   remote: GrayRemoteService
   scopes: FakeAgentScope[]
+  agents: Agent[]
   dispose(): Promise<void>
 }
 
@@ -112,8 +115,10 @@ async function mountMemory(opts: { enabled?: boolean; preexistingAgent?: boolean
   })
   await waitForEndpoints(ctx, 'memory/scopes')
   return {
+    ctx,
     remote,
     scopes: entries.map(entry => entry.scope),
+    agents: entries.map(entry => entry.agent),
     dispose: async () => {
       await fiber.dispose()
     },
@@ -180,6 +185,7 @@ describe('memory 装配 enabled 门控（M-01）', () => {
     } as never)
     new GrayRemoteService(ctx)
     const fiber = await ctx.plugin(memory, { dataRoot, agentScope: 'roots', enabled: false, wakeLines: 96, entryChars: 280, partChars: 20_000, partLines: 500 })
+    await waitForEndpoints(ctx, 'memory/scopes')
     try {
       // 装配后才出现的新 agent：模拟 agent/created 事件（registrar 监听路径）。
       const late = makeFakeAgent('late-agent')
@@ -189,6 +195,31 @@ describe('memory 装配 enabled 门控（M-01）', () => {
       expect(late.scope.registered.has('memory_note')).toBe(false)
     } finally {
       await fiber.dispose()
+    }
+  })
+
+  it('enabled=false → agent/pre-step 不注入记忆快照（M-1 装配门控）', async () => {
+    const mounted = await mountMemory({ enabled: false })
+    try {
+      const message = createUserMessage({
+        content: [{ type: 'text', text: 'inbox' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })
+      const decision = await mounted.ctx.waterfall(
+        'agent/pre-step',
+        {
+          agent: mounted.agents[0]!,
+          messages: [message],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        () => Promise.resolve({ kind: 'enter' as const, messages: [message] }),
+      )
+      // enabled=false → 监听器短路透传：消息原样返回，无记忆快照注入。
+      expect(decision).toEqual({ kind: 'enter', messages: [message] })
+    } finally {
+      await mounted.dispose()
     }
   })
 
@@ -203,6 +234,7 @@ describe('memory 装配 enabled 门控（M-01）', () => {
     } as never)
     new GrayRemoteService(ctx)
     const fiber = await ctx.plugin(memory, { dataRoot, agentScope: 'roots', wakeLines: 96, entryChars: 280, partChars: 20_000, partLines: 500 })
+    await waitForEndpoints(ctx, 'memory/scopes')
     try {
       const late = makeFakeAgent('late-agent')
       entries.push(late)

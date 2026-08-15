@@ -1037,8 +1037,11 @@ export class MemoryLogStore {
     /**
      * deleteEntries: 批量删除多条原始记忆（可乱序、可重复），内部排序去重后
      * 单次扫描重编号写回，返回实际删除条数。删除后相关树摘要清空。
+     * @param expectedRevision - 可选 CAS 快照 revision：与单条 deleteEntry/deleteRange
+     *   同口径，在锁内断言（快照校验与删除原子化，防并发重编号把删除重定向到
+     *   未选中条目）。
      */
-    async deleteEntries(ids: number[]): Promise<{ removed: number }> {
+    async deleteEntries(ids: number[], expectedRevision?: string): Promise<{ removed: number }> {
         if (!Array.isArray(ids)) {
             die('deleteEntries: ids must be an array.');
         }
@@ -1056,6 +1059,9 @@ export class MemoryLogStore {
             await this.ensureReadyLocked();
             await this.loadRecordsLocked();
             const arr = this.recordsCache!.records;
+            // CAS 与删除同锁：revision 不匹配直接抛 MemoryRevisionConflictError，
+            // 调用方不得在无校验状态下继续删除（位置 id 在重编号后语义已失效）。
+            this.assertExpectedRevisionLocked(arr, expectedRevision);
             const T = arr.length;
             const maxId = sorted[sorted.length - 1]!;
             if (maxId >= T) {

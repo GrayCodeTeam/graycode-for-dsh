@@ -644,9 +644,12 @@ export class MemoryManager {
     /**
      * deleteEntries: 批量删除多条原始记忆。
      * 实现已抽离到 MemoryLogStore（行为不变）。
+     * @param expectedRevision - 可选 CAS 快照 revision（与 deleteEntry/deleteRange
+     *   同口径）：必须转发给 store，否则锁内断言失效——调用方传旧 revision 会
+     *   静默删除重编号后的其他条目（forgetBatch 锁内 CAS 依赖此参数）。
      */
-    async deleteEntries(ids: number[]): Promise<{ removed: number }> {
-        return this.store.deleteEntries(ids);
+    async deleteEntries(ids: number[], expectedRevision?: string): Promise<{ removed: number }> {
+        return this.store.deleteEntries(ids, expectedRevision);
     }
 
     /**

@@ -41,6 +41,7 @@ import {
   isStaleMemoryCursorFailure,
   isStaleMemoryRevisionFailure,
   mapMemoryFailure,
+  memoryEditByteLength,
   memoryEntryCharsExceededFailure,
   memoryRequestContextKey,
   memoryScopeOptionKey,
@@ -304,6 +305,29 @@ describe('normalizeMemoryNoteText (3.4-M2)', () => {
   it('reports unchanged when no line break is present (plain trimming is not flagged)', () => {
     expect(normalizeMemoryNoteText('single line')).toEqual({ text: 'single line', changed: false })
     expect(normalizeMemoryNoteText('  padded  ')).toEqual({ text: 'padded', changed: false })
+  })
+
+  it('counts edit bytes on the normalized single-line text the save path submits (3.4-M2)', () => {
+    // 无换行时与原文一致。
+    expect(memoryEditByteLength('single line')).toBe(11)
+    // CRLF 折叠为空格 + trim：计数按提交内容（'abc'）而非原文（'abc\r\n'）。
+    expect(memoryEditByteLength('abc\r\n')).toBe(3)
+    expect(memoryEditByteLength('a\nb')).toBe(memoryEditByteLength('a b'))
+  })
+
+  it('a normalized edit text passes the host memory/edit single-line contract (saveEdit parity)', async () => {
+    const transport = createMockMemoryTransport([{ id: 0, date: '2025-01-01', text: 'original' }])
+    const listed = await transport.list({})
+    if (!listed.ok) throw new Error('expected list')
+    // saveEdit 提交前归一化：多行草稿折叠为单行后不再被 host 拒绝。
+    const normalized = normalizeMemoryNoteText('first line\nsecond line')
+    expect(normalized.changed).toBe(true)
+    const edited = await transport.edit({
+      id: 0,
+      text: normalized.text,
+      expectedRevision: listed.value.revision,
+    })
+    expect(edited).toEqual({ ok: true, value: { id: 0, date: '2025-01-01', text: 'first line second line' } })
   })
 })
 
@@ -1233,6 +1257,16 @@ describe('createMockMemoryTransport — M-02/M-03 endpoints', () => {
     expect(bad.ok).toBe(false)
     if (bad.ok) return
     expect(bad.error.code).toBe(CODES.INVALID_INPUT)
+    // 负数 id：与 host 的「非负安全整数」校验对齐（M-03）。
+    const negative = await transport.forgetBatch({ ids: [-1], expectedRevision: before.value.revision, confirm: true })
+    expect(negative.ok).toBe(false)
+    if (negative.ok) return
+    expect(negative.error.code).toBe(CODES.INVALID_INPUT)
+    // expectedRevision 类型错误：与 host requireString 对齐 → INVALID_INPUT（而非误报冲突）。
+    const badRevisionType = await transport.forgetBatch({ ids: [1], expectedRevision: 42 as unknown as string, confirm: true })
+    expect(badRevisionType.ok).toBe(false)
+    if (badRevisionType.ok) return
+    expect(badRevisionType.error.code).toBe(CODES.INVALID_INPUT)
     const stale = await transport.forgetBatch({ ids: [1], expectedRevision: 'mock:old', confirm: true })
     expect(stale.ok).toBe(false)
     if (stale.ok) return

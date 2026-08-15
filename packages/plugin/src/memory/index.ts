@@ -110,8 +110,9 @@ export function apply(ctx: Context, config: Config): void {
   // Auto-injection is independent of the tool install scope: on the first
   // qualified pre-step of each agent (and again only when memory content
   // changes) a bounded snapshot enters the request; failures degrade to no
-  // injection. The listener unregisters with this fiber.
-  const detachInjector = ctx.on('agent/pre-step', createMemoryPreStepListener(service, ctx.logger))
+  // injection. The listener unregisters with this fiber. M-1: enabled=false
+  // → the listener short-circuits（与工具门控同开关，HMR 重建 apply 时生效）。
+  const detachInjector = ctx.on('agent/pre-step', createMemoryPreStepListener(service, ctx.logger, { enabled: memoryToolsEnabled(config) }))
   // Cross-domain service (prompt domain reads the MEMORY prompt text): the
   // prompt injector lazily fetches it per assembly via ctx.get, so HMR
   // restarts (settings changes) are picked up without re-registration.

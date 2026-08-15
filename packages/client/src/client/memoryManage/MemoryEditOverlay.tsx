@@ -17,6 +17,8 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   diffMemoryText,
+  memoryEditByteLength,
+  normalizeMemoryNoteText,
   type MemoryEntryViewModel,
   type MemoryErrorView,
   type MemoryDiffSegmentType,
@@ -190,12 +192,6 @@ const errorStyle: CSSProperties = {
   fontSize: '11px',
 }
 
-/** UTF-8 byte length of a string (TextEncoder in browsers; fallback for node). */
-function utf8Bytes(text: string): number {
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length
-  return text.length
-}
-
 const SEGMENT_STYLE: Record<MemoryDiffSegmentType, CSSProperties> = {
   same: {},
   added: { color: '#3fb950' },
@@ -218,7 +214,10 @@ export function MemoryEditOverlay({
   const [confirmingDiscard, setConfirmingDiscard] = useState(false)
   const diff = useMemo(() => diffMemoryText(entry.text, text), [entry.text, text])
   const empty = text.trim().length === 0
-  const bytes = utf8Bytes(text)
+  // 3.4-M2 (edit parity): 字节计数与保存提交同口径——按归一化后的单行文本计
+  // （host memory/edit 契约拒绝换行，提交前换行会被折叠为空格）。
+  const normalized = normalizeMemoryNoteText(text)
+  const bytes = memoryEditByteLength(text)
   const overLimit = entryChars !== undefined && bytes > entryChars
   const canSave = diff.changed && !empty && !saving && !overLimit
 
@@ -273,6 +272,11 @@ export function MemoryEditOverlay({
             </span>
           )}
         </div>
+        {normalized.changed && (
+          <div data-graycode-memory="edit-newline-hint" style={warnStyle}>
+            {t('edit.newlineHint')}
+          </div>
+        )}
         {empty && (
           <div data-graycode-memory="edit-required" style={warnStyle}>
             {t('edit.required')}

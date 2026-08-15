@@ -11,6 +11,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { MemoryService } from '../../src/memory/service.ts'
 import { createMemoryRemoteHandlers } from '../../src/memory/adapters/dsh/remote.ts'
 import { GrayRemoteService } from '../../src/remote/service.ts'
+import { MemoryRevisionConflictError } from '../../src/memory/domain/MemoryLogStore.ts'
 import {
   GRAY_REMOTE_ERROR_CODES,
   type GrayMemoryListResult,
@@ -267,5 +268,50 @@ describe('memory/forgetBatch 删除语义', () => {
     })
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.value).toEqual({ removed: 0, notFound: [0] })
+  })
+})
+
+describe('memory/forgetBatch 锁内 CAS（快照校验与删除同锁）', () => {
+  it('快照后并发单删 → deleteEntries 锁内 revision 断言拒绝（GRAY_CONFLICT，零删除）', async () => {
+    const { service, invoke } = await makeEnv()
+    await note(service, 'a')
+    await note(service, 'b')
+    await note(service, 'c')
+    const snapshot = await (await service.getGlobal()).listEntriesSnapshot()
+    // 模拟并发：快照后另一请求删除 [0]，重编号使位置 id 语义失效
+    const concurrent = await invoke('memory', 'forget', {
+      scope: 'global',
+      blockId: '0',
+      expectedRevision: snapshot.revision,
+      confirm: true,
+    })
+    expect(concurrent.ok).toBe(true)
+    // 客户端用旧快照 revision 提交批量删除 → 锁内断言拦截，绝不重算后误删
+    const result = await invoke('memory', 'forgetBatch', {
+      scope: 'global',
+      ids: [1],
+      expectedRevision: snapshot.revision,
+      confirm: true,
+    })
+    expectFailure(result, GRAY_REMOTE_ERROR_CODES.CONFLICT)
+    // 零删除：剩余仍是并发删除后的状态（'c', 'b'）
+    expect(await listTexts(invoke)).toEqual(['c', 'b'])
+  })
+
+  it('deleteEntries 直接调用携带旧 revision → MemoryRevisionConflictError', async () => {
+    const { service } = await makeEnv()
+    await note(service, 'a')
+    await note(service, 'b')
+    const mgr = await service.getGlobal()
+    const snapshot = await mgr.listEntriesSnapshot()
+    await mgr.deleteEntry(1, snapshot.revision)
+    // 锁内 CAS：store 用旧 revision 断言当前记录数组 → MemoryRevisionConflictError
+    //（与 memoryLogStore.spec.ts 的断言口径一致：按错误类而非消息文本）。
+    await expect(mgr.deleteEntries([0], snapshot.revision)).rejects.toMatchObject({
+      name: 'MemoryRevisionConflictError',
+      expectedRevision: snapshot.revision,
+    })
+    // 零删除：deleteEntry(1) 后只剩 'a'，deleteEntries 未误删。
+    expect(await mgr.listEntries()).toEqual([{ id: 0, date: expect.any(String), text: 'a' }])
   })
 })

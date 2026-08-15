@@ -486,8 +486,14 @@ export function createMockMemoryTransport(
           },
         }
       }
-      if (!Array.isArray(params.ids) || params.ids.length === 0 || params.ids.some(id => !Number.isSafeInteger(id))) {
-        return invalid('ids must be a non-empty array of integers', { field: 'ids' })
+      if (!Array.isArray(params.ids) || params.ids.length === 0
+        || params.ids.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id < 0)) {
+        // 与 host memory/forgetBatch 同口径：非空 + 非负安全整数（M-03）。
+        return invalid('ids must contain only non-negative safe integers', { field: 'ids' })
+      }
+      // 与 host requireString 同口径：expectedRevision 必须为非空字符串。
+      if (typeof params.expectedRevision !== 'string' || params.expectedRevision.trim().length === 0) {
+        return invalid('expectedRevision must be a non-empty string', { field: 'expectedRevision' })
       }
       const targetScope = params.scope ?? 'global'
       const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined

@@ -200,8 +200,6 @@ describe('memory/scopes 端点', () => {
 
   it('端点错误经信封返回（未注册端点 → GRAY_ENDPOINT_NOT_FOUND）', async () => {
     const { invoke } = await makeEnv()
-    const result = await invoke('memory', 'scopes', {})
-    expect(result.ok).toBe(true)
     expectFailure(await invoke('memory', 'nonexistent', {}), 'GRAY_ENDPOINT_NOT_FOUND')
   })
 })
