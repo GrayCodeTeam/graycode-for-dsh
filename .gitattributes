@@ -1,5 +1,6 @@
 # Hash-sensitive test fixtures: must stay LF on every platform.
 # core.autocrlf=true on Windows would rewrite LF -> CRLF on checkout and
 # break sha256 assertions in migration/prompt tests (see F08 chain tests).
+* text=auto
 packages/plugin/tests/migration/fixtures/** text eol=lf
 packages/plugin/tests/prompt/fixtures/** text eol=lf

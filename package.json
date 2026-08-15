@@ -10,7 +10,7 @@
     "test": "vitest run",
     "test:smoke": "vitest run packages/plugin/tests/agentScope.spec.ts packages/plugin/tests/persona.spec.ts packages/plugin/tests/e2e/loop.test.ts packages/plugin/tests/memory/scope.spec.ts packages/plugin/tests/prompt/template.test.ts packages/plugin/tests/workflows/modeToolsPolicy.test.ts",
     "pack": "pnpm -r --filter @graycode/dsh --filter @graycode/dsh-plugin --filter @graycode/dsh-client pack",
-    "verify:pack": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-pack.ps1",
+    "verify:pack": "node ./scripts/verify-pack.mjs",
     "ci:all": "pnpm typecheck && pnpm test && pnpm build && pnpm verify:pack",
     "dsh:plugin": "dsh plugin --profile graycode"
   },

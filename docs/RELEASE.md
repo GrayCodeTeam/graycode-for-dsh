@@ -59,13 +59,16 @@ npx --yes pnpm@11.7.0 run verify:pack -SkipBuild -SkipPack   # tarball 已存在
 ### 3.2 manifest / exports 核对
 
 - **plugin**：`main`/`types` = `lib/index.js` / `lib/index.d.ts`；`exports["."]` 同源；
-  `exports["./package.json"]`；`peerDependencies` = `@deepseek-ai/cordis@^4.0.1` + 6 个
-  `@deepseek-ai/dsh-{agent,fs,llm,session,tools}@^0.1.0-rc.6`；`dependencies` =
+  `exports["./package.json"]`；`peerDependencies` = `@deepseek-ai/cordis@^4.0.1` + 8 个
+  `@deepseek-ai/dsh-*@^0.1.0-rc.6`（agent, client-connection, fs, llm, session, settings,
+  system-prompt, tools）；`dependencies` =
   `dsh-home-paths@^0.1.0-rc.6`、`schemastery@^3.18.1`、`ignore@^7.0.0`、`sharp@^0.35.3`。
 - **client**：`exports["."]` → `lib/index.{js,d.ts}`；`exports["./client"]` →
   `types: ./lib/client/index.d.ts` / `default: ./lib/client.js`；`dsh.client` manifest =
-  `platform: web` + `inject: [dsh-client-runtime, dsh-client-locale, dsh-client-ui-layout]`；
-  `peerDependencies` = `react@^18.2.0` + `cordis@^4.0.1` + 5 个 `@deepseek-ai/dsh-client-*@^0.1.0-rc.6`。
+  `platform: web` + `inject: [dsh-client-runtime, dsh-client-locale, dsh-client-ui-layout,
+  dsh-client-ui-settings, dsh-client-connection]`（5 个）；
+  `peerDependencies` = `react@^18.2.0` + `cordis@^4.0.1` + 7 个 `@deepseek-ai/dsh-client-*@^0.1.0-rc.6`
+  （connection, locale, runtime, ui-conversation, ui-layout, ui-settings, ui-slots）。
 - **bundle**：`files` 仅 patch + README；`exports["./cordis.patch.yml"]`；`dsh.bundle.patch =
   ./cordis.patch.yml`。patch 行 ↔ `dependencies` 一致性由 verify-pack 自动断言（历史回归：
   `graycode-client` 行曾缺依赖导致全新 profile 启动 `ERR_MODULE_NOT_FOUND`，已补防）。
