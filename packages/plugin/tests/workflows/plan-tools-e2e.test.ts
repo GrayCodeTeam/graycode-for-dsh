@@ -98,6 +98,22 @@ async function targetExistsOnDisk(relPath: string): Promise<boolean> {
   return (await deps.fs.stat(target)) !== undefined
 }
 
+/** lossless-JSON 契约回归（H-1）：递归断言值中不存在 undefined（dsh-tools 快照失败条件） */
+function expectLosslessJson(value: unknown, keyPath = 'root'): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => expectLosslessJson(item, `${keyPath}[${index}]`))
+    return
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      expect(item, `${keyPath}.${key} must not be undefined`).not.toBeUndefined()
+      expectLosslessJson(item, `${keyPath}.${key}`)
+    }
+    return
+  }
+  expect(value, `${keyPath} must not be undefined`).not.toBeUndefined()
+}
+
 describe('create_plan', () => {
   it('writes the document with default .plan.md slug path and TODO/source markers; a second create is rejected', async () => {
     const created = await executeCreatePlan(deps, {
@@ -573,5 +589,33 @@ describe('plan 与 progress 阶段联动', () => {
       expect(validation.metadata.activeArtifacts.plan).toBe(created.path)
       expect(validation.metadata.todos).toEqual([{ id: 't1', content: 'x', status: 'completed' }])
     }
+  })
+})
+
+describe('lossless-JSON output contract (H-1)', () => {
+  it('create_plan / update_plan results never contain undefined values', async () => {
+    const created = await executeCreatePlan(deps, {
+      title: 'Json Plan',
+      plan: 'v1',
+      todos: [{ id: 't1', content: 'x', status: 'pending' }],
+    })
+    expectLosslessJson(created)
+
+    const updated = await executeUpdatePlan(deps, {
+      path: created.path,
+      plan: 'v2',
+      todos: [{ id: 't1', content: 'x', status: 'completed' }],
+      updateMode: 'revision',
+      changeSummary: 'scope updated',
+    })
+    expectLosslessJson(updated)
+
+    // progress_sync 模式无 changeSummary 等可选字段时同样满足契约
+    const synced = await executeUpdatePlan(deps, {
+      path: created.path,
+      todos: [{ id: 't1', content: 'x', status: 'pending' }],
+      updateMode: 'progress_sync',
+    })
+    expectLosslessJson(synced)
   })
 })

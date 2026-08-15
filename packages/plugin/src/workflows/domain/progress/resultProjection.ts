@@ -9,6 +9,7 @@ import type {
   ProgressToolStructuredResultV1,
 } from './schema.ts';
 import { buildCurrentProgressText, getLatestProgressMilestone } from './documentLayout.ts';
+import { omitUndefined } from '../shared/omitUndefined.ts';
 
 export interface ProjectProgressToolResultOptions {
   path: string;
@@ -53,7 +54,9 @@ export function projectProgressToolResultData(
   options: ProjectProgressToolResultOptions
 ): ProgressToolStructuredResultV1 {
   const snapshot = buildProgressSummarySnapshot(options.path, options.metadata);
-  return {
+  // lossless-JSON 契约：progressDelta / latestMilestone / warnings 等可选字段
+  // 缺失时必须省略键而不是携带 undefined（dsh-tools 快照会抛 ToolOutputError）。
+  return omitUndefined({
     path: options.path,
     progressSnapshot: snapshot,
     progressDelta: options.delta,
@@ -71,5 +74,5 @@ export function projectProgressToolResultData(
     stats: snapshot.stats,
     latestMilestone: snapshot.latestMilestone,
     warnings: options.warnings && options.warnings.length > 0 ? options.warnings : undefined,
-  };
+  });
 }

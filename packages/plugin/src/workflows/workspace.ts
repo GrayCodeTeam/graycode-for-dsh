@@ -84,7 +84,12 @@ function isScopedPathAllowedWithMultiRoot(
   const workspacePrefix = normalized.slice(0, slashIndex)
   if (workspacePrefix === '.' || workspacePrefix === '..') return false
   if (workspacePrefix.includes(':')) return false
-  if (workspacePrefix !== path.basename(deps.cwd)) return false
+  // Windows 文件系统大小写不敏感：workspace 前缀比较忽略大小写（POSIX 保持区分）
+  const workspaceName = path.basename(deps.cwd)
+  const prefixMatches = process.platform === 'win32'
+    ? workspacePrefix.toLowerCase() === workspaceName.toLowerCase()
+    : workspacePrefix === workspaceName
+  if (!prefixMatches) return false
 
   return validator(normalized.slice(slashIndex + 1))
 }

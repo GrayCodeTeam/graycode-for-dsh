@@ -37,6 +37,7 @@ import {
   validateReviewDocument,
 } from '../domain/review/reviewDocumentSection.ts'
 import { projectReviewToolResultData, buildReviewValidationSummaryFromResult } from '../domain/review/resultProjection.ts'
+import { omitUndefined } from '../domain/shared/omitUndefined.ts'
 import { slugify } from '../domain/shared/slugify.ts'
 import { normalizeLineEndingsToLF } from '../domain/shared/textUtils.ts'
 import {
@@ -220,7 +221,7 @@ export async function executeCreateReview(
       const outcome = await writeTargetText(deps, target, content, outPath)
       const progressWarnings = await syncProgressFromReviewArtifact(deps, {
         reviewPath: outPath,
-        title: summary.title || title || undefined,
+        ...(summary.title || title ? { title: summary.title || title } : {}),
         eventMessage: `同步审查文档：${outPath}`,
       })
 
@@ -307,8 +308,12 @@ export async function executeRecordReviewMilestone(
   const progressWarnings = await syncProgressFromReviewArtifact(deps, {
     reviewPath: path,
     title: next.result.reviewSnapshot.header.title,
-    latestConclusion: next.result.reviewSnapshot.summary.latestConclusion || undefined,
-    nextAction: next.result.reviewSnapshot.summary.recommendedNextAction || undefined,
+    ...(next.result.reviewSnapshot.summary.latestConclusion
+      ? { latestConclusion: next.result.reviewSnapshot.summary.latestConclusion }
+      : {}),
+    ...(next.result.reviewSnapshot.summary.recommendedNextAction
+      ? { nextAction: next.result.reviewSnapshot.summary.recommendedNextAction }
+      : {}),
     eventMessage: `同步审查里程碑：${next.result.milestoneId}`,
   })
 
@@ -387,8 +392,12 @@ export async function executeFinalizeReview(
   const progressWarnings = await syncProgressFromReviewArtifact(deps, {
     reviewPath: path,
     title: next.result.reviewSnapshot.header.title,
-    latestConclusion: next.result.reviewSnapshot.summary.latestConclusion || undefined,
-    nextAction: next.result.reviewSnapshot.summary.recommendedNextAction || undefined,
+    ...(next.result.reviewSnapshot.summary.latestConclusion
+      ? { latestConclusion: next.result.reviewSnapshot.summary.latestConclusion }
+      : {}),
+    ...(next.result.reviewSnapshot.summary.recommendedNextAction
+      ? { nextAction: next.result.reviewSnapshot.summary.recommendedNextAction }
+      : {}),
     eventMessage: `同步审查结论：${path}`,
   })
 
@@ -523,7 +532,9 @@ export async function executeValidateReviewDocument(
 
   const reviewValidation = buildReviewValidationSummaryFromResult(validation)
 
-  return {
+  // lossless-JSON 契约：summary 缺省（unknown 格式）时 title/date/status 等键
+  // 必须省略而不是携带 undefined（dsh-tools 快照会抛 ToolOutputError）。
+  return omitUndefined({
     path,
     ...validation,
     reviewSnapshot: validation.reviewSnapshot,
@@ -550,7 +561,7 @@ export async function executeValidateReviewDocument(
     issueCount: reviewValidation.issueCount,
     errorCount: reviewValidation.errorCount,
     warningCount: reviewValidation.warningCount,
-  }
+  })
 }
 
 function normalizeComparableText(value: unknown): string {

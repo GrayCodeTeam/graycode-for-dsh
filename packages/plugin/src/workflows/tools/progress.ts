@@ -38,6 +38,7 @@ import type {
   ProgressValidationSummaryV1,
 } from '../domain/progress/schema.ts'
 import { slugify } from '../domain/shared/slugify.ts'
+import { omitUndefined } from '../domain/shared/omitUndefined.ts'
 import {
   DEFAULT_PROGRESS_PATH,
   PROGRESS_PATH_SCOPE_LABEL,
@@ -146,12 +147,15 @@ function buildAppendedLogEntries(
   at: string
 ): ProgressLogItem[] {
   if (!Array.isArray(value)) return []
-  return value.map((item) => ({
-    at,
-    type: item.type,
-    refId: typeof item.refId === 'string' && item.refId.trim() ? item.refId.trim() : undefined,
-    message: item.message.trim(),
-  }))
+  return value.map((item) => {
+    const refId = typeof item.refId === 'string' && item.refId.trim() ? item.refId.trim() : undefined
+    return {
+      at,
+      type: item.type,
+      ...(refId !== undefined ? { refId } : {}),
+      message: item.message.trim(),
+    }
+  })
 }
 
 function normalizeStringList(value: unknown): string[] {
@@ -257,14 +261,14 @@ export async function executeCreateProgress(
       updatedAt: now,
       status: isProgressStatus(rawArgs.status) ? rawArgs.status : 'active',
       phase: isProgressPhase(rawArgs.phase) ? rawArgs.phase : 'design',
-      currentFocus: typeof rawArgs.currentFocus === 'string' ? rawArgs.currentFocus : undefined,
-      latestConclusion: typeof rawArgs.latestConclusion === 'string' ? rawArgs.latestConclusion : undefined,
-      currentBlocker: typeof rawArgs.currentBlocker === 'string' ? rawArgs.currentBlocker : undefined,
-      nextAction: typeof rawArgs.nextAction === 'string' ? rawArgs.nextAction : undefined,
+      ...(typeof rawArgs.currentFocus === 'string' ? { currentFocus: rawArgs.currentFocus } : {}),
+      ...(typeof rawArgs.latestConclusion === 'string' ? { latestConclusion: rawArgs.latestConclusion } : {}),
+      ...(typeof rawArgs.currentBlocker === 'string' ? { currentBlocker: rawArgs.currentBlocker } : {}),
+      ...(typeof rawArgs.nextAction === 'string' ? { nextAction: rawArgs.nextAction } : {}),
       activeArtifacts: normalizeProgressArtifactRef(rawArgs.activeArtifacts),
-      todos: Array.isArray(rawArgs.todos) ? rawArgs.todos as ProgressTodoItem[] : undefined,
+      ...(Array.isArray(rawArgs.todos) ? { todos: rawArgs.todos as ProgressTodoItem[] } : {}),
       milestones: [],
-      risks: Array.isArray(rawArgs.risks) ? rawArgs.risks as ProgressRiskItem[] : undefined,
+      ...(Array.isArray(rawArgs.risks) ? { risks: rawArgs.risks as ProgressRiskItem[] } : {}),
       log: [{ at: now, type: 'created', message: '初始化项目进度' }],
     }, { generatedAt: now })
 
@@ -554,7 +558,9 @@ export async function executeValidateProgressDocument(
       progressDelta: { type: 'validated' as const, changedFields: [] as string[] },
     }
 
-  return {
+  // lossless-JSON 契约：返回值不得含值为 undefined 的键（含嵌套 metadata 内的
+  // 可选字段），validate 结果整体过 omitUndefined。
+  return omitUndefined({
     ...progressData,
     progressValidation,
     formatVersion: progressValidation.formatVersion,
@@ -563,7 +569,7 @@ export async function executeValidateProgressDocument(
     errorCount: progressValidation.errorCount,
     warningCount: progressValidation.warningCount,
     issues: progressValidation.issues,
-  }
+  })
 }
 
 function renderToolResult<A, V>(_args: A, value: V): Array<{ type: 'text'; text: string }> {

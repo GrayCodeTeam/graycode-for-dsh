@@ -30,8 +30,9 @@ function isScopedMarkdownPathAllowed(path: string, scopeRoot: string): boolean {
         return false;
     }
 
-    // 防止路径穿越：包含 .. 的一律拒绝
-    if (normalizedPath.includes('..')) {
+    // 防止路径穿越：只拒绝等于 .. 的路径段（文件名字符串里的 .. 如 foo..bar.md
+    // 不构成目录穿越，不应被误拒）
+    if (normalizedPath.split('/').some((segment) => segment === '..')) {
         return false;
     }
 
@@ -129,7 +130,10 @@ export function isReviewPathAllowed(path: string): boolean {
 export function isProgressPathAllowed(path: string): boolean {
     // Windows 文件系统大小写不敏感：转小写后与固定路径比较（与 normalizeProgressPathKey 口径一致）
     const normalizedPath = (path || '').replace(/\\/g, '/').toLowerCase();
-    if (!normalizedPath || normalizedPath.startsWith('/') || normalizedPath.includes('..') || normalizedPath.endsWith('/')) {
+    if (!normalizedPath
+        || normalizedPath.startsWith('/')
+        || normalizedPath.split('/').some((segment) => segment === '..')
+        || normalizedPath.endsWith('/')) {
         return false;
     }
     return normalizedPath === '.graycode/progress.md';
@@ -357,7 +361,12 @@ function isPlanPathAllowedWithWorkspacePrefix(pathStr: string, workspaceName: st
   const workspacePrefix = normalized.slice(0, slashIndex)
   if (workspacePrefix === '.' || workspacePrefix === '..') return false
   if (workspacePrefix.includes(':')) return false
-  if (workspacePrefix !== workspaceName) return false
+  // Windows 文件系统大小写不敏感：workspace 前缀比较忽略大小写
+  if (process.platform === 'win32'
+    ? workspacePrefix.toLowerCase() !== workspaceName.toLowerCase()
+    : workspacePrefix !== workspaceName) {
+    return false
+  }
 
   return isPlanPathAllowed(normalized.slice(slashIndex + 1))
 }

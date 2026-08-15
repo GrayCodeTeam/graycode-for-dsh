@@ -17,6 +17,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { withProgressWriteLock } from '../domain/progress/progressWriteLock.ts'
+import { omitUndefined } from '../domain/shared/omitUndefined.ts'
 import { slugify } from '../domain/shared/slugify.ts'
 import { normalizeLineEndingsToLF } from '../domain/shared/textUtils.ts'
 import { syncProgressFromDesignArtifact } from '../autoSync.ts'
@@ -79,13 +80,15 @@ function buildDesignResult(
   } else if (outcome.warnings && outcome.warnings.length > 0) {
     warnings.push(...outcome.warnings)
   }
-  return {
+  // lossless-JSON 契约：返回值不得含值为 undefined 的键（dsh-tools 快照会抛
+  // ToolOutputError），可选字段用条件展开省略而非携带 undefined。
+  return omitUndefined({
     ...base,
     ...(warnings.length > 0 ? { warnings } : {}),
     ...(outcome.staged && outcome.stagedEntryId
       ? { staged: { entryId: outcome.stagedEntryId, status: 'pending' as const } }
       : {}),
-  }
+  })
 }
 
 /**
@@ -120,7 +123,7 @@ export async function executeCreateDesign(
     const outcome = await writeTargetText(deps, target, content, outPath)
     const progressWarnings = await syncProgressFromDesignArtifact(deps, {
       designPath: outPath,
-      title: title || undefined,
+      ...(title ? { title } : {}),
     })
     return buildDesignResult({ path: outPath, content }, progressWarnings, outcome)
   })
@@ -156,7 +159,7 @@ export async function executeUpdateDesign(
       : undefined
     const progressWarnings = await syncProgressFromDesignArtifact(deps, {
       designPath: targetPath,
-      title: typeof args.title === 'string' ? args.title : undefined,
+      ...(typeof args.title === 'string' && args.title ? { title: args.title } : {}),
     })
     return buildDesignResult(
       { path: targetPath, content, ...(changeSummary ? { changeSummary } : {}) },

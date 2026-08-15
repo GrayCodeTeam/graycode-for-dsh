@@ -448,3 +448,47 @@ describe('parseStructuredFindingBlock (legacy finding lines)', () => {
     expect(second?.severity).toBe('high')
   })
 })
+
+describe('validateReviewDocument on damaged V3 documents (H-12)', () => {
+  it('returns a structured validation failure instead of throwing on corrupted metadata JSON', () => {
+    const corrupted = [
+      '# Corrupted Review',
+      '- Date: 2026-04-03',
+      '- Status: in_progress',
+      '',
+      '## Review Scope',
+      '审查范围说明',
+      '',
+      '## Review Summary',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_START -->',
+      '- 当前状态：进行中',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_END -->',
+      '',
+      '## Review Findings',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_START -->',
+      '- [high] html: 缺少 landmark',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_END -->',
+      '',
+      '## Review Milestones',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_START -->',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_END -->',
+      '',
+      '<!-- GRAYCODE_REVIEW_METADATA_START -->',
+      '{ "formatVersion": 3, "reviewRunId": "review-',
+      '<!-- GRAYCODE_REVIEW_METADATA_END -->',
+    ].join('\n')
+
+    expect(detectReviewDocumentFormat(corrupted)).toBe('v3')
+    // 修复前：损坏的 metadata 直接抛 Error（v3 分支无 try/catch）；
+    // 修复后：转换为结构化校验失败结果（与 v2/v4 分支行为一致）。
+    expect(() => validateReviewDocument(corrupted)).not.toThrow()
+
+    const validation = validateReviewDocument(corrupted)
+    expect(validation.detectedFormat).toBe('v3')
+    expect(validation.isValid).toBe(false)
+    expect(validation.canAutoUpgrade).toBe(false)
+    expect(validation.issues.some((item) => item.code === 'invalid_v3_metadata')).toBe(true)
+    expect(validation.reviewSnapshot).toBeUndefined()
+    expect(validation.metadata).toBeUndefined()
+  })
+})

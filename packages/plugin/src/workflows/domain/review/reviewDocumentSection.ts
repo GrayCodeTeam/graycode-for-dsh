@@ -2517,17 +2517,30 @@ export function validateReviewDocument(content: string): ReviewValidationResult 
   }
 
   if (detectedFormat === 'v3') {
-    const state = loadReviewDocumentV3State(normalized);
-    const snapshot = convertV3StateToSnapshot(state);
-    return {
-      detectedFormat,
-      formatVersion: 3,
-      isValid: true,
-      canAutoUpgrade: true,
-      issues: [{ severity: 'warning', code: 'upgrade_required', message: 'Review document uses legacy V3 format and can be upgraded to V4.' }],
-      metadata: state.metadata,
-      reviewSnapshot: snapshot
-    };
+    // 损坏的 V3 文档（metadata 不是合法 JSON 等）不得裸抛异常：与 V4 分支
+    // （validateV4Document 的 invalid_snapshot_json）一致，把解析异常转换为结构化
+    // 校验失败结果（issues/failures），由调用方（工具层）正常渲染。
+    try {
+      const state = loadReviewDocumentV3State(normalized);
+      const snapshot = convertV3StateToSnapshot(state);
+      return {
+        detectedFormat,
+        formatVersion: 3,
+        isValid: true,
+        canAutoUpgrade: true,
+        issues: [{ severity: 'warning', code: 'upgrade_required', message: 'Review document uses legacy V3 format and can be upgraded to V4.' }],
+        metadata: state.metadata,
+        reviewSnapshot: snapshot
+      };
+    } catch (error: any) {
+      return {
+        detectedFormat,
+        formatVersion: 3,
+        isValid: false,
+        canAutoUpgrade: false,
+        issues: [{ severity: 'error', code: 'invalid_v3_metadata', message: error?.message || String(error) }]
+      };
+    }
   }
 
   if (detectedFormat === 'v2') {

@@ -56,6 +56,19 @@ describe('modeToolsPolicy path whitelist', () => {
     expect(isPlanPathAllowed('.graycode/design/foo.md')).toBe(false)
   })
 
+  it('does not reject valid filenames containing .. (3.17-M8)', () => {
+    // 文件名字符串里的 ..（如 foo..bar.md、..hidden.md）不构成目录穿越
+    expect(isDesignPathAllowed('.graycode/design/foo..bar.md')).toBe(true)
+    expect(isDesignPathAllowed('.graycode/design/a..b/sub..name.md')).toBe(true)
+    expect(isDesignPathAllowed('.graycode/design/..hidden.md')).toBe(true)
+    expect(isPlanPathAllowed('.graycode/plans/foo..bar.plan.md')).toBe(true)
+    expect(isReviewPathAllowed('.graycode/review/x..y.md')).toBe(true)
+    // 真正的目录穿越（路径段恰好为 ..）仍然拒绝
+    expect(isDesignPathAllowed('.graycode/design/../evil.md')).toBe(false)
+    expect(isDesignPathAllowed('.graycode/design/a/../b.md')).toBe(false)
+    expect(isDesignPathAllowed('.graycode/design/..')).toBe(false)
+  })
+
   it('accepts case variants (.MD extension / .GRAYCODE root) — Windows case-insensitive semantics (BUG-10)', () => {
     expect(isDesignPathAllowed('.graycode/design/foo.MD')).toBe(true)
     expect(isDesignPathAllowed('.GRAYCODE/design/foo.md')).toBe(true)
@@ -95,6 +108,17 @@ describe('workspace multi-root prefix variants', () => {
   it('rejects absolute paths and path traversal with a workspace prefix', () => {
     expect(isDesignModePathAllowedWithMultiRoot('C:/x/.graycode/design/foo.md', deps)).toBe(false)
     expect(isDesignModePathAllowedWithMultiRoot('.. /.. /evil.md'.replace(/ /g, ''), deps)).toBe(false)
+  })
+
+  it('workspace prefix comparison is case-insensitive on Windows, case-sensitive elsewhere (3.17-M8)', () => {
+    // Windows 文件系统大小写不敏感：My-Project 前缀与 my-project 工作区同名；
+    // POSIX 保持大小写敏感（目录名是大小写区分的）。
+    const caseVariant = isDesignModePathAllowedWithMultiRoot('My-Project/.graycode/design/foo.md', deps)
+    if (process.platform === 'win32') {
+      expect(caseVariant).toBe(true)
+    } else {
+      expect(caseVariant).toBe(false)
+    }
   })
 })
 

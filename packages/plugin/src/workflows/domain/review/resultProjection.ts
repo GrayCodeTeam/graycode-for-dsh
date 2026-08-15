@@ -4,6 +4,7 @@
 
 import type { ReviewDocumentSummarySnapshot, ReviewToolDeltaV4, ReviewToolStructuredResultV4, ReviewValidationResult, ReviewValidationSummaryV4 } from './schema.ts';
 import { buildSummaryFromSnapshot, summarizeReviewDocument, validateReviewDocument } from './reviewDocumentSection.ts';
+import { omitUndefined } from '../shared/omitUndefined.ts';
 
 export interface ProjectReviewToolResultOptions {
   path: string;
@@ -78,5 +79,8 @@ export function projectReviewToolResultData(options: ProjectReviewToolResultOpti
     Object.assign(data, options.extra);
   }
 
-  return data;
+  // lossless-JSON 契约：reviewSnapshot / metadata / content / delta 等可选字段
+  // 缺失时必须省略键而不是携带 undefined（dsh-tools 快照会抛 ToolOutputError），
+  // 嵌套对象/数组内的可选字段（如 structuredFindings[].description）一并处理。
+  return omitUndefined(data);
 }

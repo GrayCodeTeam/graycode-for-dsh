@@ -8,7 +8,7 @@
  * reopen_review / update_design）改写。
  */
 
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -61,6 +61,22 @@ beforeEach(async () => {
 async function readWorkspaceFile(relPath: string): Promise<string> {
   const target = await deps.fs.resolve(relPath, { cwd: tmpDir })
   return deps.fs.readText(target)
+}
+
+/** lossless-JSON 契约回归（H-1）：递归断言值中不存在 undefined（dsh-tools 快照失败条件） */
+function expectLosslessJson(value: unknown, keyPath = 'root'): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => expectLosslessJson(item, `${keyPath}[${index}]`))
+    return
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      expect(item, `${keyPath}.${key} must not be undefined`).not.toBeUndefined()
+      expectLosslessJson(item, `${keyPath}.${key}`)
+    }
+    return
+  }
+  expect(value, `${keyPath} must not be undefined`).not.toBeUndefined()
 }
 
 describe('design tools', () => {
@@ -334,6 +350,43 @@ describe('review tools (lifecycle + session gate)', () => {
 
     const validatedAfterReopen = await executeValidateReviewDocument(deps, { path: created.path }) as { status: string }
     expect(validatedAfterReopen.status).toBe('in_progress')
+  })
+
+  it('validate_review_document on a corrupted V3 document returns a structured failure (H-12)', async () => {
+    await mkdir(path.join(tmpDir, '.graycode', 'review'), { recursive: true })
+    await writeFile(path.join(tmpDir, '.graycode', 'review', 'corrupted.md'), [
+      '# Corrupted Review',
+      '- Date: 2026-04-03',
+      '- Status: in_progress',
+      '',
+      '## Review Scope',
+      '审查范围说明',
+      '',
+      '## Review Summary',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_START -->',
+      '- 当前状态：进行中',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_END -->',
+      '',
+      '## Review Findings',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_START -->',
+      '- [high] html: 缺少 landmark',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_END -->',
+      '',
+      '## Review Milestones',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_START -->',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_END -->',
+      '',
+      '<!-- GRAYCODE_REVIEW_METADATA_START -->',
+      '{ "formatVersion": 3, "reviewRunId": "review-',
+      '<!-- GRAYCODE_REVIEW_METADATA_END -->',
+    ].join('\n'), 'utf-8')
+
+    // 修复前：损坏 metadata 直接抛 Error；修复后：结构化校验失败结果（v2/v4 分支同口径）
+    const validated = await executeValidateReviewDocument(deps, { path: '.graycode/review/corrupted.md' })
+    expect(validated.isValid).toBe(false)
+    expect(validated.detectedFormat).toBe('v3')
+    expect(validated.issues?.some((item) => item.code === 'invalid_v3_metadata')).toBe(true)
+    expectLosslessJson(validated)
   })
 
   it('blocks a second active review in the same session; record/finalize require a matching session', async () => {
@@ -622,5 +675,46 @@ describe('fs write helpers', () => {
     const bytes = await readFile(path.join(tmpDir, '.graycode', 'progress.md'), 'utf-8')
     expect(bytes).toContain('# 项目进度')
     expect(bytes).not.toContain('\r')
+  })
+})
+
+describe('lossless-JSON output contract (H-1)', () => {
+  it('tool results never contain undefined values, including nested optional fields', async () => {
+    // design：无可选字段，基线
+    const design = await executeCreateDesign(deps, { title: 'Json', design: 'content' })
+    expectLosslessJson(design)
+
+    // progress：create 无里程碑时 progressSnapshot.latestMilestone 必须省略键
+    const progress = await executeCreateProgress(deps, { projectName: 'Json' })
+    expectLosslessJson(progress)
+    expect(progress.progressSnapshot?.latestMilestone).toBeUndefined()
+
+    const validated = await executeValidateProgressDocument(deps, { path: '.graycode/progress.md' })
+    expectLosslessJson(validated)
+
+    // 有里程碑后 metadata.milestones 的可选字段（startedAt/completedAt）与
+    // log 的 refId 不得以 undefined 值键出现在 validate 结果里
+    await executeRecordProgressMilestone(deps, { title: '里程碑', summary: '摘要' })
+    const recordedProgress = await executeValidateProgressDocument(deps, { path: '.graycode/progress.md' })
+    expectLosslessJson(recordedProgress)
+
+    // review：create 后 reviewSnapshot/结构字段齐全
+    const review = await executeCreateReview(deps, { title: 'Json Review', review: 'scope' })
+    expectLosslessJson(review)
+
+    // record：不传 description/recommendation、evidence 只给 path 时，
+    // 快照内 finding/evidence 的可选字段必须省略而非携带 undefined
+    const recordedReview = await executeRecordReviewMilestone(deps, {
+      path: review.path,
+      milestoneTitle: '第一轮',
+      summary: '摘要',
+      structuredFindings: [
+        { severity: 'high', category: 'html', title: '缺少 landmark', evidence: [{ path: 'src/index.html' }] },
+      ],
+    })
+    expectLosslessJson(recordedReview)
+
+    const reviewValidation = await executeValidateReviewDocument(deps, { path: review.path })
+    expectLosslessJson(reviewValidation)
   })
 })

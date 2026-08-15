@@ -248,6 +248,22 @@ describe('evaluateModeToolPolicy (执行判定)', () => {
       workspaceName: 'my-project',
     })).toContain('only allowed to write')
   })
+
+  it('plan 模式 write_file 的 workspace 前缀比较在 Windows 上忽略大小写（3.17-M8）', () => {
+    const planPolicyWithWrite = ['write_file', ...(BUILTIN_MODE_TOOL_POLICIES.plan ?? [])]
+    const evaluate = () => evaluateModeToolPolicy({
+      toolName: 'write_file',
+      args: { path: 'My-Project/.graycode/plans/foo.md' },
+      toolPolicy: planPolicyWithWrite,
+      modeId: 'plan',
+      workspaceName: 'my-project',
+    })
+    if (process.platform === 'win32') {
+      expect(evaluate()).toBeUndefined()
+    } else {
+      expect(evaluate()).toContain('only allowed to write')
+    }
+  })
 })
 
 describe('createModeToolPolicyGuard (DSH 拦截器适配)', () => {
