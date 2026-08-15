@@ -9,15 +9,24 @@
  * Workspace identity comes from the executing agent session header `cwd`;
  * without a cwd the tool layer falls back to global memory (legacy
  * getMemoryManagerForTool parity — no pseudo-workspace from process.cwd()).
- * Scope-key normalization is ported unchanged from the legacy
- * modules/memory/index.ts (win32 lower-casing, forward slashes, sha256 prefix).
+ * Scope-key normalization and the workspace registry (ADR-0004) live in
+ * ./registry.ts: every getWorkspace first resolves the cwd through the
+ * registry (aliases / previous cwd forms redirect to the authoritative
+ * workspace store), then addresses the store by the resolved key.
  */
 
 import * as path from 'path'
-import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import { MemoryManager } from './domain/MemoryManager.ts'
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './domain/types.ts'
+import {
+  WorkspaceRegistry,
+  cwdToScopeKey,
+  stableIdOfScopeKey,
+  type WorkspaceRegistryLogger,
+} from './registry.ts'
+
+export { normalizeWorkspaceKey, cwdToScopeKey, stableIdOfScopeKey } from './registry.ts'
 
 /** Plugin-level config knobs that seed the shared memory config (memory_config tool overrides). */
 export interface MemoryServiceOptions {
@@ -27,39 +36,17 @@ export interface MemoryServiceOptions {
   entryChars?: number
   partChars?: number
   partLines?: number
+  /** Warning sink for the workspace registry (defaults to console.warn). */
+  logger?: WorkspaceRegistryLogger
 }
 
 export type MemoryScope = 'global' | 'workspace'
 
-const WIN32 = process.platform === 'win32'
-
-/** Normalize a workspace key: forward slashes; case-fold Windows-style paths. */
-export function normalizeWorkspaceKey(fsPath: string): string {
-  let p = fsPath.replace(/\\/g, '/')
-  // A Windows path remains case-insensitive when it is migrated or replayed on
-  // another host. Detect its syntax instead of relying only on this process OS.
-  if (WIN32 || /^[A-Za-z]:\//.test(p) || p.startsWith('//')) {
-    p = p.toLowerCase()
-  }
-  return p
-}
-
-/** Resolve a cwd-style path to a scope key; null when unresolvable. */
-export function cwdToScopeKey(cwd: string): string | null {
-  if (!cwd || typeof cwd !== 'string') return null
-  const p = cwd.replace(/\\/g, '/')
-  if (!p) return null
-  return normalizeWorkspaceKey(p)
-}
-
-/** Directory name for a scope key: sha256 first 16 hex chars (avoids illegal/overlong paths). */
-function scopeKeyToDirName(scopeKey: string): string {
-  return createHash('sha256').update(scopeKey).digest('hex').slice(0, 16)
-}
-
 export class MemoryService {
   private readonly dataRoot: string
   private readonly configDefaults: Partial<MemoryConfig>
+  /** 稳定 workspaceId 注册表（ADR-0004）：getWorkspace 先经它解析别名再寻址。 */
+  readonly registry: WorkspaceRegistry
   private global: MemoryManager | null = null
   private globalInit: Promise<MemoryManager> | null = null
   private readonly workspaceInstances = new Map<string, MemoryManager>()
@@ -69,6 +56,7 @@ export class MemoryService {
 
   constructor(options: MemoryServiceOptions) {
     this.dataRoot = options.dataRoot
+    this.registry = new WorkspaceRegistry(options.dataRoot, options.logger)
     this.configDefaults = {
       ...(options.wakeLines !== undefined ? { wakeLines: options.wakeLines } : {}),
       ...(options.entryChars !== undefined ? { entryChars: options.entryChars } : {}),
@@ -108,11 +96,18 @@ export class MemoryService {
   }
 
   private workspaceDir(scopeKey: string): string {
-    return path.join(this.workspaceBaseDir(), scopeKeyToDirName(scopeKey))
+    return path.join(this.workspaceBaseDir(), stableIdOfScopeKey(scopeKey))
   }
 
   /**
    * Resolve the workspace MemoryManager for a cwd.
+   *
+   * The cwd is first resolved through the workspace registry (ADR-0004):
+   * alias / previous-path forms redirect to the authoritative workspace key,
+   * so a moved or renamed project still reaches its original memory store.
+   * All instance caches are keyed by the resolved (authoritative) key, so an
+   * alias form and the authoritative form share one MemoryManager and never
+   * touch the store directory concurrently.
    *
    * `createIfMissing=false` (read-only tools wake/recall/zoom/config) never
    * creates the directory or writes scope.json; the workspace memory must
@@ -122,8 +117,12 @@ export class MemoryService {
    * never touch the same directory concurrently.
    */
   async getWorkspace(cwd: string, createIfMissing = true): Promise<MemoryManager | null> {
-    const scopeKey = cwdToScopeKey(cwd)
-    if (!scopeKey) return null
+    const incomingKey = cwdToScopeKey(cwd)
+    if (!incomingKey) return null
+    // 先经注册表解析（读/写路径一致）：别名或旧路径形态 → 权威工作区键。
+    const resolved = await this.registry.resolve(cwd)
+    const scopeKey = resolved.key
+    const scopeCwd = resolved.cwd
     const existing = this.workspaceInstances.get(scopeKey)
     if (existing) return existing
     const pending = this.workspaceInitPromises.get(scopeKey)
@@ -178,7 +177,7 @@ export class MemoryService {
       const meta = {
         fsPath: scopeKey.replace(/\//g, path.sep),
         name: path.basename(scopeKey.replace(/\//g, path.sep)),
-        cwd,
+        cwd: scopeCwd,
       }
       try {
         const raw = await fs.readFile(metaPath, 'utf-8')
@@ -193,6 +192,8 @@ export class MemoryService {
       await manager.init()
       await manager.loadConfig()
       this.workspaceInstances.set(scopeKey, manager)
+      // 写路径登记（best-effort，不抛错）：刷新/补别名/补 realpath 变体。
+      await this.registry.register(cwd)
       return manager
     })()
 

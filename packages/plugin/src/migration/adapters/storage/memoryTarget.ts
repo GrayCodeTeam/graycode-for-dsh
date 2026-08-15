@@ -14,8 +14,7 @@
  * ledger 仍缺条目但本台账已有记录 → 跳过同一对象，不重复追加。
  */
 
-import { createHash } from 'node:crypto'
-import { MemoryService, normalizeWorkspaceKey } from '../../../memory/service.ts'
+import { MemoryService, normalizeWorkspaceKey, stableIdOfScopeKey } from '../../../memory/service.ts'
 import type { TargetWriterPort, WriteTargetInput, WriteTargetResult } from '../../application/ports.ts'
 import { resolveScopeOverride, type ScopeOverrideMap } from '../../domain/scopeMap.ts'
 import { AppliedJournalStore } from './appliedJournal.ts'
@@ -132,7 +131,7 @@ function truncateUtf8(text: string, maxBytes: number): string {
   return out
 }
 
-/** DSH 工作区记忆目录名（与 memory/service.ts scopeKeyToDirName 同算法）。 */
+/** DSH 工作区记忆目录名（与 memory/registry.ts stableIdOfScopeKey 同算法）。 */
 function workspaceDirName(cwd: string): string {
-  return createHash('sha256').update(normalizeWorkspaceKey(cwd)).digest('hex').slice(0, 16)
+  return stableIdOfScopeKey(normalizeWorkspaceKey(cwd))
 }
