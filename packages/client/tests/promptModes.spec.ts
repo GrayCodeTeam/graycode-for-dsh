@@ -37,6 +37,7 @@ import {
   parseImportPayload,
   parseToolPolicyText,
   removeEntry,
+  reorderEntries,
   serializeExportPayload,
   sortEntries,
   toolPolicyText,
@@ -111,9 +112,9 @@ describe('sortEntries / nextEntryOrder', () => {
 })
 
 describe('createEntry / updateEntry / removeEntry', () => {
-  it('creates entries with the next order and a fresh id', () => {
+  it('creates entries with the next order, a fresh id and a default display name', () => {
     const created = createEntry('user', [entry('a', 'user', 2)], () => 'fresh-id')
-    expect(created).toEqual({ id: 'fresh-id', role: 'user', order: 3, enabled: true, content: '' })
+    expect(created).toEqual({ id: 'fresh-id', role: 'user', order: 3, enabled: true, name: 'Prompt 2', content: '' })
     expect('fakeThought' in created).toBe(false)
   })
 
@@ -122,6 +123,25 @@ describe('createEntry / updateEntry / removeEntry', () => {
     expect(assistant.fakeThought).toBe('')
     const marker = createEntry('chat_history', [], () => 'id-c')
     expect('fakeThought' in marker).toBe(false)
+  })
+
+  it('reorders an entry before/after a target and renumbers orders (drag & drop)', () => {
+    const input = [
+      entry('a', 'system', 0),
+      entry('b', 'user', 1),
+      entry('c', 'assistant', 2),
+      entry('d', 'chat_history', 3),
+    ]
+    // b moves before a
+    expect(reorderEntries(input, 'b', 'a', 'before').map(item => item.id)).toEqual(['b', 'a', 'c', 'd'])
+    // d moves after b
+    expect(reorderEntries(input, 'd', 'b', 'after').map(item => item.id)).toEqual(['a', 'b', 'd', 'c'])
+    // source === target: unchanged copy
+    expect(reorderEntries(input, 'b', 'b', 'after')).toEqual(input)
+    // unknown ids: unchanged
+    expect(reorderEntries(input, 'nope', 'b', 'before').map(item => item.id)).toEqual(['a', 'b', 'c', 'd'])
+    // orders are renumbered 0..n-1 after every reorder
+    expect(reorderEntries(input, 'd', 'a', 'before').map(item => item.order)).toEqual([0, 1, 2, 3])
   })
 
   it('patches one entry immutably and manages fakeThought across role changes', () => {
@@ -298,16 +318,14 @@ describe('serializeExportPayload', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildCreateModeArgs', () => {
-  it('trims the name and omits an empty template', () => {
-    expect(buildCreateModeArgs('  Quick  ', '   ')).toEqual({ name: 'Quick' })
-    expect(buildCreateModeArgs('Quick', 'You are helpful')).toEqual({ name: 'Quick', template: 'You are helpful' })
+  it('trims the name (host defaults the template)', () => {
+    expect(buildCreateModeArgs('  Quick  ')).toEqual({ name: 'Quick' })
   })
 })
 
 describe('buildModeSavePatch', () => {
   const input = {
     name: '  Mode A  ',
-    template: 'new template',
     entries: [
       entry('x', 'user', 5, 'hi'),
       entry('y', 'assistant', 1, 'a', { fakeThought: 't' }),
@@ -320,7 +338,9 @@ describe('buildModeSavePatch', () => {
   it('builds the full update patch while customization is on', () => {
     const patch = buildModeSavePatch(input)
     expect(patch.name).toBe('Mode A')
-    expect(patch.template).toBe('new template')
+    // The template is NOT part of the patch anymore — the host keeps the
+    // stored value (preset entries are the only composition surface).
+    expect('template' in patch).toBe(false)
     expect(patch.toolPolicyCustomized).toBe(true)
     expect(patch.toolPolicy).toEqual(['read_file', 'search_in_files'])
     expect(patch.promptEntries).toEqual([
@@ -518,7 +538,6 @@ describe('prompt modes transport', () => {
 
     const patch = buildModeSavePatch({
       name: 'Mode A',
-      template: 'edited template',
       entries: [
         entry('e1', 'system', 0, 'be concise'),
         entry('e3', 'chat_history', 1, ''),
@@ -529,10 +548,11 @@ describe('prompt modes transport', () => {
       includeName: true,
     })
     const saved = await transport.update('mode-a', patch)
-    expect(saved.ok && saved.value.mode.template).toBe('edited template')
+    // Template untouched: the patch omits it, so the host keeps the stored value.
+    expect(saved.ok && saved.value.mode.template).toBe('You are {{$TOOLS}}')
 
     const after = await transport.list()
-    expect(after.ok && after.value.modes[0]!.template).toBe('edited template')
+    expect(after.ok && after.value.modes[0]!.template).toBe('You are {{$TOOLS}}')
     expect(after.ok && after.value.modes[0]!.promptEntries.map(item => item.order)).toEqual([0, 1, 2])
     expect(after.ok && after.value.modes[0]!.toolPolicy).toEqual(['read_file', 'search_in_files'])
     expect(after.ok && after.value.modes[0]!.toolPolicyCustomized).toBe(true)

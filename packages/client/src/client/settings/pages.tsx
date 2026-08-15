@@ -214,7 +214,6 @@ const PromptPage: GrayCodePage = ({ t, config, onChange, remote }) => (
       fields={[
         { kind: 'boolean', path: ['persona', 'enabled'], labelKey: 'fields.personaEnabled' },
         scope('persona', t),
-        { kind: 'textarea', path: ['persona', 'template'], labelKey: 'fields.personaTemplate', rows: 7 },
         { kind: 'boolean', path: ['prompt', 'enabled'], labelKey: 'fields.promptEnabled' },
         scope('prompt', t),
         { kind: 'boolean', path: ['prompt', 'modeToolPolicy'], labelKey: 'fields.modeToolPolicy' },

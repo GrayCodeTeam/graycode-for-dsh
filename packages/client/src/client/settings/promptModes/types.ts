@@ -24,6 +24,11 @@ const PROMPT_ENTRY_ROLE_SET: ReadonlySet<string> = new Set<string>(PROMPT_ENTRY_
 export interface PromptEntry {
   /** Stable per-mode entry id (UI and manual edits reference it). */
   id: string
+  /**
+   * Optional display name (UI only; the host keeps it for editor ergonomics
+   * and it never participates in injection/fingerprint).
+   */
+  name?: string
   role: PromptEntryRole
   /** Ascending render order within the mode. */
   order: number
@@ -127,6 +132,7 @@ export function readPromptEntry(value: unknown): PromptEntry | null {
   if (typeof record.order !== 'number' || !Number.isFinite(record.order)) return null
   if (typeof record.enabled !== 'boolean') return null
   if (typeof record.content !== 'string') return null
+  if (record.name !== undefined && typeof record.name !== 'string') return null
   if (record.fakeThought !== undefined && typeof record.fakeThought !== 'string') return null
   const entry: PromptEntry = {
     id: record.id,
@@ -135,6 +141,7 @@ export function readPromptEntry(value: unknown): PromptEntry | null {
     enabled: record.enabled,
     content: record.content,
   }
+  if (typeof record.name === 'string' && record.name.length > 0) entry.name = record.name
   if (typeof record.fakeThought === 'string') entry.fakeThought = record.fakeThought
   return entry
 }

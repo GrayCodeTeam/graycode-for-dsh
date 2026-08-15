@@ -1,17 +1,17 @@
 /**
- * Prompt mode management — main manager.
+ * Prompt mode management — main manager (aligned with the original Gray Code
+ * PromptSettings.vue skeleton: a mode selector bar with the CRUD toolbar on
+ * top, and the selected mode's editor below).
  *
- * Renders the mode list (current mode highlighted), switch / CRUD (create,
- * duplicate, delete with confirmation, rename inside the editor), JSON
- * import/export, and the per-mode editor (template + preset entries + tool
- * policy). All I/O goes through the typed `prompt` namespace transport; every
- * mutation reloads the list so the surface stays consistent with the host
- * store (list → edit → save → list).
+ * The editor is mounted directly for the selected mode (no list drill-down);
+ * the top toolbar's Save button drives it through the exposed handle. Mode
+ * switches guard unsaved edits via the dirty flag. All I/O goes through the
+ * typed `prompt` namespace transport; every mutation reloads the list so the
+ * surface stays consistent with the host store.
  *
  * MODEL ACCESS BOUNDARY: this surface is user-only. The model can only
- * observe and switch modes through prompt_mode_list / prompt_mode_set /
- * prompt_mode_preview — there is no model-side editor tool, so nothing here
- * is mirrored as a tool registration.
+ * observe and switch modes (prompt_mode_list / prompt_mode_set /
+ * prompt_mode_preview) — there is no model-side editor tool.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
@@ -24,7 +24,7 @@ import {
   serializeExportPayload,
 } from './logic.ts'
 import type { PromptMode, PromptModePatch } from './types.ts'
-import { ModeEditor } from './ModeEditor.tsx'
+import { ModeEditor, type ModeEditorHandle } from './ModeEditor.tsx'
 import {
   buttonDangerStyle,
   buttonRowStyle,
@@ -32,6 +32,7 @@ import {
   inputStyle,
   monoStyle,
   noteStyle,
+  selectStyle,
   textareaStyle,
   tokens,
 } from '../styles.ts'
@@ -54,40 +55,30 @@ const panelStyle: CSSProperties = {
   background: tokens.bgSubtle,
 }
 
-const itemStyle: CSSProperties = {
+const selectorBarStyle: CSSProperties = {
   display: 'flex',
-  flexDirection: 'column',
-  gap: '6px',
-  padding: '10px',
+  alignItems: 'center',
+  gap: '8px',
+  flexWrap: 'wrap',
+  padding: '10px 12px',
   border: `1px solid ${tokens.border}`,
   borderRadius: '8px',
   background: tokens.bg,
 }
 
-const currentItemStyle: CSSProperties = {
-  ...itemStyle,
-  borderColor: tokens.accent,
-  background: tokens.accentBg,
-}
-
-const itemHeaderStyle: CSSProperties = {
+const selectorLeftStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
-  flexWrap: 'wrap',
-}
-
-const itemCopyStyle: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '2px',
+  flex: '1 1 240px',
   minWidth: '0',
-  flex: '1',
 }
 
-const itemTitleStyle: CSSProperties = {
-  fontWeight: 600,
-  fontSize: '13px',
+const selectorActionsStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  flexWrap: 'wrap',
 }
 
 const badgeStyle: CSSProperties = {
@@ -96,17 +87,11 @@ const badgeStyle: CSSProperties = {
   height: '18px',
   padding: '0 8px',
   borderRadius: '999px',
-  border: `1px solid ${tokens.border}`,
+  border: `1px solid ${tokens.accent}`,
   fontSize: '11px',
-  color: tokens.fgSecondary,
-  whiteSpace: 'nowrap',
-}
-
-const currentBadgeStyle: CSSProperties = {
-  ...badgeStyle,
-  borderColor: tokens.accent,
   color: tokens.accent,
   background: tokens.accentBg,
+  whiteSpace: 'nowrap',
 }
 
 const metaStyle: CSSProperties = { color: tokens.fgMuted, fontSize: '12px' }
@@ -130,21 +115,27 @@ const fieldLabelStyle: CSSProperties = {
 export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactNode {
   const transport: PromptModesTransport = useMemo(() => createPromptModesTransport(remote), [remote])
   const mountedRef = useRef(true)
+  const editorRef = useRef<ModeEditorHandle>(null)
 
   const [status, setStatus] = useState<LoadStatus>('loading')
   const [loadError, setLoadError] = useState('')
   const [modes, setModes] = useState<PromptMode[]>([])
   const [currentModeId, setCurrentModeId] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const [editingId, setEditingId] = useState<string | null>(null)
 
   // Create-mode form.
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
-  const [createTemplate, setCreateTemplate] = useState('')
   const [createError, setCreateError] = useState('')
+
+  // Rename-mode form.
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameName, setRenameName] = useState('')
+  const [renameError, setRenameError] = useState('')
 
   // Import / export panels.
   const [importOpen, setImportOpen] = useState(false)
@@ -155,6 +146,9 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
   const [exportOpen, setExportOpen] = useState(false)
   const [exportLabel, setExportLabel] = useState('')
   const [exportText, setExportText] = useState('')
+
+  const selectedMode = modes.find(mode => mode.id === selectedId)
+  const selectedIsBuiltin = selectedMode?.kind === 'builtin'
 
   useEffect(() => {
     mountedRef.current = true
@@ -177,6 +171,15 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
     setStatus('ready')
     setModes(result.value.modes)
     setCurrentModeId(result.value.currentModeId)
+    // Keep the selection valid: prefer the current mode on first load, and
+    // fall back to the first mode when the selected id disappeared.
+    setSelectedId(prev => {
+      if (result.value.modes.some(mode => mode.id === prev)) return prev
+      if (result.value.modes.some(mode => mode.id === result.value.currentModeId)) {
+        return result.value.currentModeId
+      }
+      return result.value.modes[0]?.id ?? ''
+    })
   }, [transport])
 
   useEffect(() => {
@@ -185,6 +188,20 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
 
   const fail = (result: { ok: false; error: { code: string; message: string } }): void => {
     setError(`${result.error.code}: ${result.error.message}`)
+  }
+
+  const handleSelectMode = (id: string): void => {
+    if (id === selectedId) return
+    if (dirty && !window.confirm(t('promptModes.unsavedChanges'))) return
+    setDirty(false)
+    setError('')
+    setSelectedId(id)
+  }
+
+  const saveCurrent = async (): Promise<void> => {
+    if (selectedMode === undefined) return
+    await editorRef.current?.save()
+    await load()
   }
 
   const switchMode = async (id: string): Promise<void> => {
@@ -211,7 +228,7 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
     setBusy(true)
     setError('')
     setCreateError('')
-    const result = await transport.create(buildCreateModeArgs(name, createTemplate))
+    const result = await transport.create(buildCreateModeArgs(name))
     if (!mountedRef.current) return
     setBusy(false)
     if (!result.ok) {
@@ -220,10 +237,33 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
     }
     setCreateOpen(false)
     setCreateName('')
-    setCreateTemplate('')
+    setDirty(false)
     setNotice(t('promptModes.modeCreated'))
     await load()
-    setEditingId(result.value.mode.id)
+    setSelectedId(result.value.mode.id)
+  }
+
+  const renameMode = async (): Promise<void> => {
+    if (selectedMode === undefined || selectedIsBuiltin) return
+    const name = renameName.trim()
+    if (name.length === 0) {
+      setRenameError(t('promptModes.nameRequired'))
+      return
+    }
+    setBusy(true)
+    setError('')
+    setRenameError('')
+    const result = await transport.update(selectedMode.id, { name })
+    if (!mountedRef.current) return
+    setBusy(false)
+    if (!result.ok) {
+      fail(result)
+      return
+    }
+    setRenameOpen(false)
+    setRenameName('')
+    setNotice(t('promptModes.modeRenamed'))
+    await load()
   }
 
   const duplicateMode = async (id: string): Promise<void> => {
@@ -253,7 +293,6 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
       fail(result)
       return
     }
-    if (editingId === id) setEditingId(null)
     setNotice(t('promptModes.modeDeleted'))
     await load()
   }
@@ -297,18 +336,17 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
   }
 
   const saveMode = useCallback(async (patch: PromptModePatch): Promise<void> => {
-    if (editingId === null) return
+    if (selectedId === '') return
     setBusy(true)
     setError('')
-    const result = await transport.update(editingId, patch)
+    const result = await transport.update(selectedId, patch)
     if (!mountedRef.current) return
     setBusy(false)
     if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
     setNotice(t('promptModes.saved'))
+    setDirty(false)
     await load()
-  }, [editingId, transport, t])
-
-  const editingMode = editingId === null ? undefined : modes.find(mode => mode.id === editingId)
+  }, [selectedId, transport, t])
 
   return (
     <section style={panelStyle} data-graycode-prompt-mode-manager>
@@ -328,21 +366,73 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
 
       {status === 'ready' && (
         <>
-          <div style={buttonRowStyle}>
-            <button type="button" style={buttonStyle} disabled={busy} onClick={() => setCreateOpen(open => !open)}>
-              {t('promptModes.newMode')}
-            </button>
-            <button type="button" style={buttonStyle} disabled={busy} onClick={() => setImportOpen(open => !open)}>
-              {t('promptModes.import')}
-            </button>
-            <button
-              type="button"
-              style={buttonStyle}
-              disabled={busy || modes.length === 0}
-              onClick={() => void exportModes(undefined, t('promptModes.exportAll'))}
-            >
-              {t('promptModes.exportAll')}
-            </button>
+          <div style={selectorBarStyle} data-graycode-mode-selector>
+            <div style={selectorLeftStyle}>
+              <span style={fieldLabelStyle}>{t('promptModes.modeListTitle')}</span>
+              <select
+                style={{ ...selectStyle, flex: '1 1 200px', minWidth: '140px' }}
+                value={selectedId}
+                disabled={busy}
+                onChange={event => handleSelectMode(event.target.value)}
+              >
+                {modes.map(mode => (
+                  <option key={mode.id} value={mode.id}>{mode.name}</option>
+                ))}
+              </select>
+              {selectedId === currentModeId && <span style={badgeStyle}>{t('promptModes.current')}</span>}
+            </div>
+            <div style={selectorActionsStyle}>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={busy || selectedMode === undefined}
+                onClick={() => void saveCurrent()}
+              >
+                {t('promptModes.save')}
+              </button>
+              <button type="button" style={buttonStyle} disabled={busy} onClick={() => setCreateOpen(open => !open)}>
+                {t('promptModes.newMode')}
+              </button>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={busy || selectedMode === undefined}
+                onClick={() => void duplicateMode(selectedId)}
+              >
+                {t('promptModes.duplicate')}
+              </button>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={busy || selectedMode === undefined}
+                onClick={() => void exportModes([selectedId], selectedMode?.name ?? '')}
+              >
+                {t('promptModes.export')}
+              </button>
+              <button type="button" style={buttonStyle} disabled={busy} onClick={() => setImportOpen(open => !open)}>
+                {t('promptModes.import')}
+              </button>
+              <button
+                type="button"
+                style={buttonStyle}
+                disabled={busy || selectedMode === undefined || selectedIsBuiltin}
+                onClick={() => {
+                  setRenameName(selectedMode?.name ?? '')
+                  setRenameError('')
+                  setRenameOpen(true)
+                }}
+              >
+                {t('promptModes.rename')}
+              </button>
+              <button
+                type="button"
+                style={buttonDangerStyle}
+                disabled={busy || selectedMode === undefined || selectedIsBuiltin}
+                onClick={() => void deleteMode(selectedId)}
+              >
+                {t('promptModes.delete')}
+              </button>
+            </div>
           </div>
 
           {createOpen && (
@@ -357,22 +447,35 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
                   onChange={event => setCreateName(event.target.value)}
                 />
               </label>
-              <label>
-                <span style={fieldLabelStyle}>{t('promptModes.template')}</span>
-                <textarea
-                  rows={4}
-                  style={textareaStyle}
-                  value={createTemplate}
-                  placeholder={t('promptModes.createTemplatePlaceholder')}
-                  onChange={event => setCreateTemplate(event.target.value)}
-                />
-              </label>
               {createError !== '' && <div style={errorStyle}>{createError}</div>}
               <div style={buttonRowStyle}>
                 <button type="button" style={buttonStyle} disabled={busy} onClick={() => void createMode()}>
                   {t('promptModes.create')}
                 </button>
                 <button type="button" style={buttonStyle} disabled={busy} onClick={() => setCreateOpen(false)}>
+                  {t('promptModes.cancel')}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {renameOpen && (
+            <div style={formPanelStyle}>
+              <label>
+                <span style={fieldLabelStyle}>{t('promptModes.renamePrompt')}</span>
+                <input
+                  type="text"
+                  style={inputStyle}
+                  value={renameName}
+                  onChange={event => setRenameName(event.target.value)}
+                />
+              </label>
+              {renameError !== '' && <div style={errorStyle}>{renameError}</div>}
+              <div style={buttonRowStyle}>
+                <button type="button" style={buttonStyle} disabled={busy} onClick={() => void renameMode()}>
+                  {t('promptModes.save')}
+                </button>
+                <button type="button" style={buttonStyle} disabled={busy} onClick={() => setRenameOpen(false)}>
                   {t('promptModes.cancel')}
                 </button>
               </div>
@@ -437,60 +540,15 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
           {error !== '' && <div style={errorStyle}>{error}</div>}
           {notice !== '' && <div style={metaStyle}>{notice}</div>}
 
-          <span style={fieldLabelStyle}>{t('promptModes.modeListTitle')}</span>
-          {modes.length === 0 && <p style={noteStyle}>{t('promptModes.empty')}</p>}
-          {modes.map(mode => {
-            const isCurrent = mode.id === currentModeId
-            const builtin = mode.kind === 'builtin'
-            return (
-              <article key={mode.id} style={isCurrent ? currentItemStyle : itemStyle}>
-                <div style={itemHeaderStyle}>
-                  <div style={itemCopyStyle}>
-                    <span style={itemTitleStyle}>{mode.name}</span>
-                    <span style={metaStyle}>
-                      {mode.promptEntries.length} {t('promptModes.entriesUnit')}
-                    </span>
-                  </div>
-                  <span style={badgeStyle}>{t(`promptModes.kind.${mode.kind}`)}</span>
-                  {isCurrent && <span style={currentBadgeStyle}>{t('promptModes.current')}</span>}
-                </div>
-                <div style={buttonRowStyle}>
-                  {!isCurrent && (
-                    <button type="button" style={buttonStyle} disabled={busy} onClick={() => void switchMode(mode.id)}>
-                      {t('promptModes.switchTo')}
-                    </button>
-                  )}
-                  <button type="button" style={buttonStyle} disabled={busy} onClick={() => setEditingId(mode.id)}>
-                    {t('promptModes.edit')}
-                  </button>
-                  <button type="button" style={buttonStyle} disabled={busy} onClick={() => void duplicateMode(mode.id)}>
-                    {t('promptModes.duplicate')}
-                  </button>
-                  <button
-                    type="button"
-                    style={buttonStyle}
-                    disabled={busy}
-                    onClick={() => void exportModes([mode.id], mode.name)}
-                  >
-                    {t('promptModes.export')}
-                  </button>
-                  {!builtin && (
-                    <button type="button" style={buttonDangerStyle} disabled={busy} onClick={() => void deleteMode(mode.id)}>
-                      {t('promptModes.delete')}
-                    </button>
-                  )}
-                </div>
-              </article>
-            )
-          })}
-
-          {editingMode !== undefined && (
+          {selectedMode !== undefined && (
             <ModeEditor
-              key={editingMode.id}
+              key={selectedMode.id}
+              ref={editorRef}
               t={t}
-              mode={editingMode}
+              mode={selectedMode}
               onSave={saveMode}
-              onCancel={() => setEditingId(null)}
+              onCancel={() => setSelectedId('')}
+              onDirtyChange={setDirty}
             />
           )}
         </>

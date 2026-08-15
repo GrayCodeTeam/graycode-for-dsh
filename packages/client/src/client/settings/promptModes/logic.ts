@@ -84,6 +84,9 @@ export function createEntry(
     role,
     order: nextEntryOrder(entries),
     enabled: true,
+    // Default display name, editable in the UI (aligned with the original
+    // plugin's "Prompt N" naming).
+    name: `Prompt ${entries.length + 1}`,
     content: '',
   }
   if (role === 'assistant') entry.fakeThought = ''
@@ -94,7 +97,7 @@ export function createEntry(
 export function updateEntry(
   entries: readonly PromptEntry[],
   id: string,
-  patch: Partial<Pick<PromptEntry, 'role' | 'enabled' | 'content' | 'fakeThought' | 'order'>>,
+  patch: Partial<Pick<PromptEntry, 'name' | 'role' | 'enabled' | 'content' | 'fakeThought' | 'order'>>,
 ): PromptEntry[] {
   return entries.map(entry => {
     if (entry.id !== id) return entry
@@ -137,6 +140,31 @@ export function moveEntry(
   return next
 }
 
+/**
+ * Reorder `entries[sourceId]` to sit before/after `entries[targetId]` in
+ * render order (drag & drop). Immutable; unknown ids return an unchanged
+ * copy; all orders are renumbered 0..n-1 so the render order stays stable.
+ */
+export function reorderEntries(
+  entries: readonly PromptEntry[],
+  sourceId: string,
+  targetId: string,
+  position: 'before' | 'after',
+): PromptEntry[] {
+  if (sourceId === targetId) return entries.slice()
+  const sorted = sortEntries(entries)
+  const sourceIndex = sorted.findIndex(entry => entry.id === sourceId)
+  if (sourceIndex < 0) return sorted
+  const next = sorted.slice()
+  const [source] = next.splice(sourceIndex, 1)
+  if (source === undefined) return sorted
+  const targetIndex = next.findIndex(entry => entry.id === targetId)
+  if (targetIndex < 0) return sorted
+  const insertAt = position === 'after' ? targetIndex + 1 : targetIndex
+  next.splice(insertAt, 0, source)
+  return next.map((entry, index) => ({ ...entry, order: index }))
+}
+
 // ==================== Entry validation ====================
 
 /** Structural problems that must be fixed before saving the entries. */
@@ -167,7 +195,7 @@ export function validateEntries(entries: readonly PromptEntry[]): EntryValidatio
 /**
  * Build the `patch.promptEntries` payload: entries in render order with
  * renumbered orders (the editor is the authority for order) and no
- * meaningless `fakeThought` keys on non-assistant entries.
+ * meaningless `fakeThought`/empty `name` keys.
  */
 export function buildEntriesSavePayload(entries: readonly PromptEntry[]): PromptEntry[] {
   return sortEntries(entries).map((entry, index) => {
@@ -178,6 +206,7 @@ export function buildEntriesSavePayload(entries: readonly PromptEntry[]): Prompt
       enabled: entry.enabled,
       content: entry.content,
     }
+    if (entry.name !== undefined && entry.name.trim().length > 0) next.name = entry.name.trim()
     if (entry.fakeThought !== undefined && entry.role === 'assistant') {
       next.fakeThought = entry.fakeThought
     }
@@ -257,19 +286,14 @@ export function serializeExportPayload(result: { version: number; modes: readonl
 
 // ==================== Create / save patches ====================
 
-/** Build `modes.create` args: trimmed name; template omitted when empty. */
-export function buildCreateModeArgs(name: string, template: string): { name: string; template?: string } {
-  const trimmedName = name.trim()
-  const trimmedTemplate = template.trim()
-  return trimmedTemplate.length === 0
-    ? { name: trimmedName }
-    : { name: trimmedName, template: trimmedTemplate }
+/** Build `modes.create` args: trimmed name (host defaults the template). */
+export function buildCreateModeArgs(name: string): { name: string } {
+  return { name: name.trim() }
 }
 
 export interface ModeSavePatchInput {
   /** Trimmed before sending; omitted entirely when `includeName` is false. */
   name: string
-  template: string
   entries: readonly PromptEntry[]
   toolPolicyCustomized: boolean
   /** Raw textarea value; parsed only while customization is on. */
@@ -282,14 +306,15 @@ export interface ModeSavePatchInput {
 }
 
 /**
- * Build the `modes.update` patch from the editor draft. While customization
- * is off the patch omits `toolPolicy` entirely — the host treats an absent
- * policy as the built-in default (the "customized off ⇒ toolPolicy undefined"
- * invariant), so no `toolPolicy` key is sent.
+ * Build the `modes.update` patch from the editor draft. The template is NOT
+ * part of the patch — the host keeps the stored value (the UI does not edit
+ * templates anymore; preset entries are the only composition surface). While
+ * customization is off the patch omits `toolPolicy` entirely — the host
+ * treats an absent policy as the built-in default (the "customized off ⇒
+ * toolPolicy undefined" invariant).
  */
 export function buildModeSavePatch(input: ModeSavePatchInput): PromptModePatch {
   const patch: PromptModePatch = {
-    template: input.template,
     promptEntries: buildEntriesSavePayload(input.entries),
     toolPolicyCustomized: input.toolPolicyCustomized,
   }

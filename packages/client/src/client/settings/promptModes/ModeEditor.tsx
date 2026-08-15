@@ -2,14 +2,19 @@
  * Prompt mode management — mode editor.
  *
  * Edits one mode: name (disabled for builtin modes — the host rejects
- * renames with BUILTIN_IMMUTABLE), the main template textarea (with the
- * `{{$MODULE}}` placeholder note), the preset entries editor and the tool
- * policy editor. The draft is local state initialized once per mounted mode
- * (the manager remounts the editor via `key={mode.id}`); saving builds the
- * `modes.update` patch through pure logic and hands it to the manager's
- * remote save, which reloads the list afterwards.
+ * renames with BUILTIN_IMMUTABLE), the preset entries editor and the tool
+ * policy editor. The main template is intentionally NOT editable anymore:
+ * preset entries are the only composition surface (aligned with the original
+ * Gray Code "entries" assembly mode).
+ *
+ * The draft is local state initialized once per mounted mode (the manager
+ * remounts the editor via `key={mode.id}`); saving builds the `modes.update`
+ * patch through pure logic and hands it to the manager's remote save, which
+ * reloads the list afterwards. The manager triggers saves through the exposed
+ * `save()` handle (top toolbar) and tracks dirty state via `onDirtyChange`
+ * to guard mode switches.
  */
-import { useMemo, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { GcTranslate } from '../fields.tsx'
 import { buildModeSavePatch, toolPolicyText, validateEntries } from './logic.ts'
@@ -22,11 +27,9 @@ import {
   buttonRowStyle,
   buttonStyle,
   errorDetailStyle,
-  fieldDescriptionStyle,
   fieldLabelStyle,
   inputStyle,
   noteStyle,
-  textareaStyle,
   tokens,
 } from '../styles.ts'
 
@@ -36,6 +39,13 @@ export interface ModeEditorProps {
   /** Remote save; must throw an Error on failure so the editor can show it. */
   onSave: (patch: PromptModePatch) => Promise<void>
   onCancel: () => void
+  /** Reports whether the draft diverges from the loaded mode (unsaved edits). */
+  onDirtyChange?: (dirty: boolean) => void
+}
+
+/** Handle exposed to the parent manager (top-toolbar save button). */
+export interface ModeEditorHandle {
+  save(): Promise<void>
 }
 
 const panelStyle: CSSProperties = {
@@ -57,10 +67,27 @@ const fieldStyle: CSSProperties = {
 const metaStyle: CSSProperties = { color: tokens.fgMuted, fontSize: '12px' }
 const errorStyle: CSSProperties = { ...metaStyle, color: tokens.danger, whiteSpace: 'pre-wrap' }
 
-export function ModeEditor({ t, mode, onSave, onCancel }: ModeEditorProps): ReactNode {
+function entriesEqual(a: readonly PromptEntry[], b: readonly PromptEntry[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((entry, index) => {
+    const other = b[index]
+    if (other === undefined) return false
+    return entry.id === other.id
+      && entry.role === other.role
+      && entry.order === other.order
+      && entry.enabled === other.enabled
+      && entry.content === other.content
+      && (entry.name ?? '') === (other.name ?? '')
+      && (entry.fakeThought ?? '') === (other.fakeThought ?? '')
+  })
+}
+
+export const ModeEditor = forwardRef<ModeEditorHandle, ModeEditorProps>(function ModeEditor(
+  { t, mode, onSave, onCancel, onDirtyChange },
+  ref,
+): ReactNode {
   const builtin = mode.kind === 'builtin'
   const [name, setName] = useState(mode.name)
-  const [template, setTemplate] = useState(mode.template)
   const [entries, setEntries] = useState<PromptEntry[]>(() => structuredClone(mode.promptEntries))
   const [customized, setCustomized] = useState(mode.toolPolicyCustomized === true)
   const [toolsText, setToolsText] = useState(() => toolPolicyText(mode.toolPolicy ?? []))
@@ -68,11 +95,19 @@ export function ModeEditor({ t, mode, onSave, onCancel }: ModeEditorProps): Reac
   const [error, setError] = useState('')
   const issues = useMemo(() => validateEntries(entries), [entries])
 
+  const dirty = name !== mode.name
+    || customized !== (mode.toolPolicyCustomized === true)
+    || toolsText !== toolPolicyText(mode.toolPolicy ?? [])
+    || !entriesEqual(entries, mode.promptEntries)
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
+
   const save = async (): Promise<void> => {
     if (issues.length > 0) return
     const patch = buildModeSavePatch({
       name,
-      template,
       entries,
       toolPolicyCustomized: customized,
       toolPolicyText: toolsText,
@@ -89,6 +124,8 @@ export function ModeEditor({ t, mode, onSave, onCancel }: ModeEditorProps): Reac
     }
   }
 
+  useImperativeHandle(ref, () => ({ save }), [save])
+
   return (
     <section style={panelStyle} data-graycode-mode-editor>
       <strong>{t('promptModes.editorTitle')}: {mode.name}</strong>
@@ -102,17 +139,6 @@ export function ModeEditor({ t, mode, onSave, onCancel }: ModeEditorProps): Reac
           onChange={event => setName(event.target.value)}
         />
         {builtin && <span style={metaStyle}>{t('promptModes.builtinProtected')}</span>}
-      </div>
-      <div style={fieldStyle}>
-        <label style={fieldLabelStyle}>{t('promptModes.template')}</label>
-        <span style={fieldDescriptionStyle}>{t('promptModes.template.description')}</span>
-        <textarea
-          rows={8}
-          style={textareaStyle}
-          value={template}
-          disabled={saving}
-          onChange={event => setTemplate(event.target.value)}
-        />
       </div>
       <EntriesEditor t={t} entries={entries} onChange={setEntries} />
       <ToolPolicyEditor
@@ -144,4 +170,4 @@ export function ModeEditor({ t, mode, onSave, onCancel }: ModeEditorProps): Reac
       </div>
     </section>
   )
-}
+})
