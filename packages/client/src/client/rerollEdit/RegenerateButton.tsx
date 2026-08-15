@@ -19,7 +19,7 @@ import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { GrayRemoteInvoke } from '../settings/types.ts'
-import { turnOfMessage, type RerollSnapshotLike } from './logic.ts'
+import { isNoPreviousTurnFailure, turnOfMessage, type RerollSnapshotLike } from './logic.ts'
 
 const buttonStyle: CSSProperties = {
   display: 'inline-flex',
@@ -115,7 +115,12 @@ export function RegenerateButton({ messageId, sessionId, useSession, remote, ope
         return
       }
       setPhase('failed')
-      setFailure(`${t('reroll.failed')}: ${result.error.message}`)
+      // Well-known host domain errors get a localized message (the envelope
+      // carries the domain code in `details.causeCode`); anything else falls
+      // back to the raw error text.
+      setFailure(isNoPreviousTurnFailure(result.error)
+        ? t('reroll.noPreviousTurn')
+        : `${t('reroll.failed')}: ${result.error.message}`)
       console.warn(`[graycode.regenerate] ${result.error.code}: ${result.error.message}`)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)

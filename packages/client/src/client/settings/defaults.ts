@@ -79,6 +79,14 @@ export const DEFAULTS: GrayCodeConfig = {
     maxBatchTasks: 5,
     maxImagesPerTask: 1,
   },
+  // Mirror of the plugin summary domain defaults (settings/defaults.ts):
+  // enabled on, keep the last 2 rounds / 50% token budget, built-in prompt.
+  summary: {
+    enabled: true,
+    keepRecentRounds: 2,
+    keepRecentTokens: '50%',
+    summarizePrompt: '',
+  },
   branches: { dataRoot: '', agentScope: 'roots' },
   persona: { enabled: true, agentScope: 'roots', template: '' },
   prompt: {

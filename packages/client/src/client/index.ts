@@ -43,6 +43,8 @@ import {
   GRAYCODE_CHECKPOINT_CONFIG_NS,
   graycodeCheckpointListDictionaries,
   graycodeCheckpointListJaPlaceholder,
+  graycodeCheckpointConfigDictionaries,
+  graycodeCheckpointConfigJaPlaceholder,
 } from './checkpointList/locales.ts'
 import {
   GRAYCODE_RESTORE_PREVIEW_NS,
@@ -206,6 +208,10 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => disposeCheckpointList)
   const disposeCheckpointListJa = ctx.locale.register(GRAYCODE_CHECKPOINT_LIST_NS, 'ja', graycodeCheckpointListJaPlaceholder)
   ctx.effect(() => disposeCheckpointListJa)
+  const disposeCheckpointConfig = ctx.locale.register(GRAYCODE_CHECKPOINT_CONFIG_NS, graycodeCheckpointConfigDictionaries)
+  ctx.effect(() => disposeCheckpointConfig)
+  const disposeCheckpointConfigJa = ctx.locale.register(GRAYCODE_CHECKPOINT_CONFIG_NS, 'ja', graycodeCheckpointConfigJaPlaceholder)
+  ctx.effect(() => disposeCheckpointConfigJa)
   const disposeRestorePreview = ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, graycodeRestorePreviewDictionaries)
   ctx.effect(() => disposeRestorePreview)
   const disposeRestorePreviewJa = ctx.locale.register(GRAYCODE_RESTORE_PREVIEW_NS, 'ja', graycodeRestorePreviewJaPlaceholder)
@@ -359,10 +365,20 @@ export function apply(ctx: ClientContext): void {
           remote,
           // The sessions service is resolved at action time (4.3-L5, same as
           // the subagent back-to-main action): a late-started host service is
-          // honored, and an unwired host simply no-ops on navigation.
+          // honored, and an unwired host simply no-ops on navigation. L-1: the
+          // open() result may be a promise — guard both throw and rejection
+          // (same pattern as the back-to-main action above).
           open: (sessionId: string) => {
             const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
-            sessions?.open(sessionId)
+            if (sessions === undefined) return
+            try {
+              const result = sessions.open(sessionId) as unknown
+              if (result !== null && typeof result === 'object' && 'catch' in result) {
+                ;(result as { catch(onRejected: () => void): unknown }).catch(() => {})
+              }
+            } catch {
+              /* silent degradation */
+            }
           },
         }),
       },

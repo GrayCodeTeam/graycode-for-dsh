@@ -254,13 +254,14 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The fifteen locale namespaces the entry registers (dict + ja placeholder each). */
+/** The sixteen locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
   'graycode.workflowOverview',
   'graycode.memoryManage',
   'graycode.checkpointList',
+  'graycode.checkpointConfig',
   'graycode.restorePreview',
   'graycode.stagedDiffCard',
   'graycode.settingsContribution',

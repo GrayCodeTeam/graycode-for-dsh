@@ -9,7 +9,7 @@ import {
   graycodeSettingsJaPlaceholder,
   zh,
 } from '../src/client/settings/locales.ts'
-import { CATEGORIES, commaListTransform, modelAfterTransform, userBeforeTransform } from '../src/client/settings/pages.tsx'
+import { CATEGORIES, commaListTransform, modelAfterTransform, optionalSelectTransform, userBeforeTransform } from '../src/client/settings/pages.tsx'
 import { selectCurrentSessionWorkspace } from '../src/client/settings/GrayCodeSettingsSection.tsx'
 import {
   createFieldDraft,
@@ -336,7 +336,7 @@ describe('real settings surface', () => {
   it('contains only real host modules', () => {
     expect(Object.keys(DEFAULTS).sort()).toEqual([
       'activity', 'branches', 'checkpoints', 'file', 'images', 'media', 'memory', 'migration',
-      'notifications', 'persona', 'prompt', 'stagedDiff', 'subagents', 'thoughts', 'todo', 'workflows',
+      'notifications', 'persona', 'prompt', 'stagedDiff', 'subagents', 'summary', 'thoughts', 'todo', 'workflows',
     ].sort())
     // 唯一凭据字段是 images.apiKey（镜像插件域；空默认值）
     const imagesOnly: Record<string, unknown> = { ...DEFAULTS }
@@ -378,9 +378,13 @@ describe('images defaults', () => {
   })
 
   it('turns the aspect-ratio select back into undefined for "auto"', () => {
-    const config = structuredClone(DEFAULTS)
-    const { patch } = setAtPath(config, ['images', 'defaultAspectRatio'], '16:9')
-    expect(patch.images?.defaultAspectRatio).toBe('16:9')
+    // The select's 「自动」option submits '' which must be stored as undefined;
+    // a concrete value passes through unchanged (the setAtPath passthrough
+    // itself is covered by the path-helper tests above).
+    expect(optionalSelectTransform.toInput('16:9')).toBe('16:9')
+    expect(optionalSelectTransform.toInput(undefined)).toBe('')
+    expect(optionalSelectTransform.fromInput('16:9')).toBe('16:9')
+    expect(optionalSelectTransform.fromInput('')).toBeUndefined()
   })
 })
 

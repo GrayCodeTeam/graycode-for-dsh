@@ -97,45 +97,54 @@ export const modelAfterTransform = {
 }
 
 /** 可选字符串 ↔ 空串（select 的「自动」选项）：'' 提交为 undefined。 */
-const optionalSelectTransform = {
+export const optionalSelectTransform = {
   toInput: (value: unknown): string => typeof value === 'string' ? value : '',
   fromInput: (value: unknown): string | undefined => typeof value === 'string' && value !== '' ? value : undefined,
 }
 
-const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, checkpointConfigT }) => (
-  <div>
-    <FieldSection
-      title={t('pages.checkpoints.title')}
-      description={t('pages.checkpoints.description')}
-      fields={[
-        { kind: 'boolean', path: ['checkpoints', 'enabled'], labelKey: 'fields.checkpointsEnabled', descriptionKey: 'fields.checkpointsEnabled.description' },
-        scope('checkpoints', t),
-        { kind: 'boolean', path: ['checkpoints', 'autoCheckpoint'], labelKey: 'fields.autoCheckpoint', descriptionKey: 'fields.autoCheckpoint.description' },
-        { kind: 'boolean', path: ['checkpoints', 'modelToolsEnabled'], labelKey: 'fields.modelToolsEnabled', descriptionKey: 'fields.modelToolsEnabled.description' },
-        { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'beforeMessages'], labelKey: 'fields.checkpointBeforeUserMessage', descriptionKey: 'fields.checkpointBeforeUserMessage.description', transform: userBeforeTransform },
-        { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'afterMessages'], labelKey: 'fields.checkpointAfterModelMessage', descriptionKey: 'fields.checkpointAfterModelMessage.description', transform: modelAfterTransform },
-        { kind: 'text', path: ['checkpoints', 'beforeTools'], labelKey: 'fields.beforeTools', descriptionKey: 'fields.beforeTools.description', monospace: true, transform: commaListTransform },
-        { kind: 'text', path: ['checkpoints', 'afterTools'], labelKey: 'fields.afterTools', descriptionKey: 'fields.afterTools.description', monospace: true, transform: commaListTransform },
-        { kind: 'number', path: ['checkpoints', 'maxCheckpoints'], labelKey: 'fields.maxCheckpoints', descriptionKey: 'fields.maxCheckpoints.description', min: -1, step: 1 },
-        { kind: 'number', path: ['checkpoints', 'maxFileSizeBytes'], labelKey: 'fields.maxFileSizeMiB', min: 0, step: 1, transform: mebibytesTransform },
-        { kind: 'number', path: ['checkpoints', 'blobGracePeriodDays'], labelKey: 'fields.blobGraceDays', min: 0, step: 1 },
-        { kind: 'boolean', path: ['checkpoints', 'restoreProtectionPoint'], labelKey: 'fields.restoreProtectionPoint', descriptionKey: 'fields.restoreProtectionPoint.description' },
-        { kind: 'textarea', path: ['checkpoints', 'excludePatterns'], labelKey: 'fields.excludePatterns', descriptionKey: 'fields.excludePatterns.description', rows: 5, monospace: true, transform: linesTransform },
-      ]}
-      config={config}
-      onChange={onChange}
-      t={t}
-    />
-    <CheckpointManager
-      t={t}
-      remote={remote}
-      defaultWorkspace={defaultWorkspace}
-      checkpointConfig={normalizeCheckpointConfig(config.checkpoints)}
-      onCheckpointConfigChange={onChange}
-      configT={key => checkpointConfigT(key as GrayCodeCheckpointConfigLocaleKey)}
-    />
-  </div>
-)
+const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, checkpointConfigT }) => {
+  // normalizeCheckpointConfig rebuilds a fresh values object on every render;
+  // memoize on the raw checkpoints snapshot so the manager receives a stable
+  // value between config changes (the section keeps its local draft state).
+  const checkpointConfig = useMemo(
+    () => normalizeCheckpointConfig(config.checkpoints),
+    [config.checkpoints],
+  )
+  return (
+    <div>
+      <FieldSection
+        title={t('pages.checkpoints.title')}
+        description={t('pages.checkpoints.description')}
+        fields={[
+          { kind: 'boolean', path: ['checkpoints', 'enabled'], labelKey: 'fields.checkpointsEnabled', descriptionKey: 'fields.checkpointsEnabled.description' },
+          scope('checkpoints', t),
+          { kind: 'boolean', path: ['checkpoints', 'autoCheckpoint'], labelKey: 'fields.autoCheckpoint', descriptionKey: 'fields.autoCheckpoint.description' },
+          { kind: 'boolean', path: ['checkpoints', 'modelToolsEnabled'], labelKey: 'fields.modelToolsEnabled', descriptionKey: 'fields.modelToolsEnabled.description' },
+          { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'beforeMessages'], labelKey: 'fields.checkpointBeforeUserMessage', descriptionKey: 'fields.checkpointBeforeUserMessage.description', transform: userBeforeTransform },
+          { kind: 'boolean', path: ['checkpoints', 'messageCheckpoint', 'afterMessages'], labelKey: 'fields.checkpointAfterModelMessage', descriptionKey: 'fields.checkpointAfterModelMessage.description', transform: modelAfterTransform },
+          { kind: 'text', path: ['checkpoints', 'beforeTools'], labelKey: 'fields.beforeTools', descriptionKey: 'fields.beforeTools.description', monospace: true, transform: commaListTransform },
+          { kind: 'text', path: ['checkpoints', 'afterTools'], labelKey: 'fields.afterTools', descriptionKey: 'fields.afterTools.description', monospace: true, transform: commaListTransform },
+          { kind: 'number', path: ['checkpoints', 'maxCheckpoints'], labelKey: 'fields.maxCheckpoints', descriptionKey: 'fields.maxCheckpoints.description', min: -1, step: 1 },
+          { kind: 'number', path: ['checkpoints', 'maxFileSizeBytes'], labelKey: 'fields.maxFileSizeMiB', min: 0, step: 1, transform: mebibytesTransform },
+          { kind: 'number', path: ['checkpoints', 'blobGracePeriodDays'], labelKey: 'fields.blobGraceDays', min: 0, step: 1 },
+          { kind: 'boolean', path: ['checkpoints', 'restoreProtectionPoint'], labelKey: 'fields.restoreProtectionPoint', descriptionKey: 'fields.restoreProtectionPoint.description' },
+          { kind: 'textarea', path: ['checkpoints', 'excludePatterns'], labelKey: 'fields.excludePatterns', descriptionKey: 'fields.excludePatterns.description', rows: 5, monospace: true, transform: linesTransform },
+        ]}
+        config={config}
+        onChange={onChange}
+        t={t}
+      />
+      <CheckpointManager
+        t={t}
+        remote={remote}
+        defaultWorkspace={defaultWorkspace}
+        checkpointConfig={checkpointConfig}
+        onCheckpointConfigChange={onChange}
+        configT={key => checkpointConfigT(key as GrayCodeCheckpointConfigLocaleKey)}
+      />
+    </div>
+  )
+}
 
 const MemoryPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, memoryT }) => {
   // Adapt the section's `/graycode` remote invoker into the memory transport

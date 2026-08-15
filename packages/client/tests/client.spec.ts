@@ -68,14 +68,14 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Fifteen namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = thirty registrations. Covers the base `graycode` ns,
+    // Sixteen namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = thirty-two registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
     // activity heatmap surface (C6), the notifications surface (C4), the
     // migration scope-map surface (D-1/D-2), the subagent back-to-main
     // action (S1), the reroll/edit-turn actions (F1/F2), the summarize
     // action and the settings panel ns.
-    expect(localeRegister).toHaveBeenCalledTimes(30)
+    expect(localeRegister).toHaveBeenCalledTimes(32)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -83,6 +83,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.workflowOverview',
       'graycode.memoryManage',
       'graycode.checkpointList',
+      'graycode.checkpointConfig',
       'graycode.restorePreview',
       'graycode.stagedDiffCard',
       'graycode.settingsContribution',
@@ -119,9 +120,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (15 × dict + ja placeholder) plus the
-    // connection/reset refresh subscription = 1 + 30 + 1.
-    expect(effect).toHaveBeenCalledTimes(32)
+    // every locale namespace (16 × dict + ja placeholder) plus the
+    // connection/reset refresh subscription = 1 + 32 + 1.
+    expect(effect).toHaveBeenCalledTimes(34)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -185,25 +186,21 @@ describe('@graycode/dsh-client browser half apply()', () => {
     // point (H-13: the old `not.toHaveBeenCalled()` assertion never observed
     // the refresh and was vacuously true).
     expect(connectionCall).not.toHaveBeenCalled()
-    // Flush the microtask queue — the refresh pump must actually reach the
-    // /graycode RPC channel.
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(connectionCall).toHaveBeenCalledTimes(1)
+    // Deterministically wait for the refresh pump to reach the /graycode RPC
+    // channel (no hard-coded microtask round counts).
+    await vi.waitFor(() => {
+      expect(connectionCall).toHaveBeenCalledTimes(1)
+    })
     expect(connectionCall).toHaveBeenCalledWith('/graycode', 'config.get', {})
     // The connection/reset handler replays the same refresh through the store.
     const resetHandler = on.mock.calls.find((call) => call[0] === 'connection/reset')?.[1] as (() => void) | undefined
     expect(typeof resetHandler).toBe('function')
     resetHandler?.()
     // refresh() queues behind the settled pump rather than firing synchronously.
-    // apply() 的 store 泵链比单次 pump 更深（refresh 已在 apply 时排过一次队），
-    // 4 轮 flush 才确保第二份 refresh 真正打到 RPC 通道（实测 3 轮起）。
     expect(connectionCall).toHaveBeenCalledTimes(1)
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(connectionCall).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => {
+      expect(connectionCall).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('registers the back-to-main header action when the sessions service is present', () => {

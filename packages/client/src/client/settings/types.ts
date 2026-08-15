@@ -42,6 +42,18 @@ export interface ImagesConfig {
   maxImagesPerTask: number
 }
 
+/** Summary domain (mirror of the plugin's summary entry). */
+export interface SummaryConfig {
+  /** 总开关（默认 true：挂载即启用）。 */
+  enabled: boolean
+  /** 保留最近 N 轮不参与总结（下限保护；默认 2，1-10）。 */
+  keepRecentRounds: number
+  /** 保留预算：绝对 token 数或百分比（百分比基数为历史总量；默认 '50%'）。 */
+  keepRecentTokens: string | number
+  /** 用户 prompt 模板（可含 {history} 占位；空 = 内置模板）。 */
+  summarizePrompt: string
+}
+
 export interface GrayCodeConfig {
   workflows: DataRootConfig & ScopedConfig & { documentRoot: string }
   memory: DataRootConfig & ScopedConfig & {
@@ -75,6 +87,7 @@ export interface GrayCodeConfig {
     afterTools: string[]
   }
   images: ImagesConfig
+  summary: SummaryConfig
   branches: DataRootConfig & ScopedConfig
   persona: ToggleScopedConfig & { template?: string }
   prompt: DataRootConfig & ToggleScopedConfig & {

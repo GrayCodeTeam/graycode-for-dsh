@@ -28,20 +28,24 @@ import {
   withCheckpointConfigMessageKind,
   type CheckpointConfigValues,
 } from '../src/client/checkpointList/configModel.ts'
+import { DSH_TOOL_DEFAULTS } from '../src/client/settings/defaults.ts'
 
 // ---------------------------------------------------------------------------
 // Defaults / normalization
 // ---------------------------------------------------------------------------
 
 describe('checkpoint config defaults and normalization', () => {
-  it('defaults are balanced and match the old always-on behaviour', () => {
+  it('defaults mirror the host checkpoints Config (message defaults + DSH tool list)', () => {
     expect(DEFAULT_CHECKPOINT_CONFIG.enabled).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.autoCheckpoint).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.modelToolsEnabled).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.beforeMessages).toEqual(['user'])
-    expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.afterMessages).toEqual(['model'])
-    expect(DEFAULT_CHECKPOINT_CONFIG.beforeTools).toEqual([])
-    expect(DEFAULT_CHECKPOINT_CONFIG.afterTools).toEqual([])
+    // The plugin default has the after-model slot off and both tool lists set
+    // to the DSH 24-tool default list (not empty).
+    expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.afterMessages).toEqual([])
+    expect(DEFAULT_CHECKPOINT_CONFIG.beforeTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(DEFAULT_CHECKPOINT_CONFIG.afterTools).toEqual([...DSH_TOOL_DEFAULTS])
+    expect(DSH_TOOL_DEFAULTS).toHaveLength(24)
   })
 
   it('normalizes missing / hostile snapshots to defaults (legacy config)', () => {
@@ -83,6 +87,12 @@ describe('checkpoint config defaults and normalization', () => {
     expect(normalized.messageCheckpoint.beforeMessages).toEqual([])
     expect(normalized.messageCheckpoint.afterMessages).toEqual([])
   })
+
+  it('a present but empty tool list stays empty (explicit "off")', () => {
+    const normalized = normalizeCheckpointConfig({ beforeTools: [], afterTools: [] })
+    expect(normalized.beforeTools).toEqual([])
+    expect(normalized.afterTools).toEqual([])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -92,7 +102,8 @@ describe('checkpoint config defaults and normalization', () => {
 describe('message checkpoint slots', () => {
   it('derives toggle state from list membership', () => {
     expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser')).toBe(true)
-    expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'afterModel')).toBe(true)
+    // The plugin default has afterMessages off, so the after-model slot is off.
+    expect(checkpointConfigMessageKindEnabled(DEFAULT_CHECKPOINT_CONFIG, 'afterModel')).toBe(false)
     const off = normalizeCheckpointConfig({ messageCheckpoint: { beforeMessages: [], afterMessages: [] } })
     expect(checkpointConfigMessageKindEnabled(off, 'beforeUser')).toBe(false)
     expect(checkpointConfigMessageKindEnabled(off, 'afterModel')).toBe(false)
@@ -108,7 +119,7 @@ describe('message checkpoint slots', () => {
   it('turning a slot off removes the kind and leaves the other slot intact', () => {
     const next = withCheckpointConfigMessageKind(DEFAULT_CHECKPOINT_CONFIG, 'beforeUser', false)
     expect(next.messageCheckpoint.beforeMessages).toEqual([])
-    expect(next.messageCheckpoint.afterMessages).toEqual(['model'])
+    expect(next.messageCheckpoint.afterMessages).toEqual([])
     expect(next.enabled).toBe(true)
     const bothOff = withCheckpointConfigMessageKind(next, 'afterModel', false)
     expect(bothOff.messageCheckpoint.afterMessages).toEqual([])
@@ -211,7 +222,7 @@ describe('checkpoint config commit paths', () => {
     const base = normalizeCheckpointConfig({})
     const next = setCheckpointConfigPath(base, ['messageCheckpoint', 'beforeMessages'], [])
     expect(next.messageCheckpoint.beforeMessages).toEqual([])
-    expect(next.messageCheckpoint.afterMessages).toEqual(['model'])
+    expect(next.messageCheckpoint.afterMessages).toEqual([])
     expect(base.messageCheckpoint.beforeMessages).toEqual(['user'])
 
     const tools = setCheckpointConfigPath(next, ['checkpoints', 'beforeTools'], ['checkpoint_create'])
@@ -235,7 +246,7 @@ describe('checkpoint config commit paths', () => {
     config = setCheckpointConfigPath(config, checkpointConfigAbsolutePath(['beforeTools']), parsed)
     expect(config.messageCheckpoint.beforeMessages).toEqual([])
     expect(config.beforeTools).toEqual(['checkpoint_create', 'checkpoint_verify'])
-    expect(config.afterTools).toEqual([])
+    expect(config.afterTools).toEqual([...DSH_TOOL_DEFAULTS])
     expect(config.enabled).toBe(true)
   })
 })

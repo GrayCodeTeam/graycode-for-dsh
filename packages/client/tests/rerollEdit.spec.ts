@@ -5,7 +5,9 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  BRANCH_NO_PREVIOUS_TURN_CODE,
   editTargetOfTurn,
+  isNoPreviousTurnFailure,
   textOfBlocks,
   turnOfMessage,
   type EditSnapshotLike,
@@ -45,6 +47,34 @@ describe('turnOfMessage (regenerate)', () => {
     expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'x', turn: 1.5 }] }, 'x')).toBeUndefined()
     expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'x', turn: '2' }] }, 'x')).toBeUndefined()
     expect(turnOfMessage({ nodes: [{ kind: 'assistant', turn: 1 }] }, 'x')).toBeUndefined()
+  })
+
+  it('hides the regenerate action for the first turn (turn <= 1 has no prefix to fork before)', () => {
+    // The host rejects turn 1 (and any turn <= 1) with GRAY_BRANCH_NO_PREVIOUS_TURN
+    // — nothing to fork before it — so the action resolves to undefined and the
+    // button renders nothing instead of surfacing the raw English error.
+    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm1', turn: 1 }] }, 'm1')).toBeUndefined()
+    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm0', turn: 0 }] }, 'm0')).toBeUndefined()
+    // Later turns still resolve normally.
+    expect(turnOfMessage({ nodes: [{ kind: 'assistant', messageId: 'm2', turn: 2 }] }, 'm2')).toBe(2)
+  })
+})
+
+describe('isNoPreviousTurnFailure (localized NO_PREVIOUS_TURN feedback)', () => {
+  it('recognizes the host domain code carried in details.causeCode', () => {
+    expect(BRANCH_NO_PREVIOUS_TURN_CODE).toBe('GRAY_BRANCH_NO_PREVIOUS_TURN')
+    expect(isNoPreviousTurnFailure({
+      details: { causeCode: 'GRAY_BRANCH_NO_PREVIOUS_TURN' },
+    })).toBe(true)
+  })
+
+  it('ignores other domain codes, absent details, and undefined envelopes', () => {
+    expect(isNoPreviousTurnFailure({
+      details: { causeCode: 'GRAY_BRANCH_TARGET_TURN_NOT_FOUND' },
+    })).toBe(false)
+    expect(isNoPreviousTurnFailure({ details: {} })).toBe(false)
+    expect(isNoPreviousTurnFailure({})).toBe(false)
+    expect(isNoPreviousTurnFailure(undefined)).toBe(false)
   })
 })
 

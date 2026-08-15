@@ -22,6 +22,7 @@
  */
 import { graycodeCheckpointConfigDictionaries } from './locales.ts'
 import type { GrayCodeCheckpointConfigLocaleKey } from './locales.ts'
+import { DSH_TOOL_DEFAULTS } from '../settings/defaults.ts'
 
 /** A message side that can carry a checkpoint trigger. */
 export type CheckpointMessageKind = 'user' | 'model'
@@ -55,7 +56,10 @@ const CHECKPOINT_TOOL_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/u
 
 /**
  * Sensible defaults for a fresh/legacy config snapshot (rc.6 has none of the
- * new fields — everything defaults on, matching the old always-on behaviour).
+ * new fields — everything defaults on, matching the old always-on behaviour;
+ * the message-level after-model slot and the tool lists mirror the host
+ * checkpoints Config defaults: afterMessages off, beforeTools/afterTools =
+ * the DSH 24-tool list).
  */
 export const DEFAULT_CHECKPOINT_CONFIG: CheckpointConfigValues = {
   enabled: true,
@@ -63,12 +67,12 @@ export const DEFAULT_CHECKPOINT_CONFIG: CheckpointConfigValues = {
   modelToolsEnabled: true,
   messageCheckpoint: {
     beforeMessages: ['user'],
-    afterMessages: ['model'],
+    afterMessages: [],
     modelOuterLayerOnly: true,
     mergeUnchangedCheckpoints: true,
   },
-  beforeTools: [],
-  afterTools: [],
+  beforeTools: [...DSH_TOOL_DEFAULTS],
+  afterTools: [...DSH_TOOL_DEFAULTS],
 }
 
 function readBool(value: unknown, fallback: boolean): boolean {
@@ -89,6 +93,9 @@ function readMessageKinds(value: unknown): CheckpointMessageKind[] {
  * Narrow an arbitrary host snapshot to {@link CheckpointConfigValues}.
  * Missing fields fall back to defaults; hostile values are dropped; a present
  * but empty `beforeMessages`/`afterMessages` stays empty (explicit "off").
+ * `beforeTools`/`afterTools` follow the same convention: a present array is
+ * kept as-is (empty = explicit "off"), missing or hostile values fall back to
+ * the DSH 24-tool default list.
  * @param raw - raw config payload (e.g. `config.checkpoints`).
  */
 export function normalizeCheckpointConfig(raw: unknown): CheckpointConfigValues {
@@ -113,8 +120,8 @@ export function normalizeCheckpointConfig(raw: unknown): CheckpointConfigValues 
         defaults.messageCheckpoint.mergeUnchangedCheckpoints,
       ),
     },
-    beforeTools: readStringArray(record.beforeTools),
-    afterTools: readStringArray(record.afterTools),
+    beforeTools: Array.isArray(record.beforeTools) ? readStringArray(record.beforeTools) : [...defaults.beforeTools],
+    afterTools: Array.isArray(record.afterTools) ? readStringArray(record.afterTools) : [...defaults.afterTools],
   }
 }
 

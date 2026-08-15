@@ -12,6 +12,7 @@ export type GrayCodeRerollEditLocaleKey =
   | 'reroll.label'
   | 'reroll.working'
   | 'reroll.failed'
+  | 'reroll.noPreviousTurn'
   | 'edit.label'
   | 'edit.title'
   | 'edit.confirm'
@@ -19,6 +20,7 @@ export type GrayCodeRerollEditLocaleKey =
   | 'edit.required'
   | 'edit.saving'
   | 'edit.failed'
+  | 'edit.noPreviousTurn'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -38,6 +40,7 @@ export const graycodeRerollEditDictionaries: Record<LocaleId, LocaleDictOf<'gray
     'reroll.label': '重新生成',
     'reroll.working': '重新生成中…',
     'reroll.failed': '重新生成失败',
+    'reroll.noPreviousTurn': '首轮消息之前没有可重新生成的前缀',
     'edit.label': '编辑',
     'edit.title': '编辑用户消息',
     'edit.confirm': '确认',
@@ -45,11 +48,13 @@ export const graycodeRerollEditDictionaries: Record<LocaleId, LocaleDictOf<'gray
     'edit.required': '消息内容不能为空',
     'edit.saving': '提交中…',
     'edit.failed': '编辑失败',
+    'edit.noPreviousTurn': '首轮消息之前没有可编辑重试的前缀',
   },
   en: {
     'reroll.label': 'Regenerate',
     'reroll.working': 'Regenerating…',
     'reroll.failed': 'Regeneration failed',
+    'reroll.noPreviousTurn': 'The first turn has no earlier prefix to regenerate from',
     'edit.label': 'Edit',
     'edit.title': 'Edit user message',
     'edit.confirm': 'Confirm',
@@ -57,6 +62,7 @@ export const graycodeRerollEditDictionaries: Record<LocaleId, LocaleDictOf<'gray
     'edit.required': 'Message text is required',
     'edit.saving': 'Submitting…',
     'edit.failed': 'Edit failed',
+    'edit.noPreviousTurn': 'The first turn has no earlier prefix to edit and retry from',
   },
 }
 
@@ -65,6 +71,7 @@ export const graycodeRerollEditJaPlaceholder: LocaleDict = {
   'reroll.label': '再生成',
   'reroll.working': '再生成中…',
   'reroll.failed': '再生成に失敗しました',
+  'reroll.noPreviousTurn': '最初のターンには再生成する前の履歴がありません',
   'edit.label': '編集',
   'edit.title': 'ユーザーメッセージを編集',
   'edit.confirm': '確定',
@@ -72,4 +79,5 @@ export const graycodeRerollEditJaPlaceholder: LocaleDict = {
   'edit.required': 'メッセージ内容を入力してください',
   'edit.saving': '送信中…',
   'edit.failed': '編集に失敗しました',
+  'edit.noPreviousTurn': '最初のターンには編集して再試行する前の履歴がありません',
 }

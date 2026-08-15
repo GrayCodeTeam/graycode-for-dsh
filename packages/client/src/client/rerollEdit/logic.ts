@@ -36,7 +36,9 @@ export interface RerollSnapshotLike {
  * Resolve the session turn number of the finalized assistant message
  * addressed by `messageId`. Defensive: only `assistant` nodes with a
  * non-negative integer `turn` qualify; absent or drifted rows yield
- * `undefined`.
+ * `undefined`. Turns ≤ 1 have no earlier turn to fork before — the host
+ * rejects them with `GRAY_BRANCH_NO_PREVIOUS_TURN` — so they also resolve to
+ * `undefined` and the regenerate action renders nothing on the first turn.
  */
 export function turnOfMessage(snapshot: RerollSnapshotLike | undefined, messageId: unknown): number | undefined {
   if (snapshot === undefined) return undefined
@@ -46,7 +48,12 @@ export function turnOfMessage(snapshot: RerollSnapshotLike | undefined, messageI
     if (node.kind !== 'assistant') continue
     if (node.messageId === undefined) continue
     if (String(node.messageId) !== want) continue
-    if (typeof node.turn === 'number' && Number.isInteger(node.turn) && node.turn >= 0) return node.turn
+    if (typeof node.turn === 'number' && Number.isInteger(node.turn) && node.turn >= 0) {
+      // 首轮（turn ≤ 1）没有可 fork 的前缀，宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN；
+      // 直接视为不可重生成（按钮不渲染），避免点击后暴露英文原文错误。
+      if (node.turn <= 1) return undefined
+      return node.turn
+    }
   }
   return undefined
 }
@@ -54,6 +61,21 @@ export function turnOfMessage(snapshot: RerollSnapshotLike | undefined, messageI
 export interface ContentBlockLike {
   readonly type?: unknown
   readonly text?: unknown
+}
+
+/** Host branch-domain code for “the target turn is the first turn (nothing to fork before it)”. */
+export const BRANCH_NO_PREVIOUS_TURN_CODE = 'GRAY_BRANCH_NO_PREVIOUS_TURN'
+
+/**
+ * True when a remote failure envelope carries the host's
+ * `GRAY_BRANCH_NO_PREVIOUS_TURN` domain error (mapped to `GRAY_INVALID_INPUT`
+ * with `details.causeCode` preserved). The UI shows a localized message for
+ * this well-known case instead of the raw English error text.
+ */
+export function isNoPreviousTurnFailure(
+  error: { readonly details?: Readonly<Record<string, unknown>> } | undefined,
+): boolean {
+  return error?.details?.causeCode === BRANCH_NO_PREVIOUS_TURN_CODE
 }
 
 /** Plain text of the `text` blocks of a message, in source order. */
