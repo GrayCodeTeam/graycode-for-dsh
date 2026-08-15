@@ -86,18 +86,24 @@ describe('deprecated 编辑器专属模块', () => {
   })
 })
 
-describe('resolved 模块无值时（B3-P2：不再原样保留）', () => {
-  test('TOOLS/MEMORY/WORKSPACE_FILES/TODO_LIST 无值 → 确定性 unavailable 说明文本', () => {
-    const modules = ['TOOLS', 'MEMORY', 'WORKSPACE_FILES', 'TODO_LIST']
+describe('resolved 模块无值时（P3F v2：TOOLS 延迟给 DSH 变量，其余 deterministic 提示）', () => {
+  test('TOOLS 无显式值 → {{graycode_tools}}（延迟给 DSH 渲染期变量）；其余 resolved 模块 → unavailable 说明', () => {
+    const modules = ['MEMORY', 'WORKSPACE_FILES', 'TODO_LIST']
     const rendered = renderPromptTemplate(modules.map(module => `{{$${module}}}`).join('|'), {})
     expect(rendered).toBe(modules.map(unavailablePlaceholderText).join('|'))
     expect(rendered).not.toMatch(/\{\{/)
+    // TOOLS 是唯一例外：无值时渲染为 DSH 安全小写变量 {{graycode_tools}}（由
+    // system-prompt/assemble 瀑布无条件提供，见 promptInjector.ts）
+    expect(renderPromptTemplate('{{$TOOLS}}', {})).toBe('{{graycode_tools}}')
+    expect(renderPromptTemplate('{{$TOOLS}}|{{$MEMORY}}', {})).toBe(
+      `{{graycode_tools}}|${unavailablePlaceholderText('MEMORY')}`,
+    )
   })
 
   test('提供值后仍按值替换；说明文本字节稳定', () => {
     expect(renderPromptTemplate('{{$TOOLS}}', { TOOLS: 'hammer' })).toBe('hammer')
-    expect(unavailablePlaceholderText('TOOLS')).toBe(
-      '[placeholder TOOLS: not available in DSH; remove it from the template]',
+    expect(unavailablePlaceholderText('MEMORY')).toBe(
+      '[placeholder MEMORY: not available in DSH; remove it from the template]',
     )
   })
 })

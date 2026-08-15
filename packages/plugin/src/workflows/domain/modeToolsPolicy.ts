@@ -315,6 +315,38 @@ export function resolveBuiltinModeToolPolicy(modeId: string | undefined): readon
 }
 
 /**
+ * 解析模式最终生效的 toolPolicy（模式数据层 per-mode toolPolicy 持久化后的
+ * 运行时入口，字段定义见 promptTypes.PromptMode.toolPolicy / toolPolicyCustomized）。
+ *
+ * 语义（对齐旧 PromptSettingsService.normalizePromptModeSnapshot）：
+ * - mode 为空 → undefined（无过滤）；
+ * - toolPolicyCustomized === true 且 toolPolicy 为数组 → 直接使用模式自身名单
+ *   （用户主动定制，含显式空数组 = 未启用过滤）；
+ * - 否则 → 回退 resolveBuiltinModeToolPolicy(mode.id)（内置默认名单；code 与
+ *   未知/自定义模式返回 undefined，未启用过滤）。
+ *
+ * @param mode 当前 prompt mode（可缺省）
+ * @returns allowlist；undefined 表示未启用过滤（放行一切）
+ */
+export function resolveModeToolPolicy(
+  mode:
+    | {
+        id: string
+        toolPolicy?: readonly string[] | undefined
+        toolPolicyCustomized?: boolean | undefined
+      }
+    | undefined,
+): readonly string[] | undefined {
+  if (!mode) {
+    return undefined
+  }
+  if (mode.toolPolicyCustomized === true && Array.isArray(mode.toolPolicy)) {
+    return mode.toolPolicy
+  }
+  return resolveBuiltinModeToolPolicy(mode.id)
+}
+
+/**
  * allowlist 判定（旧 preflight.ts:128-134 语义）：
  * toolPolicy 为 undefined/空数组时未启用过滤，一律放行；否则仅放行名单内工具。
  *

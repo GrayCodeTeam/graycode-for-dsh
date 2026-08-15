@@ -1,12 +1,16 @@
 /**
  * entries.ts / fingerprint.ts 测试：条目编排（order 排序、disabled 过滤、
- * system 合并、user/assistant 上下文段落、chat_history 占位符）、fakeThought
- * 两态开关、renderModeSectionText 组合、指纹稳定性。
+ * system 合并、user/assistant 条目 block-only、chat_history 占位符）、
+ * fakeThought typed-only（绝不以 [thinking] 文本出现）、renderModeSectionText
+ * 组合（prefix + 模板/系统条目 + suffix）、指纹稳定性。
+ *
+ * V2 entries-first（D-11 = c 语义）：user/assistant 条目只产出 blocks
+ * （text = 原始 content），永不进入 systemText；fakeThought 由 thoughts 域
+ * 作为 typed reasoning 块注入，本域不渲染任何 [thinking] 文本。
  */
 import { describe, expect, test } from 'vitest'
 import {
   assembleEntries,
-  fakeThoughtPolicy,
   renderModeSectionText,
 } from '../../src/prompt/domain/entries.ts'
 import { fingerprint } from '../../src/prompt/domain/fingerprint.ts'
@@ -36,26 +40,26 @@ describe('assembleEntries 编排', () => {
       { systemText: '' },
     )
     expect(result.systemText).toBe('sys-a')
-    expect(result.contextParagraphs).toEqual([])
-  })
-
-  test('user/assistant 条目渲染为带角色标签的上下文段落（D-11=c）', () => {
-    const result = assembleEntries(
-      [
-        entry({ id: 'u1', role: 'user', order: 0, content: 'user body' }),
-        entry({ id: 'a1', role: 'assistant', order: 1, content: 'assistant body' }),
-      ],
-      { systemText: 'base' },
-    )
-    expect(result.contextParagraphs).toEqual([
-      '[GrayCode preset entry: role=user]\nuser body',
-      '[GrayCode preset entry: role=assistant]\nassistant body',
-    ])
-    expect(result.systemText).toBe('base')
     expect(result.chatHistoryMarkers).toBe(0)
   })
 
-  test('chat_history 条目只作位置标记：不渲染、不进入段落，计数正确', () => {
+  test('user/assistant 条目只产出 blocks（text = 原始 content），绝不进入 systemText', () => {
+    const result = assembleEntries(
+      [
+        entry({ id: 'u1', role: 'user', order: 0, content: 'user body' }),
+        entry({ id: 'a1', role: 'assistant', order: 1, content: 'assistant body', fakeThought: 'think' }),
+      ],
+      { systemText: 'base' },
+    )
+    expect(result.systemText).toBe('base')
+    expect(result.blocks).toEqual([
+      { id: 'u1', role: 'user', order: 0, text: 'user body' },
+      { id: 'a1', role: 'assistant', order: 1, text: 'assistant body' },
+    ])
+    expect(result.chatHistoryMarkers).toBe(0)
+  })
+
+  test('chat_history 条目只作位置标记：不渲染、不产出 text，计数正确', () => {
     const result = assembleEntries(
       [
         entry({ id: 'h1', role: 'chat_history', order: 0 }),
@@ -65,29 +69,24 @@ describe('assembleEntries 编排', () => {
       { systemText: 'base' },
     )
     expect(result.chatHistoryMarkers).toBe(1)
-    expect(result.contextParagraphs).toEqual(['[GrayCode preset entry: role=user]\nbody'])
     const marker = result.blocks.find(block => block.id === 'h1')
     expect(marker?.chatHistoryMarker).toBe(true)
     expect(marker?.text).toBeUndefined()
-    // D-11=c：chatHistoryText 预留（请求构造层）当前不使用
+    // chat_history 是位置锚点（thoughts 域把真实历史放在这里），不进 systemText
     expect(result.systemText).toBe('base')
   })
 
-  test('requestLayer=true：user/assistant 段落不进入 contextParagraphs，blocks 仍产出（A1 联动）', () => {
+  test('空 user/assistant 条目整条跳过，不产出 block（对齐旧空文本 continue）', () => {
     const result = assembleEntries(
       [
-        entry({ id: 'u1', role: 'user', order: 0, content: 'user body' }),
-        entry({ id: 'a1', role: 'assistant', order: 1, content: 'assistant body', fakeThought: 'think' }),
-        entry({ id: 'h1', role: 'chat_history', order: 2 }),
+        entry({ id: 'empty-user', role: 'user', order: 0, content: '' }),
+        entry({ id: 'blank-assistant', role: 'assistant', order: 1, content: '   ' }),
+        entry({ id: 'real', role: 'user', order: 2, content: 'body' }),
       ],
-      { systemText: 'base', requestLayer: true },
+      { systemText: 'base' },
     )
-    // 段落交给请求构造层（thoughts 注入真实消息），system 段保持干净
-    expect(result.contextParagraphs).toEqual([])
+    expect(result.blocks.map(block => block.id)).toEqual(['real'])
     expect(result.systemText).toBe('base')
-    expect(result.chatHistoryMarkers).toBe(1)
-    // blocks 仍产出全部 enabled 条目，供请求层读取顺序锚点
-    expect(result.blocks.map(block => block.id)).toEqual(['u1', 'a1', 'h1'])
   })
 
   test('空条目与空 systemText：原样透传', () => {
@@ -98,48 +97,33 @@ describe('assembleEntries 编排', () => {
   })
 })
 
-describe('fakeThoughtPolicy (D-11=c)', () => {
-  test('开关关闭：不输出 thought，正文照发', () => {
-    const result = fakeThoughtPolicy(
-      entry({ id: 'a', role: 'assistant', content: 'body', fakeThought: 'secret thinking' }),
-      false,
+describe('fakeThought 绝不以文本出现（typed-only，thoughts 域接管）', () => {
+  test('assembleEntries：assistant 条目 block 只含正文，fakeThought 不进入任何文本', () => {
+    const result = assembleEntries(
+      [entry({ id: 'a1', role: 'assistant', order: 0, content: 'body', fakeThought: 'secret thinking' })],
+      { systemText: 'base' },
     )
-    expect(result).toEqual({ text: 'body', thoughtIncluded: false })
+    expect(result.blocks[0]!.text).toBe('body')
+    expect(result.systemText).toBe('base')
+    expect(JSON.stringify(result)).not.toContain('[thinking]')
+    expect(JSON.stringify(result)).not.toContain('secret thinking')
   })
 
-  test('开关开启：assistant 条目以 [thinking] 纯文本前缀注入', () => {
-    const result = fakeThoughtPolicy(
-      entry({ id: 'a', role: 'assistant', content: 'body', fakeThought: 'secret thinking' }),
-      true,
-    )
-    expect(result).toEqual({
-      text: '[thinking]\nsecret thinking\n[/thinking]\n\nbody',
-      thoughtIncluded: true,
-    })
-  })
-
-  test('fakeThought 仅对 assistant 生效；空 fakeThought 忽略', () => {
-    expect(fakeThoughtPolicy(entry({ id: 'u', role: 'user', content: 'u', fakeThought: 'x' }), true))
-      .toEqual({ text: 'u', thoughtIncluded: false })
-    expect(fakeThoughtPolicy(entry({ id: 's', role: 'system', content: 's', fakeThought: 'x' }), true))
-      .toEqual({ text: 's', thoughtIncluded: false })
-    expect(fakeThoughtPolicy(entry({ id: 'a', role: 'assistant', content: 'a' }), true))
-      .toEqual({ text: 'a', thoughtIncluded: false })
-  })
-
-  test('P-L3：fakeThought 保存/渲染时 trim，纯空白视为无（对齐旧 PromptManager.ts:832-833）', () => {
-    const trimmed = fakeThoughtPolicy(
-      entry({ id: 'a', role: 'assistant', content: 'body', fakeThought: '  secret thinking  ' }),
-      true,
-    )
-    expect(trimmed).toEqual({ text: '[thinking]\nsecret thinking\n[/thinking]\n\nbody', thoughtIncluded: true })
-    // 纯空白 fakeThought 视为无：不输出 [thinking] 块
-    expect(fakeThoughtPolicy(entry({ id: 'a2', role: 'assistant', content: 'body', fakeThought: '   \n  ' }), true))
-      .toEqual({ text: 'body', thoughtIncluded: false })
+  test('renderModeSectionText：sendHistoryThoughts 任意状态下都不渲染 [thinking] 前缀', () => {
+    const mode = {
+      template: 'tpl',
+      promptEntries: [entry({ id: 'a1', role: 'assistant', order: 0, content: 'body', fakeThought: 'secret thinking' })],
+    }
+    for (const sendHistoryThoughts of [false, true]) {
+      const text = renderModeSectionText(mode, { sendHistoryThoughts })
+      expect(text).toBe('tpl')
+      expect(text).not.toContain('[thinking]')
+      expect(text).not.toContain('secret thinking')
+    }
   })
 })
 
-describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
+describe('renderModeSectionText 组合（entries-first 单段注入单元）', () => {
   const mode = {
     template: 'Template with {{$ENVIRONMENT}}',
     customPrefix: 'PREFIX',
@@ -151,70 +135,34 @@ describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
     ],
   }
 
-  test('prefix + 模板/系统条目 + 段落 + suffix 以空行连接', () => {
+  test('prefix + 模板/系统条目合并 + suffix 以空行连接；user/assistant 条目不进正文', () => {
     const text = renderModeSectionText(mode, {
       sendHistoryThoughts: false,
       placeholderValues: { ENVIRONMENT: 'env-value' },
     })
     expect(text).toBe(
-      [
-        'PREFIX',
-        'Template with env-value\n\nsys entry',
-        '[GrayCode preset entry: role=user]\nuser entry',
-        '[GrayCode preset entry: role=assistant]\nassistant entry',
-        'SUFFIX',
-      ].join('\n\n'),
+      ['PREFIX', 'Template with env-value\n\nsys entry', 'SUFFIX'].join('\n\n'),
     )
+    expect(text).not.toContain('user entry')
+    expect(text).not.toContain('assistant entry')
+    expect(text).not.toContain('[GrayCode preset entry:')
   })
 
-  test('sendHistoryThoughts 开启时段落内出现 [thinking] 前缀（与注入层两态一致）', () => {
-    const on = renderModeSectionText(mode, { sendHistoryThoughts: true })
-    expect(on).toContain('[thinking]\nthink!\n[/thinking]\n\nassistant entry')
-    const off = renderModeSectionText(mode, { sendHistoryThoughts: false })
-    expect(off).not.toContain('[thinking]')
-  })
-
-  test('requestLayer=true：段落不进 section 文本，模板/系统条目/前后缀保留（A1 联动）', () => {
-    const text = renderModeSectionText(mode, {
+  test('deprecated 选项（sendHistoryThoughts/requestLayer）被忽略：输出与不传一致', () => {
+    const base = renderModeSectionText(mode, { placeholderValues: { ENVIRONMENT: 'env-value' } })
+    const withDeprecated = renderModeSectionText(mode, {
       sendHistoryThoughts: true,
       requestLayer: true,
       placeholderValues: { ENVIRONMENT: 'env-value' },
     })
-    expect(text).toBe(['PREFIX', 'Template with env-value\n\nsys entry', 'SUFFIX'].join('\n\n'))
-    expect(text).not.toContain('[GrayCode preset entry:')
-    expect(text).not.toContain('[thinking]')
+    expect(withDeprecated).toBe(base)
+    expect(withDeprecated).not.toContain('[thinking]')
   })
 
   test('无 prefix/suffix 时不产生空段', () => {
     const text = renderModeSectionText({ ...mode, customPrefix: undefined, customSuffix: '' }, {})
     expect(text.startsWith('Template with')).toBe(true)
-    expect(text.endsWith('assistant entry')).toBe(true)
-  })
-
-  test('P-L4：user/assistant 空内容条目整条跳过，不渲染标签段落、不产出 block（对齐旧空文本 continue）', () => {
-    const result = assembleEntries(
-      [
-        entry({ id: 'empty-user', role: 'user', order: 0, content: '' }),
-        entry({ id: 'blank-assistant', role: 'assistant', order: 1, content: '   ' }),
-        entry({ id: 'real', role: 'user', order: 2, content: 'body' }),
-      ],
-      { systemText: 'base' },
-    )
-    expect(result.contextParagraphs).toEqual(['[GrayCode preset entry: role=user]\nbody'])
-    expect(result.blocks.map(block => block.id)).toEqual(['real'])
-    // 段落文本为空但 fakeThought 开启时仍渲染（thinking 块非空；段尾 \n\n 由
-    // renderModeSectionText 的 cleanupEmptyLines 最终 trim）
-    const thoughtOnly = assembleEntries(
-      [entry({ id: 't1', role: 'assistant', order: 0, content: '', fakeThought: 'think' })],
-      { systemText: '', sendHistoryThoughts: true },
-    )
-    expect(thoughtOnly.contextParagraphs).toEqual([
-      '[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]\n\n',
-    ])
-    expect(renderModeSectionText(
-      { template: '', promptEntries: [entry({ id: 't1', role: 'assistant', order: 0, content: '', fakeThought: 'think' })] },
-      { sendHistoryThoughts: true },
-    )).toBe('[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]')
+    expect(text.endsWith('sys entry')).toBe(true)
   })
 
   test('M6：renderModeSectionText 输出经 cleanupEmptyLines（3+ 换行折叠 + 整体 trim）', () => {
@@ -240,15 +188,16 @@ describe('renderModeSectionText 组合（D-11=c 单段注入单元）', () => {
       },
       {},
     )
-    // 非法引用（大写/带 $/连字符）全部替换为确定性说明文本：
-    // 产物无任何 {{...}} 组，DSH 装配器不会报 malformed prompt variable reference
-    expect(text).not.toMatch(/\{\{/)
-    expect(text).toContain('PREFIX')
-    expect(text).toContain('SUFFIX')
-    expect(text).toContain(unavailablePlaceholderText('TOOLS'))
+    // {{$TOOLS}} 无显式值 → 延迟给 DSH 渲染期变量 {{graycode_tools}}（DSH 安全小写变量）
+    expect(text).toContain('{{graycode_tools}}')
+    // 非法引用（大写/带 $/连字符）全部替换为确定性说明文本
     expect(text).toContain(unavailablePlaceholderText('Foo'))
     expect(text).toContain(unavailablePlaceholderText('a-b'))
     expect(text).toContain(unavailablePlaceholderText('Bar'))
+    // 残留的 {{...}} 组只可能是 DSH 安全小写变量（B3-P2：装配器可接受）
+    for (const group of text.match(/\{\{[^{}]*\}\}/g) ?? []) {
+      expect(group).toMatch(/^\{\{[a-z][a-z0-9_]*\}\}$/)
+    }
   })
 
   test('BUG-01：placeholderValues 同样作用于 customPrefix/customSuffix；DSH 安全小写变量保留', () => {

@@ -40,10 +40,11 @@ export type PromptChangeEvent = { type: 'mode-changed' } | { type: 'modes-change
 export interface PromptImportResult {
   modes: PromptMode[]
   /**
-   * Notes about legacy (Gray Code 1.5.4) fields that were silently dropped
-   * (no new-format equivalent) or remapped (`type:'chat_history'` →
-   * `role:'chat_history'`) during import. Empty when the payload had no
-   * legacy-only fields.
+   * Notes about legacy (Gray Code 1.5.4) fields that were dropped (no
+   * new-format equivalent), remapped (`type:'chat_history'` →
+   * `role:'chat_history'`, `dynamicTemplate` → user preset entry) or folded
+   * (SystemPromptConfig envelope) during import. Empty when the payload had
+   * no legacy-only fields.
    */
   warnings: string[]
 }
@@ -58,15 +59,16 @@ const BUILTIN_ROLE: readonly PromptEntryRole[] = ['system', 'user', 'assistant',
 /** Legacy (Gray Code 1.5.4) entry fields with no new-format equivalent: dropped on import. */
 const LEGACY_ENTRY_DROPPED_FIELDS = ['name'] as const
 
-/** Legacy (Gray Code 1.5.4) mode fields with no new-format equivalent: dropped on import. */
+/**
+ * Legacy (Gray Code 1.5.4) mode fields with no new-format equivalent: dropped
+ * on import (warnings). toolPolicy / toolPolicyCustomized are saved (per-mode
+ * toolPolicy persistence); dynamicTemplate / dynamicTemplateEnabled are mapped
+ * to a user preset entry (see parseModeRecord).
+ */
 const LEGACY_MODE_DROPPED_FIELDS = [
   'icon',
   'promptAssemblyMode',
-  'dynamicTemplateEnabled',
-  'dynamicTemplate',
   'dynamicContextStrategy',
-  'toolPolicy',
-  'toolPolicyCustomized',
 ] as const
 
 /**
@@ -299,10 +301,49 @@ function normalizeEntry(entry: PromptEntry): PromptEntry {
   }
 }
 
+/** Validate + normalize a mode toolPolicy allowlist (array of non-empty strings). */
+function normalizeToolPolicy(value: unknown, errorCode: PromptErrorCodeValue): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    throw new PromptError('mode toolPolicy must be an array of non-empty strings', errorCode)
+  }
+  const result: string[] = []
+  for (const element of value) {
+    if (typeof element !== 'string' || element.trim().length === 0) {
+      throw new PromptError('mode toolPolicy must contain only non-empty strings', errorCode)
+    }
+    result.push(element.trim())
+  }
+  return result
+}
+
+/** Validate + normalize the toolPolicyCustomized flag. */
+function normalizeToolPolicyCustomized(value: unknown, errorCode: PromptErrorCodeValue): boolean | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') {
+    throw new PromptError('mode toolPolicyCustomized must be a boolean', errorCode)
+  }
+  return value
+}
+
+/**
+ * Build the user preset entry that carries a legacy dynamicTemplate: order is
+ * one slot before the first (lowest-order) chat_history marker, mirroring the
+ * old "dynamic context before history" placement; 0 when no marker exists.
+ */
+function dynamicTemplateUserEntry(content: string, entries: readonly PromptEntry[]): PromptEntry {
+  const chatHistoryOrders = entries
+    .filter(entry => entry.role === 'chat_history')
+    .map(entry => entry.order)
+  const order = chatHistoryOrders.length > 0 ? Math.min(...chatHistoryOrders) - 1 : 0
+  return { id: newEntryId(), role: 'user', order, enabled: true, content }
+}
+
 /** Deep-copy a mode preserving entry ids (reads / exports). */
 function deepCopyMode(mode: PromptMode): PromptMode {
   return {
     ...mode,
+    toolPolicy: mode.toolPolicy !== undefined ? [...mode.toolPolicy] : undefined,
     promptEntries: mode.promptEntries.map(entry => ({ ...entry })),
   }
 }
@@ -311,6 +352,7 @@ function deepCopyMode(mode: PromptMode): PromptMode {
 function copyWithNewIds(mode: PromptMode): PromptMode {
   return {
     ...mode,
+    toolPolicy: mode.toolPolicy !== undefined ? [...mode.toolPolicy] : undefined,
     promptEntries: mode.promptEntries.map(entry => ({
       ...entry,
       id: newEntryId(),
@@ -444,6 +486,32 @@ function parseModeRecord(raw: unknown, options: ParseModeOptions): PromptMode {
   if (dropped.length > 0) {
     options.warnings.push(`mode "${name.trim()}": dropped legacy field(s): ${dropped.join(', ')}`)
   }
+  // Legacy promptAssemblyMode: in Gray Code 1.5.4 a 'legacy' mode never
+  // activated its promptEntries (only 'entries' did). Every imported mode is
+  // entries-first now, so previously dormant entries become active — surface
+  // the behavior change.
+  if (record.promptAssemblyMode === 'legacy') {
+    options.warnings.push(
+      `mode "${name.trim()}": legacy promptAssemblyMode 'legacy' means its promptEntries never took effect in Gray Code 1.5.4; they become active after import`,
+    )
+  }
+  // Per-mode toolPolicy persistence (D-4): validated and saved instead of
+  // dropped; resolveModeToolPolicy decides runtime use via toolPolicyCustomized.
+  const toolPolicy = normalizeToolPolicy(record.toolPolicy, options.errorCode)
+  const toolPolicyCustomized = normalizeToolPolicyCustomized(record.toolPolicyCustomized, options.errorCode)
+  // Legacy dynamicTemplate (enabled + non-empty) maps to a real user preset
+  // entry: under the entries-first model the dynamic context is a user entry
+  // the thoughts domain projects as a real message. Order = one slot before
+  // the first (lowest-order) chat_history marker, mirroring the old
+  // "dynamic context before history" placement; 0 when no marker exists.
+  let parsedEntries = entries.map(entry => parseEntryRecord(entry, options.errorCode, options.warnings))
+  if (record.dynamicTemplateEnabled === true && typeof record.dynamicTemplate === 'string' && record.dynamicTemplate.trim().length > 0) {
+    parsedEntries = [
+      ...parsedEntries,
+      dynamicTemplateUserEntry(normalizeTemplate(record.dynamicTemplate), parsedEntries),
+    ]
+    options.warnings.push(`mode "${name.trim()}": mapped legacy dynamicTemplate (enabled) to a user preset entry`)
+  }
   return {
     id,
     name: name.trim(),
@@ -453,7 +521,9 @@ function parseModeRecord(raw: unknown, options: ParseModeOptions): PromptMode {
     template: normalizeTemplate(template ?? ''),
     customPrefix: customPrefix !== undefined ? normalizeTemplate(customPrefix) : undefined,
     customSuffix: customSuffix !== undefined ? normalizeTemplate(customSuffix) : undefined,
-    promptEntries: entries.map(entry => parseEntryRecord(entry, options.errorCode, options.warnings)),
+    toolPolicy,
+    toolPolicyCustomized,
+    promptEntries: parsedEntries,
   }
 }
 
@@ -471,6 +541,28 @@ function parseImportedMode(raw: unknown, existingIds: ReadonlySet<string>, warni
     forceCustomKind: true,
     requireFullShape: false,
   })
+}
+
+/**
+ * Detect a SystemPromptConfig envelope (old Gray `system_prompt` export):
+ * - `modes` present as a Record (not an array), or
+ * - top-level `currentModeId` (a config-only field), or
+ * - top-level `template` / `dynamicTemplate` without single-mode markers
+ *   (`name` / `id` / `promptEntries`) — covers old-version configs that had
+ *   no `modes` map at all. Single mode records always carry `name` (and
+ *   usually `id` / `promptEntries`), so they are never misclassified.
+ */
+function isSystemPromptConfigShape(payload: unknown): payload is Record<string, unknown> {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return false
+  const record = payload as Record<string, unknown>
+  if (record.modes !== undefined) {
+    return typeof record.modes === 'object' && record.modes !== null && !Array.isArray(record.modes)
+  }
+  if (record.currentModeId !== undefined) return true
+  if (record.dynamicTemplate !== undefined || record.template !== undefined) {
+    return record.name === undefined && record.id === undefined && record.promptEntries === undefined
+  }
+  return false
 }
 
 /**
@@ -701,6 +793,8 @@ export class PromptSettingsService {
     customPrefix?: string
     customSuffix?: string
     promptEntries?: readonly PromptEntry[]
+    toolPolicy?: string[]
+    toolPolicyCustomized?: boolean
   }): Promise<PromptMode> {
     return this.mutate(async () => {
       const store = await this.requireStore()
@@ -715,6 +809,8 @@ export class PromptSettingsService {
         template: normalizeTemplate(input.template ?? ''),
         customPrefix: input.customPrefix !== undefined ? normalizeTemplate(input.customPrefix) : undefined,
         customSuffix: input.customSuffix !== undefined ? normalizeTemplate(input.customSuffix) : undefined,
+        toolPolicy: normalizeToolPolicy(input.toolPolicy, PromptErrorCode.INVALID_PAYLOAD),
+        toolPolicyCustomized: normalizeToolPolicyCustomized(input.toolPolicyCustomized, PromptErrorCode.INVALID_PAYLOAD),
         promptEntries: (input.promptEntries ?? []).map(entry => normalizeEntry(entry)),
       }
       store.modes.push(mode)
@@ -736,6 +832,8 @@ export class PromptSettingsService {
       customPrefix?: string
       customSuffix?: string
       promptEntries?: readonly PromptEntry[]
+      toolPolicy?: string[]
+      toolPolicyCustomized?: boolean
     },
   ): Promise<PromptMode> {
     return this.mutate(async () => {
@@ -762,6 +860,12 @@ export class PromptSettingsService {
         customSuffix: patch.customSuffix !== undefined
           ? patch.customSuffix.length > 0 ? normalizeTemplate(patch.customSuffix) : undefined
           : mode.customSuffix,
+        toolPolicy: patch.toolPolicy !== undefined
+          ? normalizeToolPolicy(patch.toolPolicy, PromptErrorCode.INVALID_PAYLOAD)
+          : mode.toolPolicy,
+        toolPolicyCustomized: patch.toolPolicyCustomized !== undefined
+          ? normalizeToolPolicyCustomized(patch.toolPolicyCustomized, PromptErrorCode.INVALID_PAYLOAD)
+          : mode.toolPolicyCustomized,
         promptEntries: patch.promptEntries !== undefined
           ? patch.promptEntries.map(entry => normalizeEntry(entry))
           : mode.promptEntries,
@@ -816,25 +920,96 @@ export class PromptSettingsService {
   }
 
   /**
-   * Import one or many modes (ImportModesDialog JSON payload). Imported modes
-   * are always custom; colliding ids are regenerated (including duplicates
-   * inside the same payload); templates and entry content are normalized;
-   * legacy-only fields are dropped and reported in `warnings`.
+   * Import modes from a JSON payload. Two payload shapes are accepted:
+   *
+   * 1. One or many mode records (array or single object) — imported modes are
+   *    always custom; colliding ids are regenerated (including duplicates
+   *    inside the same payload); templates and entry content are normalized;
+   *    legacy-only fields are dropped / mapped and reported in `warnings`.
+   * 2. A SystemPromptConfig envelope (old Gray `system_prompt` export: `modes`
+   *    as a Record, and/or top-level `currentModeId` / `template` /
+   *    `dynamicTemplate`) — folded globally: each mode value goes through
+   *    parseImportedMode; the code/default mode falls back to the global
+   *    `template` when it has none; the global `dynamicTemplate` (when
+   *    enabled) maps to a user preset entry; `currentModeId` is honored when
+   *    it resolves after import. Every folding decision is recorded in
+   *    `warnings`.
    */
   async importModes(payload: unknown): Promise<PromptImportResult> {
     return this.mutate(async () => {
       const store = await this.requireStore()
-      const raws = Array.isArray(payload) ? payload : [payload]
       const warnings: string[] = []
       const existingIds = new Set(store.modes.map(mode => mode.id))
       const imported: PromptMode[] = []
-      for (const raw of raws) {
-        const mode = parseImportedMode(raw, existingIds, warnings)
-        // BUG-06: each parsed mode claims its final id inside the loop, so
-        // same-payload duplicates get regenerated instead of colliding.
-        existingIds.add(mode.id)
-        imported.push(mode)
+
+      if (isSystemPromptConfigShape(payload)) {
+        const config = payload as Record<string, unknown>
+        warnings.push('imported payload is a SystemPromptConfig; folding the global config')
+        const globalTemplate = typeof config.template === 'string' ? normalizeTemplate(config.template) : undefined
+        const globalDynEnabled = config.dynamicTemplateEnabled === true
+        const globalDyn = typeof config.dynamicTemplate === 'string' && config.dynamicTemplate.trim().length > 0
+          ? normalizeTemplate(config.dynamicTemplate)
+          : undefined
+        const rawModes = config.modes
+        if (typeof rawModes === 'object' && rawModes !== null && !Array.isArray(rawModes)) {
+          // BUG-06: each parsed mode claims its final id inside the loop, so
+          // same-payload duplicates get regenerated instead of colliding.
+          for (const rawMode of Object.values(rawModes as Record<string, unknown>)) {
+            const mode = parseImportedMode(rawMode, existingIds, warnings)
+            existingIds.add(mode.id)
+            imported.push(mode)
+          }
+        } else if (globalTemplate !== undefined || globalDyn !== undefined || config.currentModeId !== undefined) {
+          // Old-version config without a modes map: synthesize the default
+          // (code) mode from the global fields.
+          const codeMode: PromptMode = {
+            id: 'code',
+            name: 'Code',
+            kind: 'custom',
+            template: globalTemplate ?? '',
+            promptEntries: [],
+          }
+          const parsed = parseImportedMode(codeMode, existingIds, warnings)
+          warnings.push('config without modes: synthesized the default (code) mode from the global template')
+          existingIds.add(parsed.id)
+          imported.push(parsed)
+        }
+        // code / default mode: fall back to the global template when it has none.
+        const defaultMode = imported.find(mode => mode.id === 'code')
+          ?? (typeof config.currentModeId === 'string' ? imported.find(mode => mode.id === config.currentModeId) : undefined)
+          ?? imported[0]
+        if (defaultMode && defaultMode.template.length === 0 && globalTemplate !== undefined && globalTemplate.length > 0) {
+          defaultMode.template = globalTemplate
+          warnings.push(`mode "${defaultMode.id}": template fell back to the global config template`)
+        }
+        // Global dynamicTemplate (enabled) maps to a user entry on the default
+        // mode, unless that mode already carries the same entry from its own
+        // dynamicTemplate field.
+        if (defaultMode && globalDynEnabled && globalDyn !== undefined
+          && !defaultMode.promptEntries.some(entry => entry.content === globalDyn)) {
+          defaultMode.promptEntries.push(dynamicTemplateUserEntry(globalDyn, defaultMode.promptEntries))
+          warnings.push(`mode "${defaultMode.id}": mapped global dynamicTemplate (enabled) to a user preset entry`)
+        }
+        const rawCurrent = config.currentModeId
+        if (typeof rawCurrent === 'string' && rawCurrent.length > 0) {
+          if (imported.some(mode => mode.id === rawCurrent) || store.modes.some(mode => mode.id === rawCurrent)) {
+            store.currentModeId = rawCurrent
+            warnings.push(`currentModeId "${rawCurrent}" set as the current mode`)
+          } else {
+            warnings.push(`currentModeId "${rawCurrent}" not found after import; keeping the current mode`)
+          }
+        }
+      } else {
+        const raws = Array.isArray(payload) ? payload : [payload]
+        for (const raw of raws) {
+          const mode = parseImportedMode(raw, existingIds, warnings)
+          // BUG-06: each parsed mode claims its final id inside the loop, so
+          // same-payload duplicates get regenerated instead of colliding.
+          existingIds.add(mode.id)
+          imported.push(mode)
+        }
       }
+
       store.modes.push(...imported)
       await this.persist()
       this.emit({ type: 'modes-changed' })

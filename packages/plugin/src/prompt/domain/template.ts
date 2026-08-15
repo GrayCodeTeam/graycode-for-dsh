@@ -5,11 +5,16 @@
  * from gray-code-plugin's PromptManager. Pure TS, no host imports.
  *
  * Placeholder module catalog:
- * - `resolved` modules (ENVIRONMENT, WORKSPACE_FILES, TOOLS, TODO_LIST, MEMORY)
+ * - `resolved` modules (ENVIRONMENT, WORKSPACE_FILES, TODO_LIST, MEMORY)
  *   have DSH-host semantics: the injection adapter may supply values for them
  *   (e.g. ENVIRONMENT from the agent session header). When no value is
  *   provided the renderer substitutes a deterministic "not available in DSH"
  *   notice, so a raw `{{$MODULE}}` reference never reaches the final product.
+ * - TOOLS is deferred to the DSH render-time variable `graycode_tools` (the
+ *   `graycode_` prefix guards against collisions with future official
+ *   variables): the system-prompt/assemble waterfall provides it
+ *   unconditionally, so `{{$TOOLS}}` without an explicit value renders as
+ *   `{{graycode_tools}}` instead of a notice.
  * - `deprecated` modules (PINNED_FILES, OPEN_TABS, ACTIVE_EDITOR, DIAGNOSTICS,
  *   MCP_TOOLS, CONTEXT_BADGE_FORMAT and other editor-only modules) have no
  *   DSH host equivalent (ADR-0002 §3): the renderer always substitutes a
@@ -24,9 +29,10 @@
  * `malformed prompt variable reference` at assembly time and aborts the turn.
  * The renderer therefore substitutes a deterministic notice for every
  * reference it cannot resolve — deprecated modules, resolved modules without
- * a supplied value, unknown references with non-lowercase names — and
- * preserves only DSH-safe lowercase variable references (e.g.
- * `{{graycode_prompt_mode}}`) for the DSH layer to resolve.
+ * a supplied value (TOOLS is the one exception: it defers to the DSH
+ * render-time variable `graycode_tools`), unknown references with
+ * non-lowercase names — and preserves only DSH-safe lowercase variable
+ * references (e.g. `{{graycode_prompt_mode}}`) for the DSH layer to resolve.
  */
 
 /** Canonical (uppercase, `$`/braces stripped) placeholder module name. */
@@ -153,7 +159,16 @@ export function renderPromptTemplate(
     if (status === 'deprecated') return deprecatedPlaceholderText(canonical)
     if (status === 'resolved') {
       const value = values[canonical]
-      return value !== undefined ? value : unavailablePlaceholderText(canonical)
+      if (value !== undefined) return value
+      // TOOLS 模块（P3F v2，entries 唯一组装）：无显式值时延迟给 DSH 渲染期变量
+      // `{{graycode_tools}}`（带 graycode_ 前缀，防与未来官方变量冲突）——
+      // system-prompt/assemble 瀑布无条件把 assembly.tools 的清单文本写入
+      // variables.graycode_tools（见 promptInjector.ts overrideHostPrompt 接线），
+      // 因此 `{{graycode_tools}}` 一定可解析；模板里写 `{{$TOOLS}}` 即获得宿主
+      // 工具清单（覆盖 DSH 自带 tool-guidance section 后，工具说明改由本模板控制）。
+      // 其余 resolved 模块（ENVIRONMENT/TODO_LIST/MEMORY）无值时仍用 deterministic 提示。
+      if (canonical === 'TOOLS') return '{{graycode_tools}}'
+      return unavailablePlaceholderText(canonical)
     }
     // Unknown module: keep only DSH-safe lowercase variable references
     // (e.g. `{{graycode_prompt_mode}}`); anything else would fail the DSH

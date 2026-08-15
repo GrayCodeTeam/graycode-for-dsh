@@ -20,9 +20,10 @@ export interface PromptEntry {
   enabled: boolean
   content: string
   /**
-   * Fake "thought" text. Only honored for role=assistant. Under D-11 (c) it
-   * degrades to a plain-text prefix inside the system prompt — it is NOT a
-   * typed thought part (see fakeThoughtPolicy in entries.ts).
+   * Fake "thought" text. Only honored for role=assistant. The prompt domain
+   * never renders it as text (there is no system-prompt prefix path); the
+   * thoughts domain projects it as a typed reasoning block, gated by its
+   * sendHistoryThoughts switch.
    */
   fakeThought?: string
 }
@@ -42,6 +43,19 @@ export interface PromptMode {
   customSuffix?: string
   /** Ordered preset entries (system/user/assistant/chat_history). */
   promptEntries: PromptEntry[]
+  /**
+   * Per-mode tool allowlist (D-4 persistence). When `toolPolicyCustomized` is
+   * true the runtime uses this list verbatim; otherwise it falls back to the
+   * built-in default for the mode id (workflows/domain/modeToolsPolicy.ts
+   * resolveModeToolPolicy). undefined = no persisted policy.
+   */
+  toolPolicy?: string[]
+  /**
+   * Whether the user actively customized `toolPolicy`. false/undefined = the
+   * runtime uses the built-in default for the mode id; true = the persisted
+   * `toolPolicy` (including an explicit empty array = no filtering) is honored.
+   */
+  toolPolicyCustomized?: boolean
 }
 
 /** Built-in mode ids; these modes seed the store and cannot be deleted. */

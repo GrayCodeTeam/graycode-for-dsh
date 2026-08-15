@@ -90,22 +90,26 @@ describe('内置 5 模式模板对齐 Gray Code 1.5.4（D-1 / H1）', () => {
     }
   })
 
-  test('渲染冒烟：旧占位符在新管道下的解析（B3-P2：产物无 {{...}} 残留）', () => {
-    // ENVIRONMENT 由注入层提供 → 替换；TOOLS/MEMORY 无值 → 确定性
-    // unavailable 说明；MCP_TOOLS / CONTEXT_BADGE_FORMAT（编辑器专属）→
-    // 确定性弃用说明。全部说明文本均不含 {{...}}。
+  test('渲染冒烟：旧占位符在新管道下的解析（B3-P2：无非法 {{...}} 残留）', () => {
+    // ENVIRONMENT 由注入层提供 → 替换；TOOLS 无值 → 延迟给 DSH 渲染期变量
+    // {{graycode_tools}}；MEMORY 无值 → 确定性 unavailable 说明；
+    // MCP_TOOLS / CONTEXT_BADGE_FORMAT（编辑器专属）→ 确定性弃用说明。
     const code = BUILTIN_MODE_TEMPLATES.code
     const rendered = renderPromptTemplate(code, {
       ENVIRONMENT: '====\n\nENVIRONMENT\n\nCurrent Workspace: X:/ws',
     })
     expect(rendered).toContain('====\n\nENVIRONMENT\n\nCurrent Workspace: X:/ws')
     expect(rendered).toContain('GUIDELINES')
-    expect(rendered).toContain(unavailablePlaceholderText('TOOLS'))
+    expect(rendered).toContain('{{graycode_tools}}')
     expect(rendered).toContain(unavailablePlaceholderText('MEMORY'))
     expect(rendered).toContain(deprecatedPlaceholderText('MCP_TOOLS'))
     expect(rendered).toContain(deprecatedPlaceholderText('CONTEXT_BADGE_FORMAT'))
-    // B3-P2：渲染产物不含任何 {{...}} 组 → DSH 装配器不会因大写占位符
-    // 报 malformed prompt variable reference
-    expect(rendered).not.toMatch(/\{\\{/)
+    // B3-P2：渲染产物不含任何非法 {{...}} 组（大写/带 $ 的占位符全部替换）；
+    // 残留的 {{...}} 组只可能是 DSH 安全小写变量（如 {{graycode_tools}}）——
+    // DSH 装配器不会报 malformed prompt variable reference
+    expect(rendered).not.toMatch(/\{\{\$|\{\{[A-Z]/)
+    for (const group of rendered.match(/\{\{[^{}]*\}\}/g) ?? []) {
+      expect(group).toMatch(/^\{\{[a-z][a-z0-9_]*\}\}$/)
+    }
   })
 })

@@ -171,8 +171,9 @@ describe('导入 / 导出', () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
     // 旧版（Gray Code 1.5.4）模式/条目形状：type 表达历史插入点，
-    // name/icon/promptAssemblyMode/dynamicTemplateEnabled/dynamicTemplate/
-    // dynamicContextStrategy/toolPolicy 均为旧字段
+    // name/icon/promptAssemblyMode/dynamicContextStrategy 为旧字段；
+    // toolPolicy/toolPolicyCustomized 被保存；dynamicTemplate（enabled）映射为
+    // user 预设条目
     const legacyPayload = {
       id: 'old-mode',
       name: 'Old Mode',
@@ -202,20 +203,105 @@ describe('导入 / 导出', () => {
     expect(assistant.role).toBe('assistant')
     expect(assistant.content).toBe('body')
     expect(assistant.fakeThought).toBe('think')
-    // 渲染层面：不产出空的 `[GrayCode preset entry: role=user]` 段落
-    const rendered = renderModeSectionText(mode, { sendHistoryThoughts: true })
-    expect(rendered).not.toContain('[GrayCode preset entry: role=user]')
-    expect(rendered).toContain('[GrayCode preset entry: role=assistant]\n[thinking]\nthink\n[/thinking]\n\nbody')
 
-    // warnings 列出全部丢弃字段 + chat_history 映射提示
+    // D-4：toolPolicy / toolPolicyCustomized 被保存（不再丢弃）
+    expect(mode.toolPolicy).toEqual(['read_file'])
+    expect(mode.toolPolicyCustomized).toBe(true)
+
+    // dynamicTemplate（enabled）→ user 预设条目：order 在首个 chat_history 标记前一位
+    const dyn = mode.promptEntries.find(entry => entry.role === 'user' && entry.content === 'dyn {{$WORKSPACE_FILES}}')!
+    expect(dyn.enabled).toBe(true)
+    expect(dyn.order).toBe(-1)
+
+    // 渲染层面：user/assistant 条目与 fakeThought 不进系统文本（entries-first）
+    const rendered = renderModeSectionText(mode, { sendHistoryThoughts: true })
+    expect(rendered).toContain('tpl')
+    expect(rendered).not.toContain('[GrayCode preset entry:')
+    expect(rendered).not.toContain('[thinking]')
+    expect(rendered).not.toContain('body')
+
+    // warnings 列出全部丢弃字段 + dynamicTemplate 映射 + chat_history 映射提示
     expect(result.warnings).toEqual(expect.arrayContaining([
-      'mode "Old Mode": dropped legacy field(s): icon, promptAssemblyMode, dynamicTemplateEnabled, dynamicTemplate, dynamicContextStrategy, toolPolicy, toolPolicyCustomized',
+      'mode "Old Mode": dropped legacy field(s): icon, promptAssemblyMode, dynamicContextStrategy',
+      'mode "Old Mode": mapped legacy dynamicTemplate (enabled) to a user preset entry',
       'entry dropped legacy field(s): name',
       'entry mapped legacy type:chat_history to role:chat_history',
     ]))
     expect(result.warnings.filter(w => w.includes('dropped legacy field(s)'))).toHaveLength(3) // 1 条模式级 + 2 条条目级（两个条目都带 name）
   })
 
+
+  test('D-4：toolPolicy / toolPolicyCustomized 经 createMode/updateMode 保存并在导入后保留', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+
+    // createMode 保存策略字段
+    const created = await service.createMode({
+      name: 'Policy Mode',
+      template: 'tpl',
+      toolPolicy: ['read_file', 'search_in_files'],
+      toolPolicyCustomized: true,
+    })
+    expect(created.toolPolicy).toEqual(['read_file', 'search_in_files'])
+    expect(created.toolPolicyCustomized).toBe(true)
+
+    // 重载后仍在（持久化）
+    const reloaded = await serviceOf(root)
+    const persisted = await reloaded.getMode(created.id)
+    expect(persisted?.toolPolicy).toEqual(['read_file', 'search_in_files'])
+    expect(persisted?.toolPolicyCustomized).toBe(true)
+
+    // updateMode 可清除策略（空数组 = 显式无过滤）
+    const cleared = await service.updateMode(created.id, { toolPolicy: [], toolPolicyCustomized: true })
+    expect(cleared.toolPolicy).toEqual([])
+    expect(cleared.toolPolicyCustomized).toBe(true)
+
+    // export → import round-trip 保留策略字段
+    const exported = await service.exportModes([created.id])
+    const root2 = await makeDataRoot()
+    const service2 = await serviceOf(root2)
+    const imported = await service2.importModes(exported.modes)
+    expect(imported.modes[0]?.toolPolicy).toEqual([])
+    expect(imported.modes[0]?.toolPolicyCustomized).toBe(true)
+    expect(imported.warnings).toEqual([])
+
+    // 非法 toolPolicy 负载拒绝
+    await expect(service.createMode({ name: 'Bad', toolPolicy: 'read_file' as never }))
+      .rejects.toMatchObject({ code: PromptErrorCode.INVALID_PAYLOAD })
+    await expect(service.createMode({ name: 'Bad2', toolPolicy: ['ok', ''] }))
+      .rejects.toMatchObject({ code: PromptErrorCode.INVALID_PAYLOAD })
+  })
+
+  test('SystemPromptConfig 折叠导入：modes Record + 全局 template 回退 + 全局 dynamicTemplate 映射 + currentModeId 生效', async () => {
+    const root = await makeDataRoot()
+    const service = await serviceOf(root)
+    const result = await service.importModes({
+      currentModeId: 'custom-1',
+      template: 'GLOBAL TPL',
+      dynamicTemplateEnabled: true,
+      dynamicTemplate: 'global dyn context',
+      modes: {
+        'custom-1': { id: 'custom-1', name: 'Custom One', promptEntries: [] },
+        'custom-2': { id: 'custom-2', name: 'Custom Two', template: 'own tpl', promptEntries: [] },
+      },
+    })
+    expect(result.warnings[0]).toBe('imported payload is a SystemPromptConfig; folding the global config')
+    expect(result.modes).toHaveLength(2)
+
+    const c1 = result.modes.find(mode => mode.id === 'custom-1')!
+    // 无自有 template → 回退全局 template
+    expect(c1.template).toBe('GLOBAL TPL')
+    // 全局 dynamicTemplate（enabled）→ 映射为 user 预设条目（无 chat_history 标记 → order 0）
+    const dyn = c1.promptEntries.find(entry => entry.role === 'user' && entry.content === 'global dyn context')!
+    expect(dyn.enabled).toBe(true)
+    expect(dyn.order).toBe(0)
+    // 有自有 template 的模式不受全局回退影响
+    const c2 = result.modes.find(mode => mode.id === 'custom-2')!
+    expect(c2.template).toBe('own tpl')
+
+    // currentModeId 生效
+    expect((await service.getCurrentMode()).id).toBe('custom-1')
+  })
   test('BUG-06：importModes 同一 payload 内重复 mode id 自动重命名，store 中 id 唯一', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
