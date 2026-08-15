@@ -5,6 +5,8 @@
  * install：每 enabled 条目注册一个委托 provider 与一个工具；provider.start
  * 委托宿主 `spawn`（保留宿主 run 管理）；工具 execute 前台走 seam.start、
  * 后台走 seam.startContinuable，身份（persona = systemPrompt）进请求。
+ * 工具名经 deriveToolNames 去重（-2/-3 后缀）；provider 名碰撞/不可 slug 化的 id
+ * 在注册前整体拒绝；注册中途失败回滚已注册项（H-4a 无残留）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -48,9 +50,16 @@ function makeFakeSeam(): {
   start: ReturnType<typeof vi.fn>
   startContinuable: ReturnType<typeof vi.fn>
   spawn: { prepareContinuable?: (spec: unknown) => Promise<unknown> }
+  /** 每次 registerProvider 返回的 disposer（真实可断言，不再是无用 no-op）。 */
+  providerDisposes: Array<ReturnType<typeof vi.fn>>
 } {
   const spawn: { prepareContinuable?: (spec: unknown) => Promise<unknown> } = {}
-  const registerProvider = vi.fn(() => () => {})
+  const providerDisposes: Array<ReturnType<typeof vi.fn>> = []
+  const registerProvider = vi.fn(() => {
+    const dispose = vi.fn(() => {})
+    providerDisposes.push(dispose)
+    return dispose
+  })
   const start = vi.fn(async () => ({ id: 'child', result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'ok' }] }), dispose: vi.fn(async () => {}) }))
   const startContinuable = vi.fn(async () => ({ childId: 'child', messageId: 'm1' }))
   const seam: CustomAgentSeamLike = {
@@ -59,12 +68,17 @@ function makeFakeSeam(): {
     start,
     startContinuable,
   }
-  return { seam, registerProvider, start, startContinuable, spawn }
+  return { seam, registerProvider, start, startContinuable, spawn, providerDisposes }
 }
 
-function makeFakeTools(): { tools: CustomAgentToolsLike; register: ReturnType<typeof vi.fn> } {
-  const register = vi.fn(() => () => {})
-  return { tools: { register }, register }
+function makeFakeTools(): { tools: CustomAgentToolsLike; register: ReturnType<typeof vi.fn>; toolDisposes: Array<ReturnType<typeof vi.fn>> } {
+  const toolDisposes: Array<ReturnType<typeof vi.fn>> = []
+  const register = vi.fn(() => {
+    const dispose = vi.fn(() => {})
+    toolDisposes.push(dispose)
+    return dispose
+  })
+  return { tools: { register }, register, toolDisposes }
 }
 
 describe('custom agent identity planning', () => {
@@ -177,18 +191,77 @@ describe('custom agent tool', () => {
 
 describe('installCustomAgentRuntimes', () => {
   it('registers one provider + one tool per enabled agent and unregisters on dispose', () => {
-    const { seam, registerProvider } = makeFakeSeam()
-    const { tools, register } = makeFakeTools()
+    const { seam, registerProvider, providerDisposes } = makeFakeSeam()
+    const { tools, register, toolDisposes } = makeFakeTools()
     const dispose = installCustomAgentRuntimes(seam, tools, [AGENT, { ...AGENT, id: 'off', enabled: false }])
     expect(registerProvider).toHaveBeenCalledTimes(1)
     expect(register).toHaveBeenCalledTimes(1)
+    expect(providerDisposes).toHaveLength(1)
+    expect(toolDisposes).toHaveLength(1)
+    // 真实断言：dispose 调用每个 registerProvider / tools.register 返回的 disposer。
     dispose()
-    // The fake disposers are the returned no-ops; assert the contract shape:
-    // every registerProvider/tools.register return value was invoked.
-    const providerDispose = registerProvider.mock.results[0]?.value
-    const toolDispose = register.mock.results[0]?.value
-    expect(typeof providerDispose).toBe('function')
-    expect(typeof toolDispose).toBe('function')
-    expect(registerProvider).toHaveBeenCalledTimes(1)
+    expect(providerDisposes[0]).toHaveBeenCalledTimes(1)
+    expect(toolDisposes[0]).toHaveBeenCalledTimes(1)
+    // 幂等：二次 dispose 不重复释放。
+    dispose()
+    expect(providerDisposes[0]).toHaveBeenCalledTimes(1)
+    expect(toolDisposes[0]).toHaveBeenCalledTimes(1)
+  })
+
+  it('同名工具经 deriveToolNames 去重后注册（-2/-3 后缀，注册期不再抛重复名）', () => {
+    const { seam } = makeFakeSeam()
+    const { tools, register } = makeFakeTools()
+    const a: CustomAgentConfig = { ...AGENT, id: 'a', name: 'Reviewer' }
+    const b: CustomAgentConfig = { ...AGENT, id: 'b', name: 'Reviewer' }
+    installCustomAgentRuntimes(seam, tools, [a, b])
+    expect(register).toHaveBeenCalledTimes(2)
+    expect(toolOf(register.mock.calls[0]![0]).name).toBe('subagent_reviewer')
+    expect(toolOf(register.mock.calls[1]![0]).name).toBe('subagent_reviewer-2')
+  })
+
+  it('provider 名碰撞（重复/同形 id）在注册前整体拒绝：零注册、零残留', () => {
+    const { seam, registerProvider } = makeFakeSeam()
+    const { tools, register } = makeFakeTools()
+    const dupId = [AGENT, { ...AGENT, name: 'Second' }]
+    expect(() => installCustomAgentRuntimes(seam, tools, dupId)).toThrow(/collision/)
+    expect(registerProvider).not.toHaveBeenCalled()
+    expect(register).not.toHaveBeenCalled()
+    // 同形 id（slug 化后撞 provider 名）同样整体拒绝。
+    const sameSlug = [{ ...AGENT, id: 'a b' }, { ...AGENT, id: 'a-b' }]
+    expect(() => installCustomAgentRuntimes(seam, tools, sameSlug)).toThrow(/collision/)
+    expect(registerProvider).not.toHaveBeenCalled()
+    expect(register).not.toHaveBeenCalled()
+  })
+
+  it('不可 slug 化的 id（纯非 ASCII）在注册前拒绝', () => {
+    const { seam, registerProvider } = makeFakeSeam()
+    const { tools, register } = makeFakeTools()
+    expect(() => installCustomAgentRuntimes(seam, tools, [{ ...AGENT, id: '中文审查' }])).toThrow()
+    expect(registerProvider).not.toHaveBeenCalled()
+    expect(register).not.toHaveBeenCalled()
+  })
+
+  it('注册中途失败 → 回滚已注册的 provider/tool 后向上抛错（无残留，H-4a）', () => {
+    const { seam, registerProvider, providerDisposes } = makeFakeSeam()
+    const { tools, register, toolDisposes } = makeFakeTools()
+    const a: CustomAgentConfig = { ...AGENT, id: 'a', name: 'Reviewer' }
+    const b: CustomAgentConfig = { ...AGENT, id: 'b', name: 'Bouncer' }
+    // 第二个工具注册抛错（模拟与宿主既有工具重名，运行时 register 才会撞）。
+    register.mockImplementationOnce(() => {
+      const dispose = vi.fn(() => {})
+      toolDisposes.push(dispose)
+      return dispose
+    }).mockImplementationOnce(() => {
+      throw new Error('tool "subagent_bouncer" is already registered')
+    })
+    expect(() => installCustomAgentRuntimes(seam, tools, [a, b])).toThrow(/already registered/)
+    // a 的 provider + a 的工具 + b 的 provider 已注册 → 全部回滚释放。
+    expect(registerProvider).toHaveBeenCalledTimes(2)
+    expect(register).toHaveBeenCalledTimes(2)
+    expect(providerDisposes).toHaveLength(2)
+    expect(providerDisposes[0]).toHaveBeenCalledTimes(1)
+    expect(providerDisposes[1]).toHaveBeenCalledTimes(1)
+    expect(toolDisposes).toHaveLength(1)
+    expect(toolDisposes[0]).toHaveBeenCalledTimes(1)
   })
 })

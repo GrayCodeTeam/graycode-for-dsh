@@ -8,7 +8,7 @@
  * - 负值 / 非整数被 schemastery 拒绝；customAgents 条目缺 id/name 被拒绝。
  */
 import { describe, expect, it } from 'vitest'
-import { Config, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
+import { Config, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
 
 describe('subagents Config（Schemastery）', () => {
   it('缺省：maxHopDepth=5（老 Gray MAX_HOP_DEPTH）、maxConcurrent=2（老 Gray subagents.maxConcurrent）、customAgents=[]', () => {
@@ -34,5 +34,32 @@ describe('subagents Config（Schemastery）', () => {
     expect(() => Config({ customAgents: [{}] } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ customAgents: [{ id: '' }] } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ customAgents: [{ id: 'agent-1' }] } as unknown as SubagentsConfig)).toThrow()
+  })
+
+  it('customAgents 校验 id 唯一性与可 slug 化性（M2：非法配置明确报错而非运行时退化）', () => {
+    // schemastery 3.x 无 schema 级自定义校验 API，M2 校验以导出纯函数
+    // validateCustomAgentConfig 提供（apply 前强制调用，此处直接测纯函数）。
+    // 重复 id → 整体拒绝（不再等到运行时 DUPLICATE_PROVIDER）。
+    expect(() => validateCustomAgentConfig([
+      { id: 'agent-1', name: 'A', description: '', systemPrompt: '', enabled: true },
+      { id: 'agent-1', name: 'B', description: '', systemPrompt: '', enabled: true },
+    ])).toThrow(/duplicate/)
+    // 同形 id（slug 化后撞派生 provider 名）→ 整体拒绝。
+    expect(() => validateCustomAgentConfig([
+      { id: 'a b', name: 'A', description: '', systemPrompt: '', enabled: true },
+      { id: 'a-b', name: 'B', description: '', systemPrompt: '', enabled: true },
+    ])).toThrow(/duplicate/)
+    // 纯非 ASCII id（slug 化结果为空）→ 拒绝（不再空 slug 退化）。
+    expect(() => validateCustomAgentConfig([
+      { id: '中文', name: '审查', description: '', systemPrompt: '', enabled: true },
+    ])).toThrow(/slug-able/)
+    // 空 id → 拒绝。
+    expect(() => validateCustomAgentConfig([
+      { id: '', name: 'A', description: '', systemPrompt: '', enabled: true },
+    ])).toThrow(/slug-able/)
+    // 合法配置通过。
+    expect(() => validateCustomAgentConfig([
+      { id: 'agent-1', name: 'A', description: '', systemPrompt: '', enabled: true },
+    ])).not.toThrow()
   })
 })

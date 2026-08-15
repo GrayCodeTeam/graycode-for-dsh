@@ -20,7 +20,7 @@
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type { CustomAgentConfig } from '../../domain/plan.ts'
-import { deriveProviderName, deriveToolName } from '../../domain/plan.ts'
+import { deriveProviderName, deriveToolName, deriveToolNames, slugify } from '../../domain/plan.ts'
 
 /** Structural subset of the host `SubagentProvider`. */
 export interface SubagentProviderLike {
@@ -218,21 +218,54 @@ function textOf(output: readonly unknown[] | undefined): string {
 
 /**
  * Install the runtime surface for the enabled custom agents: one provider +
- * one tool per agent. Returns a disposer that unregisters everything (the
- * caller ties it to the fiber via `ctx.effect`, so config hot-reload restarts
- * clean up before re-applying).
+ * one tool per agent. Tool names are de-duplicated via `deriveToolNames`;
+ * provider-name collisions and un-slug-able ids are rejected up front (the
+ * whole batch, before any registration), and a mid-registration failure rolls
+ * back the already-registered items before rethrowing (H-4a: no residue
+ * survives a rejected install, so config hot-reload restarts stay clean).
+ * Returns a disposer that unregisters everything (the caller ties it to the
+ * fiber via `ctx.effect`, so config hot-reload restarts clean up before
+ * re-applying).
  */
 export function installCustomAgentRuntimes(
   seam: CustomAgentSeamLike,
   tools: CustomAgentToolsLike,
   agents: readonly CustomAgentConfig[],
 ): () => void {
+  const enabled = agents.filter((agent) => agent.enabled)
+
+  // H-4a ① 注册前唯一性预检：先算好全部注册项的名字再校验，任一冲突整体拒绝，
+  // 不产生任何残留。工具名经 deriveToolNames 统一去重（-2/-3 后缀）；provider 名
+  // 由 id 派生，重复/同形 id 会撞 provider（运行时 DUPLICATE_PROVIDER）→ 直接拒绝。
+  const toolNames = deriveToolNames(agents)
+  const providerOwners = new Map<string, string>()
+  for (const agent of enabled) {
+    if (slugify(agent.id).length === 0) {
+      throw new Error(`custom subagents: agent id "${agent.id}" is not slug-able — the derived provider name would be empty`)
+    }
+    const providerName = deriveProviderName(agent.id)
+    const owner = providerOwners.get(providerName)
+    if (owner !== undefined) {
+      throw new Error(
+        `custom subagents: provider name collision — "${owner}" and "${agent.id}" both derive provider "${providerName}" (duplicate or non-unique id); rejecting the whole batch before registering anything`,
+      )
+    }
+    providerOwners.set(providerName, agent.id)
+  }
+
   const disposers: Array<() => void> = []
-  for (const agent of agents) {
-    if (!agent.enabled) continue
-    const toolName = deriveToolName(agent)
-    disposers.push(seam.registerProvider(createDelegatingProvider(agent, seam)))
-    disposers.push(tools.register(createCustomAgentTool(agent, toolName, seam)))
+  try {
+    for (const agent of enabled) {
+      const toolName = toolNames.get(agent.id) ?? deriveToolName(agent)
+      disposers.push(seam.registerProvider(createDelegatingProvider(agent, seam)))
+      disposers.push(tools.register(createCustomAgentTool(agent, toolName, seam)))
+    }
+  } catch (error) {
+    // H-4a ② 局部回滚：注册中途失败（如与宿主既有工具/provider 重名）时释放本轮
+    // 已注册项再向上抛错。调用方拿不到 disposer，这里必须清干净半注册状态，
+    // 否则 reload 持续失败。
+    for (const dispose of disposers.splice(0)) dispose()
+    throw error
   }
   return () => {
     for (const dispose of disposers) dispose()

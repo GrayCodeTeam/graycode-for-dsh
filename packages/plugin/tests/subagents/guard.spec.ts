@@ -226,11 +226,12 @@ describe('G3 并发上限（seam 包装）', () => {
     const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
     await expect(seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
     await expect(seam.start('spawn', request)).rejects.toMatchObject({
-      parentSessionId: 'parent-1',
+      parentSessionId: 'session://parent-1',
       running: 2,
       maxConcurrent: 2,
     })
-    expect(countRunning).toHaveBeenCalledWith(sid('parent-1'))
+    // M3：父会话 id 统一为 session:// 前缀后再交给计数端口（按 scheme 匹配）。
+    expect(countRunning).toHaveBeenCalledWith(sid('session://parent-1'))
     expect(calls.start).toHaveLength(0)
   })
 
@@ -294,6 +295,30 @@ describe('G3 并发上限（seam 包装）', () => {
     await expect(seam.start('spawn', { parent: noIdParent, signal: new AbortController().signal }))
       .rejects.toBeInstanceOf(ConcurrencyCheckError)
     expect(calls.start).toHaveLength(0)
+  })
+
+  it('countRunning 缺省 fail-closed：未配置计数端口且 maxConcurrent>0 → 拒绝委派（M3）', async () => {
+    const { seam, calls } = fakeSeam()
+    install({ seam, calls }, { maxConcurrent: 2 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(seam.start('spawn', request)).rejects.toBeInstanceOf(ConcurrencyCheckError)
+    await expect(seam.startContinuable({
+      provider: 'spawn', label: 'x', request: { parent: fakeAgent('parent-1') }, signal: new AbortController().signal,
+    })).rejects.toBeInstanceOf(ConcurrencyCheckError)
+    expect(calls.start).toHaveLength(0)
+    expect(calls.startContinuable).toHaveLength(0)
+  })
+
+  it('parentSessionId 规范化：缺前缀补 session://，已带前缀原样传递（M3）', async () => {
+    const { seam } = fakeSeam()
+    const countRunning = vi.fn(async () => 1)
+    install({ seam }, { maxConcurrent: 2, countRunning })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    expect(countRunning).toHaveBeenCalledWith(sid('session://parent-1'))
+    const prefixed = { parent: fakeAgent('session://parent-1'), signal: new AbortController().signal }
+    await expect(seam.start('spawn', prefixed)).resolves.toMatchObject({ id: 'run-1' })
+    expect(countRunning).toHaveBeenCalledWith(sid('session://parent-1'))
   })
 
   it('countRunningChildrenViaList 口径：只计 kind=child 且 activity=running', async () => {
@@ -402,5 +427,33 @@ describe('dispose 恢复', () => {
     expect(seam.followup).not.toBe(originals.followup)
     first.dispose()
     expect(seam.followup).toBe(originals.followup)
+  })
+
+  it('双安装顺序（H-4b）：先卸载第一个实例，第二个实例的守卫仍生效（G1 不绕过）', async () => {
+    const { seam, originals } = fakeSeam()
+    const first = install({ seam }, { maxHopDepth: 2 })
+    const second = install({ seam }, { maxHopDepth: 9 })
+    first.dispose()
+    // 第一个实例已卸载，但第二个实例仍是活跃守卫：原方法不得被恢复。
+    expect(seam.followup).not.toBe(originals.followup)
+    const args = followupArgs()
+    await seam.followup(...args)
+    await seam.followup(...args)
+    await expect(seam.followup(...args)).rejects.toMatchObject({ maxHopDepth: 2 })
+    // 第二个实例卸载后计数归零，才恢复原方法。
+    second.dispose()
+    expect(seam.followup).toBe(originals.followup)
+  })
+
+  it('双安装顺序（H-4b）：先卸载第一个实例，start 仍受 G3 约束', async () => {
+    const { seam, calls } = fakeSeam()
+    const countRunning = vi.fn(async () => 2)
+    const first = install({ seam, calls }, { maxConcurrent: 2, countRunning })
+    const second = install({ seam, calls }, { maxConcurrent: 2, countRunning })
+    first.dispose()
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
+    expect(calls.start).toHaveLength(0)
+    second.dispose()
   })
 })

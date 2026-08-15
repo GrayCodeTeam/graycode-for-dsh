@@ -23,7 +23,7 @@ import { installSubagentsGuards, type SubagentsGuard } from './adapters/dsh/guar
 import { countRunningChildrenViaList } from './adapters/dsh/counting.ts'
 import type { SubagentsSeamLike } from './adapters/dsh/seamTypes.ts'
 import { installCustomAgentRuntimes, type CustomAgentSeamLike, type CustomAgentToolsLike } from './customAgents/adapters/dsh/install.ts'
-import type { CustomAgentConfig } from './customAgents/domain/plan.ts'
+import { deriveProviderName, slugify, type CustomAgentConfig } from './customAgents/domain/plan.ts'
 
 export const name = 'graycode-subagents'
 
@@ -63,10 +63,37 @@ export const Config: z<Config> = z.object({
   customAgents: z.array(customAgentSchema).default([]),
 })
 
+/**
+ * M2：customAgents 配置校验——id 可 slug 化 + 派生 provider 名唯一性（覆盖重复 id
+ * 与同形 id）。在 apply 前整体校验，非法配置明确报错，不再等到运行时
+ * DUPLICATE_PROVIDER 炸或空 slug 退化。（schemastery 3.x 无 schema 级自定义
+ * 校验 API，故以导出纯函数形式提供，apply 与测试共用。）
+ */
+export function validateCustomAgentConfig(customAgents: readonly CustomAgentConfig[]): void {
+  const seen = new Map<string, string>()
+  for (const agent of customAgents) {
+    if (slugify(agent.id).length === 0) {
+      throw new Error(
+        `custom agent id "${agent.id}" is not slug-able — it must contain at least one ASCII alphanumeric character (the id drives the derived provider name)`,
+      )
+    }
+    const providerName = deriveProviderName(agent.id)
+    const owner = seen.get(providerName)
+    if (owner !== undefined) {
+      throw new Error(
+        `duplicate custom agent id/derived provider — "${owner}" and "${agent.id}" both derive provider "${providerName}"`,
+      )
+    }
+    seen.set(providerName, agent.id)
+  }
+}
+
 /** 跨域服务名：G2/G1/G3 守卫句柄（Gray 侧代码经 ctx.get 取用，可选）。 */
 export const SUBAGENTS_GUARD_SERVICE_KEY = 'graycode.subagents.guard'
 
 export function apply(ctx: Context, config: Config): void {
+  // M2：自定义子代理配置整体校验（id 可 slug 化 + 派生 provider 名唯一）。
+  validateCustomAgentConfig(config.customAgents)
   // 经公开 service 读取 API 取 seam（src 不直接依赖 dsh-subagent 的类型 augmentation；
   // inject 已声明 subagents，apply 触发时必在场，此处仅为类型安全与独立挂载兜底）。
   const runtime = ctx.get('subagents') as unknown as SubagentsSeamLike | undefined
@@ -93,12 +120,21 @@ export function apply(ctx: Context, config: Config): void {
   )
   // 跨域共享（可选增强）：守卫句柄供 Gray 侧工作流做「子→父任意寻址 fail-closed」
   // 与受守卫的消息投递。fiber 卸载时随 provide 与 effect 一并注销。
+  // H-4a ③：自定义子代理安装先于任何 ctx.provide/ctx.effect 注册——配置非法时
+  // installCustomAgentRuntimes 整体拒绝并在内部回滚已注册项后抛错；此处兜底释放
+  // guard 包装，保证 apply 失败后 seam 与 ctx 无任何残留（不因残留导致 reload 持续失败）。
+  let disposeCustomAgents: () => void
+  try {
+    disposeCustomAgents = installCustomAgentRuntimes(
+      runtime as unknown as CustomAgentSeamLike,
+      ctx.tools as unknown as CustomAgentToolsLike,
+      config.customAgents,
+    )
+  } catch (error) {
+    guard.dispose()
+    throw error
+  }
   const disposeProvide = ctx.provide(SUBAGENTS_GUARD_SERVICE_KEY, guard)
-  const disposeCustomAgents = installCustomAgentRuntimes(
-    runtime as unknown as CustomAgentSeamLike,
-    ctx.tools as unknown as CustomAgentToolsLike,
-    config.customAgents,
-  )
   ctx.effect(() => () => {
     disposeProvide()
     guard.dispose()

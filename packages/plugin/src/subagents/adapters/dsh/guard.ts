@@ -8,7 +8,8 @@
  *   node_modules 未安装，故「工具层包装」不可行；事件面（subagent/start/end）只
  *   描述生命周期、不含消息内容。**seam 方法本身是唯一可拦截点**：本安装器以
  *   「实例方法遮蔽（own property 覆盖原型方法）」包装 followup/reportFrom/start/
- *   startContinuable，保存原方法、dispose 时恢复。
+ *   startContinuable，保存原方法；dispose 只在「最后一个持有者」卸载时恢复原方法
+ *   （安装引用计数，HMR 双 apply 不互相拆台，见 H-4b）。
  * - G1：hop 计数器包在 followup/reportFrom 外层，threadId 由 subagent_id（childId /
  *   child.id）派生，同线程超 maxHopDepth（默认 5，老 Gray MAX_HOP_DEPTH）拒绝投递并抛
  *   HopDepthExceededError；subagent/start 重置线程预算、subagent/end 清理。
@@ -64,12 +65,57 @@ export interface SubagentsGuard {
     content: readonly ContentBlock[],
     options: SubagentReportOptionsLike,
   ): Promise<MessageId>
-  /** 恢复原方法、注销事件、移除重复安装守卫（幂等）。 */
+  /**
+   * 释放本次安装持有；仅当自己是「最后一个持有者」（计数归零）时才恢复原方法、
+   * 注销事件（幂等）。先卸载的实例不会拆掉后安装实例仍在使用的包装（H-4b）。
+   */
   dispose(): void
 }
 
-/** 重复安装守卫：同一 seam 实例只包装一次（HMR 双 apply 兜底）。 */
-const guardedSeams = new WeakSet<object>()
+/**
+ * 重复安装守卫（HMR 双 apply 兜底）：同一 seam 实例只包装一次，但每次安装都登记
+ * 引用计数。dispose 仅当计数归零（自己是最后一个持有者）时才恢复原方法并注销事件
+ * ——否则先卸载的实例会无条件恢复原方法，使后安装的 no-op guard 失效、G1/G3 被
+ * 绕过（H-4b）。
+ */
+const installCounts = new WeakMap<object, number>()
+
+/** 拆除一个守卫安装所需的状态（原方法 + 事件注销），由最后一个持有者消费。 */
+interface GuardInstallState {
+  seam: SubagentsSeamLike
+  originals: {
+    followup: SubagentsSeamLike['followup']
+    reportFrom: SubagentsSeamLike['reportFrom']
+    start: SubagentsSeamLike['start']
+    startContinuable: SubagentsSeamLike['startContinuable']
+  }
+  detachEvents: Array<() => void>
+}
+const installState = new WeakMap<object, GuardInstallState>()
+
+/** 归零拆除：恢复原方法、注销事件、清除安装状态（幂等）。 */
+function teardown(key: object): void {
+  installCounts.delete(key)
+  const state = installState.get(key)
+  installState.delete(key)
+  if (!state) return
+  state.seam.followup = state.originals.followup
+  state.seam.reportFrom = state.originals.reportFrom
+  state.seam.start = state.originals.start
+  state.seam.startContinuable = state.originals.startContinuable
+  for (const detach of state.detachEvents.splice(0)) detach()
+}
+
+/** 释放一次安装持有；返回计数是否归零（归零者负责拆除包装与注销事件）。 */
+function releaseOne(key: object): boolean {
+  const remaining = (installCounts.get(key) ?? 1) - 1
+  if (remaining > 0) {
+    installCounts.set(key, remaining)
+    return false
+  }
+  teardown(key)
+  return true
+}
 
 /** G2 投递器（两种安装路径共用）。 */
 function makeSendToAgent(
@@ -94,16 +140,34 @@ function makeSendToAgent(
   }
 }
 
+/**
+ * 统一为 `session://` 前缀形式：DSH 会话引用两种写法都常见（见 addressing.ts
+ * normalizeSessionRef 的说明），G3 计数端口（listChildren 按 scheme 匹配会话）
+ * 拿到缺前缀的引用会静默失配 → 并发守卫失效（M3）。
+ */
+function normalizeSessionId(id: SessionId): SessionId {
+  const raw = String(id)
+  return (raw.startsWith('session://') ? raw : `session://${raw}`) as SessionId
+}
+
 export function installSubagentsGuards(
   seam: SubagentsSeamLike,
   options: SubagentsGuardOptions,
   events?: SubagentLifecycleEventsPort,
 ): SubagentsGuard {
-  if (guardedSeams.has(seam as object)) {
+  const key = seam as object
+  const existing = installCounts.get(key) ?? 0
+  installCounts.set(key, existing + 1)
+
+  if (existing > 0) {
     options.logger?.warn('graycode-subagents: seam already guarded — skipping re-install (HMR double-apply guard)')
-    return { seam, sendToAgent: makeSendToAgent(seam, options.isRootSession), dispose: () => {} }
+    return {
+      seam,
+      sendToAgent: makeSendToAgent(seam, options.isRootSession),
+      // no-op 安装只占一个持有；dispose 递减计数，最后一个持有者负责拆除包装。
+      dispose: () => { releaseOne(key) },
+    }
   }
-  guardedSeams.add(seam as object)
 
   // 保存原方法（未绑定；调用时 .apply(seam) 保证 this 正确）。
   const originals = {
@@ -115,7 +179,12 @@ export function installSubagentsGuards(
 
   const hopCounter = new ThreadHopCounter(options.maxHopDepth)
   const maxConcurrent = options.maxConcurrent
-  const countRunning = options.countRunning ?? (async () => 0)
+  // M3：countRunning 缺省 fail-closed——未配置计数端口且 maxConcurrent>0 时拒绝
+  // 委派（显式报错），绝不静默放行（旧默认 async () => 0 会让 G3 永久失效）。
+  // 抛普通 Error：assertUnderLimit 的 try/catch 统一包成 ConcurrencyCheckError。
+  const countRunning = options.countRunning ?? (async () => {
+    throw new Error('no countRunning port configured — refusing delegation (fail-closed)')
+  })
 
   /** G1：同线程 hop 检查（check-then-increment；被拒不消耗预算）。 */
   const assertHop = (threadId: string): void => {
@@ -129,10 +198,12 @@ export function installSubagentsGuards(
   /** G3：委派前并发上限检查（fail-closed）。 */
   const assertUnderLimit = async (parent: Agent): Promise<void> => {
     if (maxConcurrent <= 0) return
-    const parentSessionId = parent?.id ?? parent?.session?.id
-    if (!parentSessionId) {
+    const rawParentSessionId = parent?.id ?? parent?.session?.id
+    if (!rawParentSessionId) {
       throw new ConcurrencyCheckError(new Error('delegating parent has no session id'))
     }
+    // M3：统一为 session:// 前缀（计数端口按 scheme 匹配会话，缺前缀会静默失配）。
+    const parentSessionId = normalizeSessionId(rawParentSessionId)
     let running: number
     try {
       running = await countRunning(parentSessionId)
@@ -172,15 +243,16 @@ export function installSubagentsGuards(
     detachEvents.push(events.on('subagent/end', (info) => hopCounter.clear(String(info.id))))
   }
 
+  // 记录拆除所需状态（原方法 + 事件注销），供「最后一个持有者」的 dispose 使用
+  // （H-4b：no-op 双安装也可能成为最后持有者，必须能完整拆除）。
+  installState.set(key, { seam, originals, detachEvents })
+
   const sendToAgent = makeSendToAgent(seam, options.isRootSession)
 
   const dispose = (): void => {
-    guardedSeams.delete(seam as object)
-    seam.followup = originals.followup
-    seam.reportFrom = originals.reportFrom
-    seam.start = originals.start
-    seam.startContinuable = originals.startContinuable
-    for (const detach of detachEvents.splice(0)) detach()
+    // 只在自己仍是最后一个持有者时拆除包装（H-4b：先卸载的实例不得恢复原方法，
+    // 否则后安装的 no-op guard 会失效、G1/G3 被绕过）。
+    releaseOne(key)
   }
 
   return { seam, sendToAgent, dispose }
