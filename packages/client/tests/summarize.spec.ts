@@ -130,6 +130,42 @@ describe('runSummarize', () => {
     }
   })
 
+  it('超时（M-1）：remote 挂起超过 timeoutMs → failed 带 t(timeout) 文案', async () => {
+    const remote = vi.fn(() => new Promise<never>(() => {})) as unknown as SummarizeRemoteLike
+    const holder = collect()
+    const terminal = await runSummarize(remote, 's1', holder.push, translate, { timeoutMs: 20 })
+    expect(terminal).toEqual({ phase: 'failed', failure: 'timeout' })
+    expect(holder.states).toEqual([
+      { phase: 'working' },
+      { phase: 'failed', failure: 'timeout' },
+    ])
+  })
+
+  it('取消（M-1）：signal 中止 → 返回 idle 且不再推送失败状态（恢复按钮）', async () => {
+    const remote = vi.fn(() => new Promise<never>(() => {})) as unknown as SummarizeRemoteLike
+    const controller = new AbortController()
+    const holder = collect()
+    const pending = runSummarize(remote, 's1', holder.push, translate, { signal: controller.signal })
+    controller.abort()
+    const terminal = await pending
+    expect(terminal).toEqual({ phase: 'idle' })
+    expect(holder.states).toEqual([{ phase: 'working' }])
+  })
+
+  it('GRAY_CANCELLED 信封（服务端 ABORTED）→ 静默取消，不弹失败', async () => {
+    const remote = vi.fn(async () => ({
+      ok: true,
+      value: {
+        ok: false,
+        error: { code: 'GRAY_CANCELLED', message: 'summarize aborted', details: { code: 'ABORTED' } },
+      },
+    })) as unknown as SummarizeRemoteLike
+    const holder = collect()
+    const terminal = await runSummarize(remote, 's1', holder.push, translate)
+    expect(terminal).toEqual({ phase: 'idle' })
+    expect(holder.states).toEqual([{ phase: 'working' }])
+  })
+
   it('isEmptyInputResult 只认 EMPTY_INPUT', () => {
     expect(isEmptyInputResult('EMPTY_INPUT')).toBe(true)
     expect(isEmptyInputResult('GRAY_INVALID_INPUT')).toBe(false)

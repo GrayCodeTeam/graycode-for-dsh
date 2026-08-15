@@ -2,8 +2,7 @@
  * images 路径安全纯函数测试（domain/paths.ts）。
  *
  * 覆盖：工作区内相对/绝对路径解析、.. 穿越拒绝、绝对路径逃逸拒绝、
- * 空/控制字符拒绝、默认输出路径（<cwd>/generated_images/gen-<ts>.png）、
- * 扩展名校正（嗅探结果纠正错误后缀、jpg/jpeg 同义保留、无扩展名追加）。
+ * 空/控制字符拒绝、扩展名校正（嗅探结果纠正错误后缀、jpg/jpeg 同义保留、无扩展名追加）。
  */
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'

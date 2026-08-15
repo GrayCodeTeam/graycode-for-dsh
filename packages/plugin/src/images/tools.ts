@@ -3,9 +3,10 @@
  *
  * 生成与编辑是同一个工具：编辑 = 参数携带 `reference_images`（base64，
  * 模型直接透传，不读磁盘）。参数契约（参考老版 schema）：
- * - `prompt` + `output_path`（必填）；`output_path` 相对会话 cwd 解析，
- *   默认落在 `<cwd>/generated_images/`；
- * - `reference_images`（可选，base64 字符串数组，≤ 14 张）；
+ * - `prompt` + `output_path`（均必填）；`output_path` 相对会话 cwd 解析，
+ *   解析结果必须位于工作区内（示例 `generated_images/cat.png`）；
+ * - `reference_images`（可选，base64 字符串数组，≤ 14 张，解码后须为
+ *   受支持的图片格式）；
  * - `aspect_ratio` / `image_size`：仅当设置启用且未设强制默认值时暴露
  *   （禁用时不暴露；未设默认值时用模型传入值）。
  *
@@ -32,6 +33,7 @@ const outputSchema = {
     count: { type: 'integer', description: 'Number of images written.' },
     texts: { type: 'array', items: { type: 'string' }, description: 'Text parts returned by the model along with the images.' },
     error: { type: 'string', description: 'Failure reason, when the call failed.' },
+    cancelled: { type: 'boolean', description: 'True when the call was cancelled by the user before completion.' },
   },
 } as const
 
@@ -47,7 +49,7 @@ export function createGenerateImageTool(
   const description =
     'Generate an image from a text prompt (or edit images when reference_images are provided) using the configured image model API. ' +
     `Provide prompt (required) and output_path (required, relative to the session workspace, e.g. "generated_images/cat.png"); ` +
-    'the image is written under <workspace>/generated_images/ (or to output_path resolved inside the workspace). ' +
+    'the image is written to output_path resolved inside the workspace. ' +
     'To EDIT an existing image, pass the source image(s) as base64 strings in reference_images (up to 14); the model then follows the editing instructions in prompt. ' +
     'reference_images entries are raw base64 data (no data: URI prefix). ' +
     'Multiple images in the response are saved as <stem>_<n>.<ext> next to the first output. ' +

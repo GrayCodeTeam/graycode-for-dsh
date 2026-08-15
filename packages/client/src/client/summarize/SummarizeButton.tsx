@@ -12,7 +12,7 @@
  * lives in the pure {@link runSummarize} / {@link unpackSummarizeResult}
  * logic, so the node-environment tests cover it without React.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -145,6 +145,8 @@ export function SummarizeButton({ sessionId, remote, t }: SummarizeButtonProps):
   const [phase, setPhase] = useState<SummarizePhase>('idle')
   const [text, setText] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
+  // M-1：working 期间关闭弹层 = 中止本次总结（AbortSignal 透传给 runSummarize）
+  const abortRef = useRef<AbortController | null>(null)
 
   const start = (): void => {
     if (phase === 'working') return
@@ -152,11 +154,25 @@ export function SummarizeButton({ sessionId, remote, t }: SummarizeButtonProps):
     setText(null)
     setFailure(null)
     setPhase('working')
+    const controller = new AbortController()
+    abortRef.current = controller
     void runSummarize(remote, sessionId, (state) => {
       setPhase(state.phase)
       if (state.phase === 'success') setText(state.text ?? null)
       if (state.phase === 'failed') setFailure(state.failure ?? null)
-    }, t)
+    }, t, { signal: controller.signal }).finally(() => {
+      if (abortRef.current === controller) abortRef.current = null
+    })
+  }
+
+  const close = (): void => {
+    // working 期间关闭 = 中止等待 + 恢复按钮（宿主悬挂不再永久卡死 UI）
+    abortRef.current?.abort()
+    abortRef.current = null
+    setOpen(false)
+    setPhase('idle')
+    setText(null)
+    setFailure(null)
   }
 
   const working = phase === 'working'
@@ -178,7 +194,7 @@ export function SummarizeButton({ sessionId, remote, t }: SummarizeButtonProps):
           phase={phase}
           text={text}
           failure={failure}
-          onClose={() => setOpen(false)}
+          onClose={close}
         />
       )}
     </>
@@ -218,7 +234,6 @@ export function SummarizeOverlay({ t, phase, text, failure, onClose }: Summarize
             type="button"
             data-graycode-summarize="close"
             style={closeStyle}
-            disabled={working}
             onClick={onClose}
             aria-label={t('close')}
           >

@@ -31,6 +31,9 @@ import {
   validateSummaryText,
 } from './policy.ts'
 
+/** 总结 LLM 流式调用兜底超时（毫秒）：流挂起不无限期等待（客户端弹层另有超时，双保险）。 */
+export const SUMMARY_LLM_TIMEOUT_MS = 120_000
+
 export type SummaryErrorCode =
   | 'SESSION_SERVICE_UNAVAILABLE'
   | 'SESSION_NOT_FOUND'
@@ -58,6 +61,8 @@ export interface SummaryServiceOptions {
   readonly keepRecentTokens: number | string
   /** 用户 prompt 模板（空 = 内置模板）。 */
   readonly summarizePrompt: string
+  /** LLM 流式收集兜底超时（毫秒；默认 SUMMARY_LLM_TIMEOUT_MS；测试注入小预算）。 */
+  readonly llmTimeoutMs?: number
 }
 
 /** 一次 LLM 流式调用的失败（携带稳定机器码，映射自 finish reason）。 */
@@ -137,6 +142,41 @@ export async function collectSummaryText(
     }
   }
   return text
+}
+
+/**
+ * 带兜底超时的流式收集（L-4）：内部 AbortController 桥接调用方信号，
+ * 超时触发时中止流并确定性拒绝为「超时取消」（调用方 isAbortLike 命中 → ABORTED）。
+ */
+async function collectSummaryTextWithTimeout(
+  chunks: AsyncIterable<StreamChunk>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<string> {
+  const controller = new AbortController()
+  const onAbort = (): void => controller.abort()
+  if (signal?.aborted) controller.abort()
+  else signal?.addEventListener('abort', onAbort)
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort()
+        reject(new SummaryAbortError('summarize timed out'))
+      }, timeoutMs)
+      collectSummaryText(chunks, controller.signal).then(
+        text => {
+          clearTimeout(timer)
+          resolve(text)
+        },
+        error => {
+          clearTimeout(timer)
+          reject(error)
+        },
+      )
+    })
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
+  }
 }
 
 /**
@@ -228,7 +268,11 @@ export class SummaryService {
         ],
         ...(signal !== undefined ? { signal } : {}),
       }
-      const text = await collectSummaryText(llm.stream(request), signal)
+      const text = await collectSummaryTextWithTimeout(
+        llm.stream(request),
+        signal,
+        this.options.llmTimeoutMs ?? SUMMARY_LLM_TIMEOUT_MS,
+      )
 
       const validation = validateSummaryText(text)
       if (!validation.ok) {
@@ -245,7 +289,9 @@ export class SummaryService {
       return { ok: true, text }
     } catch (error) {
       if (isAbortLike(error, signal)) {
-        return { ok: false, error: { code: 'ABORTED', message: 'summarize aborted' } }
+        // 保留具体取消原因（调用方中止 vs 超时兜底），供日志/诊断使用
+        const message = error instanceof Error && error.message.length > 0 ? error.message : 'summarize aborted'
+        return { ok: false, error: { code: 'ABORTED', message } }
       }
       const failure = error instanceof LlmCallFailure ? error : undefined
       return {

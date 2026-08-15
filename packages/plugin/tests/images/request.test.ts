@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  assertSecureApiUrl,
   buildGenerateContentRequest,
   sniffMimeFromBase64,
   type GenerateImageConfig,
@@ -108,6 +109,42 @@ describe('buildGenerateContentRequest', () => {
         imageSize: undefined,
       }),
     ).toThrow(/API Key not configured/)
+  })
+
+  it('rejects non-http(s) and non-loopback plain-http API urls (L-3)', () => {
+    const options = { prompt: 'p', referenceImages: [], aspectRatio: undefined, imageSize: undefined }
+    // ftp:// 等其他 scheme 拒绝
+    expect(() => buildGenerateContentRequest(baseConfig({ url: 'ftp://example.com/v1' }), options)).toThrow(
+      /must use http\(s\)/,
+    )
+    // 非回环 http 明文拒绝（apiKey 以查询参数传输）
+    expect(() => buildGenerateContentRequest(baseConfig({ url: 'http://example.com/v1' }), options)).toThrow(
+      /must use https for non-loopback hosts/,
+    )
+  })
+
+  it('allows plain http for loopback hosts (local proxies)', () => {
+    const { url } = buildGenerateContentRequest(baseConfig({ url: 'http://127.0.0.1:8000/v1' }), {
+      prompt: 'p',
+      referenceImages: [],
+      aspectRatio: undefined,
+      imageSize: undefined,
+    })
+    expect(url).toContain('http://127.0.0.1:8000/v1/models/')
+  })
+})
+
+describe('assertSecureApiUrl', () => {
+  it('rejects malformed urls and non-http(s) schemes', () => {
+    expect(() => assertSecureApiUrl('not a url')).toThrow(/invalid image API url/)
+    expect(() => assertSecureApiUrl('javascript:alert(1)')).toThrow(/must use http\(s\)/)
+  })
+
+  it('accepts https and loopback http', () => {
+    expect(() => assertSecureApiUrl('https://generativelanguage.googleapis.com/v1beta')).not.toThrow()
+    expect(() => assertSecureApiUrl('http://localhost:8080/v1')).not.toThrow()
+    expect(() => assertSecureApiUrl('http://[::1]:8080/v1')).not.toThrow()
+    expect(() => assertSecureApiUrl('http://0.0.0.0:8080/v1')).not.toThrow()
   })
 })
 

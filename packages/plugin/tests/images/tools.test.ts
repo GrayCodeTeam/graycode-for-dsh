@@ -1,10 +1,10 @@
-﻿/**
+﻿﻿﻿﻿﻿/**
  * images 工具层接线测试：直接调用 createGenerateImageTool 的 execute
  * （不经 ctx.tools 注册管线），stub exec 模拟会话（cwd 来自 session header），
  * fetch 注入 mock（记录请求 URL/body 并返回构造的 Gemini 响应），文件能力
  * 注入 node fs + 临时目录。零网络零模型。
  *
- * 覆盖：成功生成写盘（嗅探扩展名、扩展名校正、默认/显式输出路径）、
+ * 覆盖：成功生成写盘（嗅探扩展名、扩展名校正、输出路径解析）、
  * 参考图编辑（reference_images → inline_data parts）、宽高比/尺寸开关与默认值、
  * apiKey 缺失、HTTP 非 200、响应无图片、超时、取消、maxImagesPerTask 上限。
  */
@@ -12,6 +12,7 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { createGenerateImageTool } from '../../src/images/tools.ts'
 import { executeGenerateImage } from '../../src/images/domain/execution.ts'
@@ -372,6 +373,140 @@ describe('generate_image（失败/边界路径）', () => {
   })
 })
 
+describe('generate_image（真实管线：内容校验 / schema 校验 / 超时覆盖 body）', () => {
+  it('rejects non-image bytes from the API before writing anything', async () => {
+    const ws = await createTempDir('dsh-images-')
+    try {
+      // API 返回 text/plain 字节（'not an image' 的 base64）→ 魔数不可识别 → 拒绝落盘
+      const textBase64 = Buffer.from('not an image', 'utf8').toString('base64')
+      const mock = createMockFetch({
+        candidates: [{ content: { parts: [{ inlineData: { mimeType: 'text/plain', data: textBase64 } }] } }],
+      })
+      const written: string[] = []
+      const tool = createGenerateImageTool(baseConfig(), {
+        fetchFn: mock.fn,
+        fs: {
+          mkdir: async dir => { written.push(`mkdir:${dir}`) },
+          writeFile: async file => { written.push(`write:${file}`) },
+          assertWriteInside: async () => undefined,
+        },
+      })
+      const result = (await tool.execute(
+        { prompt: 'a cat', output_path: 'generated_images/cat.png' },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/not a supported image format/)
+      expect(written).toHaveLength(0)
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects garbage reference_images before the network call (L-2)', async () => {
+    const ws = await createTempDir('dsh-images-')
+    try {
+      const mock = createMockFetch()
+      const tool = createGenerateImageTool(baseConfig(), { fetchFn: mock.fn })
+      const result = (await tool.execute(
+        { prompt: 'make it blue', output_path: 'generated_images/cat.png', reference_images: ['not-base64-garbage!!'] },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/reference_images entries must decode to a supported image format/)
+      expect(mock.calls).toHaveLength(0)
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the timeout budget while reading the response body (L-1)', async () => {
+    const ws = await createTempDir('dsh-images-')
+    try {
+      // fetch 立即返回头部，但 body 读取挂起（慢 body）：body 读取必须感知
+      // 超时中止（与真实 fetch 一致：abort 后 json() reject）→ 超时仍生效
+      const slowBodyFetch = (async (_url: string, init?: RequestInit) => ({
+        ok: true,
+        status: 200,
+        json: () => new Promise<unknown>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted', 'AbortError'))
+          }, { once: true })
+        }),
+        text: async () => '',
+      })) as unknown as typeof fetch
+      const tool = createGenerateImageTool(baseConfig(), { fetchFn: slowBodyFetch, timeoutMs: 50 })
+      const result = (await tool.execute(
+        { prompt: 'a cat', output_path: 'generated_images/cat.png' },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/timed out after/)
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+    }
+  })
+
+  it('output schema accepts the cancellation result and rejects unknown fields', async () => {
+    const tool = createGenerateImageTool(baseConfig())
+    // 取消路径实际返回形状（success:false + cancelled:true）必须通过真实 output schema 校验
+    const violations = validateJsonSchemaValue(
+      tool.output.schema,
+      { success: false, paths: [], count: 0, texts: [], cancelled: true },
+      'value',
+    )
+    expect(violations).toEqual([])
+    // additionalProperties: false 仍然生效
+    const unknown = validateJsonSchemaValue(
+      tool.output.schema,
+      { success: true, paths: [], count: 0, texts: [], extra: 1 },
+      'value',
+    )
+    expect(unknown.length).toBeGreaterThan(0)
+  })
+})
+
+describe('generate_image（符号链接逃逸，M-2）', () => {
+  it('refuses to write through a directory symlink/junction pointing outside the workspace', async (t) => {
+    const ws = await createTempDir('dsh-images-')
+    const outside = await createTempDir('dsh-images-outside-')
+    try {
+      // 链接能力探测（Windows 未开开发者模式/无管理员权限时 symlink 抛 EPERM）
+      // → 回退 junction（无需管理员）；两者都不可用则动态跳过（同 stagedDiff 模式）
+      let linkType: 'dir' | 'junction'
+      try {
+        await fs.symlink(outside, path.join(ws, '__link_probe__'), 'dir')
+        await fs.rm(path.join(ws, '__link_probe__'))
+        linkType = 'dir'
+      } catch {
+        try {
+          await fs.symlink(outside, path.join(ws, '__link_probe__'), 'junction')
+          await fs.rm(path.join(ws, '__link_probe__'))
+          linkType = 'junction'
+        } catch {
+          t.skip()
+          return
+        }
+      }
+
+      await fs.symlink(outside, path.join(ws, 'linked'), linkType)
+      const mock = createMockFetch()
+      const tool = createGenerateImageTool(baseConfig(), { fetchFn: mock.fn })
+      const result = (await tool.execute(
+        { prompt: 'a cat', output_path: 'linked/cat.png' },
+        makeExec(ws),
+      )) as ToolResult
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/escapes the workspace root/)
+      // 工作区外目录未被写入
+      await expect(fs.readFile(path.join(outside, 'cat.png'))).rejects.toThrow()
+    } finally {
+      await fs.rm(ws, { recursive: true, force: true })
+      await fs.rm(outside, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('executeGenerateImage（直接执行层）', () => {
   it('supports an injected fs port and clock', async () => {
     const ws = await createTempDir('dsh-images-')
@@ -388,6 +523,7 @@ describe('executeGenerateImage（直接执行层）', () => {
           fs: {
             mkdir: async () => undefined,
             writeFile: async (filePath, bytes) => { written.push({ filePath, bytes }) },
+            assertWriteInside: async () => undefined,
           },
         },
       )

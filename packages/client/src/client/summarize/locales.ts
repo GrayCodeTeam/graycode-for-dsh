@@ -18,6 +18,7 @@ export type GrayCodeSummarizeLocaleKey =
   | 'copied'
   | 'close'
   | 'empty'
+  | 'timeout'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -42,6 +43,7 @@ export const graycodeSummarizeDictionaries: Record<LocaleId, LocaleDictOf<'grayc
     copied: '已复制',
     close: '关闭',
     empty: '没有可总结的内容：最近的对话轮次仍保留在窗口中',
+    timeout: '总结超时，请重试',
   },
   en: {
     'actions.summarize': 'Summarize',
@@ -52,6 +54,7 @@ export const graycodeSummarizeDictionaries: Record<LocaleId, LocaleDictOf<'grayc
     copied: 'Copied',
     close: 'Close',
     empty: 'Nothing to summarize: the recent conversation stays within the keep window',
+    timeout: 'Summary timed out, please retry',
   },
 }
 
@@ -65,4 +68,5 @@ export const graycodeSummarizeJaPlaceholder: LocaleDict = {
   copied: 'コピー済み',
   close: '閉じる',
   empty: '要約する内容がありません：直近の会話は保持ウィンドウ内にあります',
+  timeout: '要約がタイムアウトしました。もう一度お試しください',
 }

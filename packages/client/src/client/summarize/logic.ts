@@ -74,30 +74,81 @@ export interface SummarizeRunState {
   readonly failure?: string
 }
 
+/** 客户端兜底超时（毫秒）：host 悬挂时弹层不永久卡死（默认 60s）。 */
+export const SUMMARIZE_TIMEOUT_MS = 60_000
+
+/** runSummarize 选项：超时预算 + 调用方取消信号（关闭弹层即中止）。 */
+export interface SummarizeRunOptions {
+  /** 客户端兜底超时毫秒（默认 SUMMARIZE_TIMEOUT_MS；测试注入小预算）。 */
+  readonly timeoutMs?: number
+  /** 调用方取消信号：中止后返回 idle 且不再推送状态（恢复按钮）。 */
+  readonly signal?: AbortSignal
+}
+
 /** 领域码 → 是否需要本地化「无内容」文案（EMPTY_INPUT：全部落在保留窗口内）。 */
 export function isEmptyInputResult(domainCode: string | undefined): boolean {
   return domainCode === 'EMPTY_INPUT'
+}
+
+/** 把远端调用与本地信号赛跑：信号中止即拒绝（远端 promise 的结果随后被丢弃）。 */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('aborted', 'AbortError'))
+      return
+    }
+    const onAbort = (): void => reject(new DOMException('aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 /**
  * 点击总结：调 `summary/generate` 并驱动状态。
  * 失败非静默：failed 状态携带 `t(failed): message` 文案 + console.warn；
  * transport 异常同样落 failed。返回终态供测试断言。
+ *
+ * 兜底（M-1）：options.timeoutMs 超时 → failed(t('timeout'))；options.signal
+ * 中止（用户关闭弹层）→ 静默返回 idle（恢复按钮），host 悬挂不再卡死 UI。
  */
 export async function runSummarize(
   remote: SummarizeRemoteLike,
   sessionId: string,
   onState: (state: SummarizeRunState) => void,
-  translate: (key: 'failed' | 'empty', params?: Record<string, unknown>) => string,
+  translate: (key: 'failed' | 'empty' | 'timeout', params?: Record<string, unknown>) => string,
+  options: SummarizeRunOptions = {},
 ): Promise<SummarizeRunState> {
+  const timeoutMs = options.timeoutMs ?? SUMMARIZE_TIMEOUT_MS
   onState({ phase: 'working' })
+  let timedOut = false
+  const controller = new AbortController()
+  const onAbort = (): void => controller.abort()
+  if (options.signal?.aborted) controller.abort()
+  else options.signal?.addEventListener('abort', onAbort)
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
   try {
-    const call = await remote('summary', 'generate', { sessionId })
+    const call = await raceWithAbort(remote('summary', 'generate', { sessionId }), controller.signal)
     const result = unpackSummarizeResult(call)
     if (result.ok) {
       const state: SummarizeRunState = { phase: 'success', text: result.text }
       onState(state)
       return state
+    }
+    if (result.code === 'GRAY_CANCELLED') {
+      // 服务端已取消（ABORTED → GRAY_CANCELLED）：与本地取消同语义，静默恢复按钮
+      return { phase: 'idle' }
     }
     const message = isEmptyInputResult(result.domainCode)
       ? translate('empty')
@@ -107,10 +158,23 @@ export async function runSummarize(
     console.warn(`[graycode.summarize] ${result.code}: ${result.message}`)
     return state
   } catch (error) {
+    if (timedOut) {
+      const state: SummarizeRunState = { phase: 'failed', failure: translate('timeout') }
+      onState(state)
+      console.warn('[graycode.summarize] summarize timed out')
+      return state
+    }
+    if (options.signal?.aborted) {
+      // 用户关闭弹层：中止等待，恢复按钮（不推送失败状态）
+      return { phase: 'idle' }
+    }
     const detail = error instanceof Error ? error.message : String(error)
     const state: SummarizeRunState = { phase: 'failed', failure: `${translate('failed')}: ${detail}` }
     onState(state)
     console.warn('[graycode.summarize] transport failure:', error)
     return state
+  } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onAbort)
   }
 }

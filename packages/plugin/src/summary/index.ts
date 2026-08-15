@@ -19,13 +19,15 @@
  *      liveConfig 直接透传；
  *   3. fibers 增加 `summary: ctx.plugin(summary, liveConfig.summary)`；
  *   4. 域 apply() 内调用本文件 install(ctx, config)（见下）。
- * 在此之前端点不注册、服务不激活；install 依赖根装配的 ctx.grayRemote
- *（GrayRemoteService）与宿主 ctx.llm / ctx.sessions，缺失时降级告警不抛错。
+ * 在此之前端点不注册、服务不激活；install 经 ctx.inject(['grayRemote']) 声明
+ * 可选依赖（同 workflows 域）：grayRemote 可用后自动补注册，始终未装配时
+ * 端点不注册；宿主 ctx.llm / ctx.sessions 缺失在调用时返回稳定错误码而非抛错。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { GrayRemoteError } from '../remote/errors.ts'
+import type { GrayRemoteService } from '../remote/service.ts'
 import { GRAY_REMOTE_ERROR_CODES, type GrayRemoteErrorCode } from '../remote/types.ts'
 import type { GrayRemoteArgs, GrayRemoteHandlers } from '../remote/types.ts'
 import { requireString } from '../remote/validate.ts'
@@ -70,13 +72,19 @@ export function apply(ctx: Context, config: Config): () => void {
   return install(ctx, config)
 }
 
-/** 域码 → grayRemote 稳定机器码（失败信封的 GRAY_* 码；details.code 保留域码）。 */
+/** 域码 → grayRemote 稳定机器码（失败信封的 GRAY_* 码；details.code 保留域码）。
+ * L-1：ABORTED → GRAY_CANCELLED（客户端静默取消，不弹失败）；
+ * EMPTY_SUMMARY / LOW_QUALITY_SUMMARY → GRAY_INVALID_INPUT（模型输出质量类失败）。 */
 function mapSummaryCode(code: SummaryErrorCode): GrayRemoteErrorCode {
   switch (code) {
     case 'SESSION_NOT_FOUND':
       return GRAY_REMOTE_ERROR_CODES.NOT_FOUND
     case 'EMPTY_INPUT':
+    case 'EMPTY_SUMMARY':
+    case 'LOW_QUALITY_SUMMARY':
       return GRAY_REMOTE_ERROR_CODES.INVALID_INPUT
+    case 'ABORTED':
+      return GRAY_REMOTE_ERROR_CODES.CANCELLED
     default:
       return GRAY_REMOTE_ERROR_CODES.INTERNAL
   }
@@ -106,24 +114,28 @@ export function createSummaryRemoteHandlers(service: SummaryService): GrayRemote
 }
 
 /**
- * 挂载 summary 域：注册 `summary/generate` 端点并返回注销函数。
+ * 挂载 summary 域：注册 `summary/generate` 端点。
  *
  * - enabled=false → no-op；
- * - grayRemote 服务缺失（未通过根 index.ts 装配、或独立挂载）→ 告警 + no-op，
- *   不抛错（与 branches 域的静默跳过同策略，但失败要可观测）；
- * - 注销函数由集成阶段挂进 fiber 生命周期（HMR 重载时旧端点先注销，
- *   新实例同 key 才能重新注册——grayRemote.register 同端点重复注册会抛错）。
+ * - 端点注册经 `ctx.inject(['grayRemote'])` 声明可选依赖（与 workflows 域同构）：
+ *   grayRemote 未 ACTIVE 时回调挂起、可用后自动补注册，避免组合根 LOADING 期间
+ *   属性访问/一次性 get 造成端点缺失（GRAY_ENDPOINT_NOT_FOUND）；grayRemote 始终
+ *   未装配时端点不注册（inject 回调不触发，调用方收到 GRAY_ENDPOINT_NOT_FOUND）；
+ * - 注销随 inject 纤维自动回收（HMR 重载后旧端点先注销，新实例同 key 才能重新
+ *   注册——grayRemote.register 同端点重复注册会抛错）。
  */
 export function install(ctx: Context, config: Config): () => void {
   if (!config.enabled) return () => undefined
-  const dispose = ctx.grayRemote?.register(
-    createSummaryRemoteHandlers(createSummaryService(ctx, config))
-  )
-  if (dispose === undefined) {
-    ctx.logger.warn(
-      '[graycode-summary] grayRemote service unavailable; summary/generate was not registered'
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(
+      createSummaryRemoteHandlers(createSummaryService(ctx, config))
     )
-    return () => undefined
-  }
-  return dispose
+    if (disposeRemote === undefined) {
+      child.logger.warn('[graycode-summary] grayRemote service unavailable; summary/generate was not registered')
+      return
+    }
+    child.effect(() => () => disposeRemote())
+  })
+  return () => undefined
 }

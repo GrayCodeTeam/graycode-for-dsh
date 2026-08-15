@@ -10,6 +10,7 @@
  */
 
 import type { AspectRatio, GenerateContentRequest, ImageSize, ReferenceImage } from './types.ts'
+import { DEFAULT_IMAGE_API_URL } from './types.ts'
 
 export class ImagesRequestError extends Error {
   readonly code = 'GRAY_IMAGES_MISSING_API_KEY'
@@ -55,6 +56,33 @@ export function sniffMimeFromBase64(data: string): string {
   return 'image/png'
 }
 
+/**
+ * 图片 API 基址安全校验（L-3）：
+ * - 必须是 http(s) URL（拒绝其他 scheme）；
+ * - http 明文仅允许回环地址（localhost / 127.0.0.1 / ::1 / 0.0.0.0）——
+ *   apiKey 以查询参数传输，非回环明文会泄露密钥；本地代理（如 LiteLLM）
+ *   不受影响。schemastery 无 .url() 校验器，此处在请求构建层（纯函数）
+ *   强制，晚于配置解析但早于任何网络 IO。
+ */
+export function assertSecureApiUrl(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new ImagesRequestError(`invalid image API url: ${url}`)
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new ImagesRequestError(`image API url must use http(s): ${url}`)
+  }
+  if (parsed.protocol === 'http:') {
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0'
+    if (!isLoopback) {
+      throw new ImagesRequestError(`image API url must use https for non-loopback hosts: ${url}`)
+    }
+  }
+}
+
 /** 工具传入的 aspectRatio/imageSize 生效值（'auto'/空 = 不传）。 */
 function effectiveRatio(value: AspectRatio | ImageSize | undefined): string | undefined {
   if (value === undefined) return undefined
@@ -73,8 +101,9 @@ export function buildGenerateContentRequest(
       'API Key not configured. Please configure the GrayCode images settings (url/apiKey) and enable the generate_image tool.',
     )
   }
+  assertSecureApiUrl(config.url || DEFAULT_IMAGE_API_URL)
   const model = config.model || 'gemini-3-pro-image-preview'
-  const url = `${config.url || 'https://generativelanguage.googleapis.com/v1beta'}/models/${model}:generateContent?key=${apiKey}`
+  const url = `${config.url || DEFAULT_IMAGE_API_URL}/models/${model}:generateContent?key=${apiKey}`
 
   const parts: Array<Record<string, unknown>> = [{ text: options.prompt }]
   for (const image of options.referenceImages) {

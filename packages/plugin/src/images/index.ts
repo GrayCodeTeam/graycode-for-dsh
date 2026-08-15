@@ -27,7 +27,8 @@ export interface Config {
   enabled: boolean
   /** 工具注册作用域：roots（默认）、all、disabled。 */
   agentScope: AgentScopeMode
-  /** API 基址（默认 https://generativelanguage.googleapis.com/v1beta）。 */
+  /** API 基址（默认 https://generativelanguage.googleapis.com/v1beta；
+   *  http 仅限回环地址，见 request.ts assertSecureApiUrl）。 */
   url: string
   /** API Key（write-only；不随 /graycode 通道回传浏览器）。 */
   apiKey: string
