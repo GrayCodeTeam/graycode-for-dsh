@@ -25,7 +25,7 @@ export interface Config {
   wakeLines: number
   /** Max bytes per memory (default 280, upper limit 1000). */
   entryChars: number
-  /** Max characters per output part (default 20000). */
+  /** Max bytes per output part, UTF-8 (default 20000). */
   partChars: number
   /** Max lines per output part (default 500). */
   partLines: number

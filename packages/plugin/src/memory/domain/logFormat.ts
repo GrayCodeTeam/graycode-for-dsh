@@ -85,6 +85,18 @@ export const ZOOM_RAW_FALLBACK_MAX = 4096;
 export const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * 本地自然日（YYYY-MM-DD，本地时区）：note/remote/treePut 的展示与检索日期口径。
+ * 旧实现用 toISOString().slice(0,10)（UTC），在 UTC+ 时区会把本地日期偏移一天；
+ * 统一按本地自然日（audit 4.13-L1 修复）。
+ */
+export function localDateString(d: Date = new Date()): string {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+/**
  * 校验「#id date text」整条固定宽度记录可容纳。
  *
  * 固定宽度记录为 LOG_REC 字节，头部 "#<id> <date> " 随 id 位数增长（约 13~23 字节）。

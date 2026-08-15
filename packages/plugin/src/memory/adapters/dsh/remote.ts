@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto'
 import type { MemoryService, MemoryScope } from '../../service.ts'
 import type { MemoryConfig } from '../../domain/types.ts'
 import { MemoryRevisionConflictError } from '../../domain/MemoryLogStore.ts'
+import { MEMORY_CONFIG_BOUNDS, localDateString } from '../../domain/logFormat.ts'
 import { GrayRemoteError } from '../../../remote/errors.ts'
 import {
   normalizeLimit,
@@ -127,18 +128,22 @@ function decodeMemoryCursor(value: string): MemoryCursor {
 }
 
 function memorySnapshot(
-  entries: readonly GrayMemoryEntryView[],
+  revision: string,
   scope: MemoryScope,
   workspace: string | undefined,
   search: string | undefined
 ): string {
-  // 查询语义和完整排序结果均进入摘要；任何增删改或查询切换都会使旧 cursor 失效。
+  // M6: cursor 摘要复用 store 的 CAS revision（已绑定全部记录内容），只对
+  // (v, scope, workspace, search, revision) 做 O(1) 组合哈希——不再每页对全量
+  // 条目 JSON.stringify+sha256（大记忆库分页由 O(N²) 降为 O(N)，只剩一次 store
+  // revision 的 CAS 开销）。过滤/排序由查询参数 + 确定性实现决定：
+  // revision 不变 + 查询不变 ⟺ 条目集合不变，任何增删改或查询切换仍会使旧 cursor 失效。
   const payload = JSON.stringify({
     v: MEMORY_CURSOR_VERSION,
     scope,
     workspace: workspace ?? null,
     search: search?.toLowerCase() ?? null,
-    entries: entries.map(entry => [entry.id, entry.date, entry.text]),
+    revision,
   })
   return createHash('sha256').update(payload).digest('base64url')
 }
@@ -154,9 +159,10 @@ function sliceMemoryPage(
   limit: number,
   scope: MemoryScope,
   workspace: string | undefined,
-  search: string | undefined
+  search: string | undefined,
+  revision: string
 ): { page: GrayMemoryEntryView[]; nextCursor?: string } {
-  const snapshot = memorySnapshot(entries, scope, workspace, search)
+  const snapshot = memorySnapshot(revision, scope, workspace, search)
   let start = 0
   if (cursorValue !== undefined) {
     const cursor = decodeMemoryCursor(cursorValue)
@@ -228,7 +234,7 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
         entries = entries.filter(entry => entry.text.toLowerCase().includes(needle))
       }
       entries.sort((a, b) => b.id - a.id) // 最新在前（id 单调）
-      const { page, nextCursor } = sliceMemoryPage(entries, cursor, limit, scope, workspace, search)
+      const { page, nextCursor } = sliceMemoryPage(entries, cursor, limit, scope, workspace, search, revision)
       return { items: page, total: entries.length, nextCursor, revision }
     },
 
@@ -243,8 +249,8 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
       } catch (err) {
         throw mapStoreFailure(err, 'memory.note')
       }
-      // 与工具层写入路径一致：note 内部 trim 后落盘，date 取本地自然日
-      return { id, date: new Date().toISOString().slice(0, 10), text: text.trim() }
+      // 与工具层写入路径一致：note 内部 trim 后落盘，date 取本地自然日（L1）
+      return { id, date: localDateString(), text: text.trim() }
     },
 
     'memory/edit': async (args: GrayRemoteArgs) => {
@@ -329,6 +335,14 @@ export function createMemoryRemoteHandlers(service: MemoryService): GrayRemoteHa
       const updates = args.updates
       if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
         throw GrayRemoteError.invalidInput('updates must be an object', {})
+      }
+      // L4: 未知 key 不再静默忽略（拼写错误无效果）——显式报 GRAY_INVALID_INPUT
+      const unknownKeys = Object.keys(updates).filter(key => !MEMORY_CONFIG_BOUNDS.some(([k]) => k === key))
+      if (unknownKeys.length > 0) {
+        throw GrayRemoteError.invalidInput(
+          `unknown memory config key${unknownKeys.length > 1 ? 's' : ''}: ${unknownKeys.join(', ')}`,
+          { unknown: unknownKeys },
+        )
       }
       const { manager } = await resolveManager(service, args, false)
       try {

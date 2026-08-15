@@ -17,11 +17,18 @@ export function buildConfigContent(cfg: MemoryConfig): string {
         '',
         `WAKE_LINES   = ${cfg.wakeLines}   # how many lines wake prints`,
         `ENTRY_CHARS  = ${cfg.entryChars}  # max bytes per memory`,
-        `PART_CHARS   = ${cfg.partChars}   # max chars per output part`,
+        `PART_CHARS   = ${cfg.partChars}   # max bytes per output part`,
         `PART_LINES   = ${cfg.partLines}   # max lines per output part`,
         '',
     ];
     return lines.join('\n');
+}
+
+/** 严格解析配置值：仅接受纯十进制整数（垃圾尾/负数/浮点/十六进制一律拒绝，=L5） */
+function parseConfigInt(raw: string): number | undefined {
+    if (!/^\d+$/.test(raw)) return undefined;
+    const n = parseInt(raw, 10);
+    return Number.isSafeInteger(n) ? n : undefined;
 }
 
 /** 解析 config 文件内容：应用默认值 + 复用 MEMORY_CONFIG_BOUNDS 钳制非法值（只钳制不抛错） */
@@ -33,10 +40,12 @@ export function parseConfigContent(content: string): MemoryConfig {
         if (eqIdx < 0) continue;
         const key = trimmed.substring(0, eqIdx).trim().toUpperCase();
         const val = trimmed.substring(eqIdx + 1).trim();
-        if (key === 'WAKE_LINES') cfg.wakeLines = parseInt(val, 10) || cfg.wakeLines;
-        if (key === 'ENTRY_CHARS') cfg.entryChars = parseInt(val, 10) || cfg.entryChars;
-        if (key === 'PART_CHARS') cfg.partChars = parseInt(val, 10) || cfg.partChars;
-        if (key === 'PART_LINES') cfg.partLines = parseInt(val, 10) || cfg.partLines;
+        // L5: 收紧——不再用 `parseInt || 旧值`（吞 0、容忍 "100abc" 垃圾尾、十六进制
+        // 等容错过宽）；只接受纯十进制整数，非法值保留默认值，随后由 BOUNDS 钳制。
+        if (key === 'WAKE_LINES') { const v = parseConfigInt(val); if (v !== undefined) cfg.wakeLines = v; }
+        if (key === 'ENTRY_CHARS') { const v = parseConfigInt(val); if (v !== undefined) cfg.entryChars = v; }
+        if (key === 'PART_CHARS') { const v = parseConfigInt(val); if (v !== undefined) cfg.partChars = v; }
+        if (key === 'PART_LINES') { const v = parseConfigInt(val); if (v !== undefined) cfg.partLines = v; }
     }
     // 配置文件可能被手工改出界（如 ENTRY_CHARS 超上限），未钳制会在 note/compress 的
     // pad() 处抛晦涩 Too long——与 updateConfig 的校验口径保持一致（此处只钳制不抛错）。

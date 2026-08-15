@@ -22,7 +22,7 @@ import {
 import { validateRegexPattern } from '../../shared/regexGuard.ts';
 import { MemoryLogStore, type MemoryEntriesSnapshot } from './MemoryLogStore.ts';
 import { computeCover } from './cover.ts';
-import { die, plural, MEMORY_CONFIG_BOUNDS, ZOOM_RAW_FALLBACK_MAX } from './logFormat.ts';
+import { die, localDateString, plural, MEMORY_CONFIG_BOUNDS, ZOOM_RAW_FALLBACK_MAX } from './logFormat.ts';
 import {
     buildConfigContent as buildConfigFileContent,
     parseConfigContent as parseConfigFileContent,
@@ -34,6 +34,8 @@ import { getProcessPathLock } from './processLock.ts';
 interface SharedConfigState {
     lock: ReturnType<typeof getProcessPathLock>;
     value?: MemoryConfig;
+    /** 进程内首次见到的插件设置种子（L3：种子只写缺失项的比较基准）。 */
+    baseline?: Partial<MemoryConfig>;
     /** Last plugin settings seed seen in this process (not memory_config). */
     pluginSeed?: Partial<MemoryConfig>;
     /** Settings keys changed after the first seed and not yet persisted. */
@@ -68,6 +70,8 @@ export function recordPluginConfigSeed(configPath: string, seed: Partial<MemoryC
     const previous = state.pluginSeed;
     if (!previous) {
         state.pluginSeed = { ...seed };
+        // L3: 首次种子即基线——后续 settings 变更只接管「用户未定制」的键。
+        if (!state.baseline) state.baseline = { ...seed };
         return;
     }
     const pending = { ...(state.pendingPluginSeed ?? {}) };
@@ -169,10 +173,6 @@ export class MemoryManager {
     /** 丢弃树摘要及其上层 */
     async treeDrop(lo: number, hi: number): Promise<Array<[number, number]>> {
         return this.store.treeDrop(lo, hi);
-    }
-
-    private async dropSummariesCovering(id: number): Promise<void> {
-        await this.store.dropSummariesCovering(id);
     }
 
     // ─── cover 算法 ─────────────────────────────
@@ -400,7 +400,7 @@ export class MemoryManager {
             die(`Too long: ${byteLen} bytes, limit ${entryChars}.`);
         }
 
-        const today = new Date().toISOString().slice(0, 10);
+        const today = localDateString();
         // 长度校验在 note 入口按 entryChars 执行（新格式 JSONL 无固定宽度容量限制）
         const id = await this.logAppend([{ date: today, text: trimmed }]);
 
@@ -665,6 +665,13 @@ export class MemoryManager {
     }
 
     async updateConfig(updates: Partial<MemoryConfig>): Promise<MemoryConfig> {
+        // L4: 未知 key 不再静默忽略（remote configUpdate / 工具层拼写错误会无效果）——
+        // 显式报错，让调用方立即发现拼写错误。
+        for (const key of Object.keys(updates)) {
+            if (!MEMORY_CONFIG_BOUNDS.some(([k]) => k === key)) {
+                die(`Unknown memory config key: ${key}.`);
+            }
+        }
         // 逐项校验：非法值直接抛错（与模块内 die() 的错误风格一致，工具层会转成失败结果），
         // 避免 entryChars 被设为 >1000 后所有 note/compress 在长度校验处抛晦涩错误。
         const validated: Partial<MemoryConfig> = {};
@@ -697,10 +704,11 @@ export class MemoryManager {
      * Reconcile native plugin settings with the persisted memory_config.
      *
      * The first seed observed in a process is only a baseline, so a process
-     * restart preserves explicit memory_config overrides. A later fiber with
-     * changed settings applies only the keys that changed from that baseline;
-     * this is the settings live-update signal and preserves unrelated tool
-     * updates.
+     * restart preserves explicit memory_config overrides.
+     *
+     * L3: 种子只写缺失项——settings 变更只接管「文件值仍等于首次种子基线」的键
+     * （即用户尚未用 memory_config 显式定制）；用户已改过的键保持 memory_config
+     * 优先级，插件设置不会覆盖用户显式的 memory_config 修改。
      */
     async applyPluginSeed(seed: Partial<MemoryConfig>): Promise<MemoryConfig> {
         const keys = Object.keys(seed) as Array<keyof MemoryConfig>;
@@ -710,17 +718,31 @@ export class MemoryManager {
         try {
             const base = await this.readConfigUnlocked();
             const changed = { ...(this.configState.pendingPluginSeed ?? {}) };
-            if (Object.keys(changed).length === 0) {
+            const changedKeys = Object.keys(changed) as Array<keyof MemoryConfig>;
+            if (changedKeys.length === 0) {
                 this.configState.value = base;
                 return { ...base };
             }
-            const next = { ...base, ...changed };
-            await this.writeConfig(next);
+            const baseline = this.configState.baseline ?? {};
+            const applied: Partial<MemoryConfig> = {};
+            for (const key of changedKeys) {
+                const seeded = baseline[key];
+                // 「缺失项」= 用户未定制：基线覆盖的键，文件值仍等于首次种子值；
+                // 基线未覆盖的键（新加入的种子项），文件值未偏离默认值视为缺失。
+                const untouched = seeded === undefined
+                    ? base[key] === DEFAULT_MEMORY_CONFIG[key]
+                    : base[key] === seeded;
+                if (untouched) applied[key] = changed[key]!;
+            }
+            const next: MemoryConfig = { ...base, ...applied };
+            if (Object.keys(applied).length > 0) {
+                await this.writeConfig(next);
+            }
             this.configState.value = next;
             // A newer fiber may have changed a key while the file write was in
             // flight. Clear only values that still equal this applied batch.
             const pending = { ...(this.configState.pendingPluginSeed ?? {}) };
-            for (const key of Object.keys(changed) as Array<keyof MemoryConfig>) {
+            for (const key of changedKeys) {
                 if (pending[key] === changed[key]) delete pending[key];
             }
             this.configState.pendingPluginSeed = pending;

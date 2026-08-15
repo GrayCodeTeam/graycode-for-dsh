@@ -203,7 +203,7 @@ describe('MemoryService 作用域隔离', () => {
     }
   })
 
-  test('plugin seed：进程首次加载保留 memory_config 覆盖；同进程 settings 变更才覆盖对应键', async () => {
+  test('plugin seed：进程首次加载保留 memory_config 覆盖；settings 变更只接管用户未定制的键（L3）', async () => {
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-plugin-seed-'))
     try {
       // 模拟前一进程留下的 memory_config；无 plugin seed 的服务只负责造持久状态。
@@ -229,16 +229,17 @@ describe('MemoryService 作用域隔离', () => {
         partLines: 500,
       })
       const updatedManager = await updatedFiber.getGlobal()
-      // HMR 中 seed 的 entryChars 从 280 → 600，只有该键由 settings 接管；
-      // 未变的 partLines 保留 memory_config 的 777。
-      expect(updatedManager.getConfig()).toMatchObject({ entryChars: 600, partLines: 777 })
+      // HMR 中 seed 的 entryChars 从 280 → 600，但该键已被 memory_config 显式定制
+      // （500 ≠ 首次种子基线 280）：L3 下 settings 不再覆盖，保留用户的 500；
+      // 未变的 partLines 同样保留 memory_config 的 777。
+      expect(updatedManager.getConfig()).toMatchObject({ entryChars: 500, partLines: 777 })
       expect(initialManager.getConfig()).toEqual(updatedManager.getConfig())
     } finally {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })
 
-  test('settings 在 lazy manager 首次打开前 HMR，变更仍会被记录并应用', async () => {
+  test('settings 在 lazy manager 首次打开前 HMR：变更被记录，但用户已定制键不被覆盖（L3）', async () => {
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-service-lazy-seed-'))
     try {
       const persisted = new MemoryService({ dataRoot })
@@ -260,7 +261,8 @@ describe('MemoryService 作用域隔离', () => {
         partLines: 500,
       })
       const current = await newFiber.getGlobal()
-      expect(current.getConfig()).toMatchObject({ entryChars: 650, partLines: 777 })
+      // entryChars 已被 memory_config 定制（500）：L3 下不被新 settings 650 覆盖
+      expect(current.getConfig()).toMatchObject({ entryChars: 500, partLines: 777 })
       // 迟到的旧 fiber 初始化不能把当前 settings 回滚。
       expect((await oldFiber.getGlobal()).getConfig()).toEqual(current.getConfig())
     } finally {

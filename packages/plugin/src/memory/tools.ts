@@ -382,7 +382,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
     description:
       'Search all permanent memories (verbatim match). Regular expressions are supported.\n' +
       'Searches both global memory and current workspace memory (isolated per workspace); hits are labeled with --- Global memory --- / --- Workspace memory ---.\n' +
-      'Compressed summaries are included — compression never loses information.\n' +
+      'Searches raw memory entries only; compressed summaries are not searched.\n' +
       'Results are capped at one output part; if truncated, a hint tells you to narrow the regex.\n' +
       'Scope: pass scope="global" or scope="workspace" to search a single scope instead of both.',
     parameters: {
@@ -646,14 +646,14 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Options:\n' +
       '- wakeLines: line budget for wake output (default 96, ~8k tokens)\n' +
       '- entryChars: max bytes per memory (default 280, upper limit 1000)\n' +
-      '- partChars: max characters per output part (default 20000)\n' +
+      '- partChars: max bytes per output part (default 20000, UTF-8)\n' +
       '- partLines: max lines per output part (default 500)\n' +
       'With no arguments, shows the current configuration. Pass arguments to update the matching options.\n' +
       'Changes only affect output formatting; nothing needs to be recomputed.',
     parameters: {
       wakeLines: { type: 'integer', description: 'Line budget for wake output. Larger = more detail.' },
       entryChars: { type: 'integer', description: 'Max bytes per memory. Default 280, upper limit 1000 (shared config boundary kept for tool parity).' },
-      partChars: { type: 'integer', description: 'Max characters per output part.' },
+      partChars: { type: 'integer', description: 'Max bytes per output part (UTF-8).' },
       partLines: { type: 'integer', description: 'Max lines per output part.' },
     },
     output: {

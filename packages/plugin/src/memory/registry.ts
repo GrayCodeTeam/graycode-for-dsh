@@ -26,6 +26,7 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { createHash } from 'crypto'
 import { getProcessPathLock } from './domain/processLock.ts'
+import { renameConfigOverwrite } from './domain/configFile.ts'
 
 export interface WorkspaceRegistryLogger {
   warn(message: string): void
@@ -178,13 +179,25 @@ export class WorkspaceRegistry {
     }
   }
 
-  /** Atomic persist: tmp + rename (同 migration ledger 惯例)。 */
+  /** Atomic persist: tmp + rename (同 migration ledger 惯例；rename 覆盖目标带退避重试)。 */
   private async persist(doc: WorkspaceRegistryDocument): Promise<void> {
     const target = this.filePath()
     await fs.mkdir(path.dirname(target), { recursive: true })
-    const tmp = `${target}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8')
-    await fs.rename(tmp, target)
+    // 唯一 tmp 名：并发实例写同一注册表不互相覆盖 tmp（与 configFile.writeConfigAtomic 同模式）
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    try {
+      await fs.writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8')
+      // L10: Windows 上 rename 覆盖已存在目标偶发 EPERM/EEXIST（文件锁/杀软竞态）——
+      // 复用 configFile 的退避重试 + 删旧目标兑底，避免注册表写失败仅告警、别名漂移丢失。
+      await renameConfigOverwrite(tmp, target)
+    } catch (error) {
+      try {
+        await fs.unlink(tmp)
+      } catch {
+        // 清理失败忽略
+      }
+      throw error
+    }
   }
 
   /** 归一化后的 scope key（记录里的 aliases 均为归一化形态）。 */

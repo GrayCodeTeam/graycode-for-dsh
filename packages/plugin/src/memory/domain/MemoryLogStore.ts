@@ -26,7 +26,7 @@ import {
 import { AsyncLock } from './AsyncLock.ts';
 import { getProcessPathCoordinator, type ProcessPathCoordinator } from './processLock.ts';
 import {
-    die, ISO_DATE_RE, OLD_LOG_REC, parse, records,
+    die, ISO_DATE_RE, localDateString, OLD_LOG_REC, parse, records,
 } from './logFormat.ts';
 import { renameConfigOverwrite } from './configFile.ts';
 import {
@@ -50,6 +50,16 @@ function errnoCode(e: unknown): string | undefined {
         if (typeof code === 'string') return code;
     }
     return undefined;
+}
+
+/**
+ * 探测旧格式记录切片的头部 "#id <ISO date>"（允许 text 为空/缺失）：
+ * 仅用于 LOG 宽度判别（320 vs 1024），不要求 text 完整（=audit 4.13-L11）。
+ */
+function probeLegacyHead(slice: string): { id: number; date: string } | null {
+    const m = /^#(\d+) (\d{4}-\d{2}-\d{2})(?: |$)/.exec(slice);
+    if (!m) return null;
+    return { id: parseInt(m[1]!, 10), date: m[2]! };
 }
 
 /**
@@ -86,12 +96,15 @@ export class MemoryLogStore {
     private getConfig: () => MemoryConfig;
 
     /**
-     * records.jsonl 缓存（{ mtimeMs, fileSize, records }）：
+     * records.jsonl 缓存（{ mtimeMs, fileSize, records, revision }）：
      * 写路径在锁内更新数组（copy-on-write，快照安全），读路径以 mtime+size
      * 一致性兜底并发窗口（多实例共享目录时可见彼此写入）。
-     * records[k] === null 表示该位置是损坏/空行占位。
+     * records[k] === null 表示该位置是损坏/空行占位；revision 为该数组的内容
+     * 寻址摘要（listEntriesSnapshot 复用，见 M6）。
      */
-    private recordsCache: { mtimeMs: number; fileSize: number; records: Array<StoredRecord | null> } | null = null;
+    private recordsCache:
+        | { mtimeMs: number; fileSize: number; records: Array<StoredRecord | null>; revision: string }
+        | null = null;
 
     /**
      * summaries.jsonl 缓存（{ mtimeMs, fileSize, map }），键 "lo:hi"。
@@ -396,8 +409,8 @@ export class MemoryLogStore {
 
     /**
      * 探测旧 LOG 记录宽度（与旧 probeLegacyFormat 同口径，用于导入判别）：
-     * - 前两条 320B 切片均为合法记录（id 0/1 + ISO 日期）→ 320（旧格式）；
-     * - <640B 单条小文件：整文件按 320 解析一次，切片 0 合法（id 0 + ISO）→ 320；
+     * - 前两条 320B 切片均以合法头部开头（id 0/1 + ISO 日期）→ 320（旧格式）；
+     * - <640B 单条小文件：整文件按 320 探测一次，切片 0 合法（id 0 + ISO）→ 320；
      * - 其余 → 1024（records() 逐条解析，损坏行跳过）。
      */
     private async probeLegacyRec(logPath: string, fileSize: number): Promise<number> {
@@ -408,18 +421,20 @@ export class MemoryLogStore {
             const { bytesRead } = await handle.read(probe, 0, probeLen, 0);
             const got = probe.subarray(0, bytesRead);
             if (fileSize >= OLD_LOG_REC * 2 && got.length >= OLD_LOG_REC * 2) {
-                const e0 = parse(got.subarray(0, OLD_LOG_REC).toString('utf-8').trimEnd());
-                const e1 = parse(got.subarray(OLD_LOG_REC, OLD_LOG_REC * 2).toString('utf-8').trimEnd());
-                if (e0 && e0.id === 0 && ISO_DATE_RE.test(e0.date) &&
-                    e1 && e1.id === 1 && ISO_DATE_RE.test(e1.date)) {
+                // L11: 只校验头部（"#id <ISO date>"），容忍第二条记录 text 为空/缺失——
+                // 旧格式可写 "#1 <date>" 空文本记录，parse() 会因缺 text 返回 null，
+                // 旧判定据此误把 320 格式判为 1024，导致按错宽度解析出垃圾条目。
+                const h0 = probeLegacyHead(got.subarray(0, OLD_LOG_REC).toString('utf-8'));
+                const h1 = probeLegacyHead(got.subarray(OLD_LOG_REC, OLD_LOG_REC * 2).toString('utf-8'));
+                if (h0 && h0.id === 0 && h1 && h1.id === 1) {
                     return OLD_LOG_REC;
                 }
                 return LOG_REC;
             }
-            // 单条小文件（<640B 不可能是 1024 记录）：按 320 整文件解析一次判定
+            // 单条小文件（<640B 不可能是 1024 记录）：按 320 整文件探测一次判定
             if (fileSize > 0 && fileSize < OLD_LOG_REC * 2) {
-                const e0 = parse(got.toString('utf-8').trimEnd());
-                if (e0 && e0.id === 0 && ISO_DATE_RE.test(e0.date)) return OLD_LOG_REC;
+                const h0 = probeLegacyHead(got.toString('utf-8'));
+                if (h0 && h0.id === 0) return OLD_LOG_REC;
             }
             return LOG_REC;
         } finally {
@@ -464,7 +479,7 @@ export class MemoryLogStore {
             stat = await fs.stat(p);
         } catch (e: unknown) {
             if (errnoCode(e) !== 'ENOENT') throw e;
-            this.recordsCache = { mtimeMs: 0, fileSize: 0, records: [] };
+            this.recordsCache = { mtimeMs: 0, fileSize: 0, records: [], revision: this.recordsRevisionLocked([]) };
             return;
         }
         const cached = this.recordsCache;
@@ -479,7 +494,15 @@ export class MemoryLogStore {
             if (nl < 0) break; // 撕裂尾部半行：忽略，下方截断修复
             validBytes = nl + 1;
             const line = buf.subarray(start, nl).toString('utf-8');
-            recordsArr.push(line.trim() === '' ? null : decodeRecordLine(line));
+            if (line.trim() === '') {
+                recordsArr.push(null);
+            } else {
+                const rec = decodeRecordLine(line);
+                // L6: 校验 id 与行号一致——id ≠ 行号的异常记录按损坏占位处理
+                // （与旧格式导入跳过异常记录同口径），避免位置寻址
+                // （logSlice/deleteRange/zoom）指向带错误 id 的记录。
+                recordsArr.push(rec && rec.id === recordsArr.length ? rec : null);
+            }
             start = nl + 1;
         }
         let fileSize = stat.size;
@@ -496,7 +519,9 @@ export class MemoryLogStore {
             const repairedStat = await fs.stat(p);
             mtimeMs = repairedStat.mtimeMs;
         }
-        this.recordsCache = { mtimeMs, fileSize, records: recordsArr };
+        // M6: 缓存内容寻址 revision——listEntriesSnapshot 每页直接复用，避免对全量记录
+        // 反复 JSON.stringify+sha256（大记忆库分页由每页 O(N) 降为每次加载/变更后的 O(1) 复用）。
+        this.recordsCache = { mtimeMs, fileSize, records: recordsArr, revision: this.recordsRevisionLocked(recordsArr) };
     }
 
     /**
@@ -543,7 +568,12 @@ export class MemoryLogStore {
         const lines = recordsArr.map(r => (r ? encodeRecordLine(r) : '\n')).join('');
         await this.writeFileAtomic(this.recordsPath(), lines);
         const stat = await fs.stat(this.recordsPath());
-        this.recordsCache = { mtimeMs: stat.mtimeMs, fileSize: stat.size, records: recordsArr };
+        this.recordsCache = {
+            mtimeMs: stat.mtimeMs,
+            fileSize: stat.size,
+            records: recordsArr,
+            revision: this.recordsRevisionLocked(recordsArr),
+        };
     }
 
     /** 全量重写 summaries.jsonl（锁内调用；按 lo 升序保证输出确定） */
@@ -569,7 +599,15 @@ export class MemoryLogStore {
         const kept = new Map<string, StoredSummary>();
         if (keepPrefix) {
             for (const [key, s] of map) {
-                if (s.hi <= newT) kept.set(key, s);
+                // M1: 校验块边界——越界/损坏块（hi <= lo、lo < 0、lo >= newT、
+                // hi > newT）一律不保留（按损坏处理丢弃），避免尾部删除后残留
+                // 覆盖已删记忆的陈旧摘要被 wake/zoom 当作权威数据展示。
+                if (
+                    s.hi > s.lo && s.lo >= 0 &&
+                    s.hi <= newT && s.lo < newT
+                ) {
+                    kept.set(key, s);
+                }
             }
         }
         if (kept.size === map.size) return;
@@ -591,7 +629,16 @@ export class MemoryLogStore {
         }
     }
 
-    /** 追加日志记录，返回起始 ID（追加式：一行一条，崩溃最多撕裂尾部半行） */
+    /**
+     * 追加日志记录，返回起始 ID（追加式：一行一条，崩溃最多撕裂尾部半行）。
+     *
+     * 已知限制（M2）：本方法只由进程内 AsyncLock（ProcessPathCoordinator）串行化。
+     * 多个 Node 进程同时共享同一存储目录时，appendFile 追加与 deleteRange/
+     * updateEntry/truncateLog 的 tmp+rename 全量重写之间没有跨进程互斥，可能发生
+     * 丢失更新（进程 A 追加 → 进程 B 基于陈旧缓存全量重写覆盖）与 id 重叠/内存磁盘
+     * 分叉。插件运行时为单进程（Cordis fiber），跨进程共享目录不受支持；如需多进程
+     * 写入，须先在存储层引入跨进程锁（锁文件/flock）。
+     */
     async logAppend(items: Array<{ date: string; text: string; source?: string; tags?: string[]; legacyId?: number }>): Promise<number> {
         const release = await this.lock.acquire();
         try {
@@ -615,10 +662,12 @@ export class MemoryLogStore {
             const stat = await fs.stat(this.recordsPath());
             const prev = this.recordsCache!;
             // copy-on-write：快照（logScan）持有旧数组引用不受影响
+            const nextRecords = [...prev.records, ...added];
             this.recordsCache = {
                 mtimeMs: stat.mtimeMs,
                 fileSize: stat.size,
-                records: [...prev.records, ...added],
+                records: nextRecords,
+                revision: this.recordsRevisionLocked(nextRecords),
             };
             return base;
         } finally {
@@ -702,7 +751,9 @@ export class MemoryLogStore {
             }
             return {
                 entries,
-                revision: this.recordsRevisionLocked(recordsArr),
+                // M6: 复用缓存的内容寻址 revision（loadRecordsLocked/各写路径在锁内维护），
+                // 每次 list 请求不再对全量记录重新哈希。
+                revision: this.recordsCache!.revision,
             };
         } finally {
             release();
@@ -748,9 +799,9 @@ export class MemoryLogStore {
                     `earlier blocks are missing. Run memory_compress to build pending blocks in order.`);
             }
 
-            const now = new Date().toISOString();
             const next = new Map(map);
-            next.set(key, { lo, hi, date: now.slice(0, 10), text, source });
+            // L1: 摘要日期取本地自然日（与 note/remote 口径一致），避免 UTC 偏移跨日
+            next.set(key, { lo, hi, date: localDateString(), text, source });
             this.summariesCache = { ...this.summariesCache!, map: next };
             await this.rewriteSummariesLocked();
             return true;
@@ -836,6 +887,29 @@ export class MemoryLogStore {
         }
     }
 
+    /** 锁内：丢弃所有覆盖给定 ID 的树摘要（updateEntry 在记录写入同一锁内调用，见 L2） */
+    private async dropSummariesCoveringLocked(id: number): Promise<void> {
+        try {
+            await this.loadRecordsLocked();
+            const T = this.recordsCache!.records.length;
+            await this.loadSummariesLocked();
+            const next = new Map(this.summariesCache!.map);
+            let changed = false;
+            // 覆盖 id 的所有对齐块 = 逐层包含 id 的块（含全部祖先）
+            for (let size = 2; size <= T; size *= 2) {
+                const lo = Math.floor(id / size) * size;
+                if (next.delete(summaryKey(lo, lo + size))) changed = true;
+            }
+            if (changed) {
+                this.summariesCache = { ...this.summariesCache!, map: next };
+                await this.rewriteSummariesLocked();
+            }
+        } catch (err) {
+            // 与锁外版同口径：丢弃失败至少告警（树是缓存，缺失可重建，但需可观测）
+            console.warn(`[MemoryManager] Failed to drop summaries covering #${id}:`, err);
+        }
+    }
+
     /**
      * updateEntry: 原地覆写单条原始记忆的文本（保留 id/date/createdAt/legacyId，
      * 更新 version/updatedAt 并记录审计来源）。
@@ -885,16 +959,15 @@ export class MemoryLogStore {
             const next = arr.slice();
             next[id] = updated;
             await this.rewriteRecordsLocked(next);
+            // L2: 摘要丢弃与记录写入在同一锁内提交——消除「并发 compress 写入基于
+            // 旧文本摘要」的竞态窗口；锁外丢弃时，窗口内 wake/zoom 会短暂/持续展示
+            // 覆盖已提交新内容的陈旧摘要。
+            await this.dropSummariesCoveringLocked(id);
             this.recordsCache = { ...this.recordsCache!, records: next };
             updatedEntry = { id: updated.id, date: updated.date, text: updated.text };
         } finally {
             release();
         }
-
-        // 编辑后所有覆盖该 ID 的树摘要失效，丢弃之。
-        // 必须在锁外执行：dropSummariesCovering 内部会再次 acquire 锁，
-        // 而 AsyncLock 不可重入，持锁调用会形成闭环等待死锁。
-        await this.dropSummariesCovering(id);
         return updatedEntry!;
     }
 
@@ -939,7 +1012,16 @@ export class MemoryLogStore {
                 kept.push({ ...rec, id: kept.length });
             }
             const actualRemoved = (hi - lo + 1) - skippedInRange;
-            const newT = T - actualRemoved;
+            let newT = T - actualRemoved;
+
+            // M1: 尾部删除（区间到达日志末尾）时，删除区间内的损坏占位（null）会被
+            // 原样保留进 kept 数组，抬高 newT 使覆盖已删记忆的越界摘要块（hi <= newT）
+            // 被 clearSummariesLocked 保留。截除保留区末尾的占位后，这些块 hi > newT
+            // 自然被丢弃。
+            if (hi === T - 1) {
+                while (kept.length > 0 && kept[kept.length - 1] === null) kept.pop();
+                newT = kept.length;
+            }
 
             // 先清树摘要、后原子换记录：树是缓存，缺失只触发重建（安全）；
             // 陈旧摘要会被 wake/zoom 当作权威数据展示（危险）。
@@ -1006,8 +1088,15 @@ export class MemoryLogStore {
                 kept.push({ ...rec, id: kept.length });
             }
             const actualRemoved = sorted.length - skippedInRange;
-            const newT = T - actualRemoved;
+            let newT = T - actualRemoved;
             const tailSingleRange = ranges.length === 1 && ranges[0]![1] === T - 1;
+
+            // M1: 与 deleteRange 同口径——尾部单区间删除时截除保留区末尾的损坏占位，
+            // 使覆盖已删记忆的越界摘要块在 clearSummariesLocked 中被丢弃。
+            if (tailSingleRange) {
+                while (kept.length > 0 && kept[kept.length - 1] === null) kept.pop();
+                newT = kept.length;
+            }
 
             // 树摘要清理（与 deleteRange 多区间聚合后的最终语义一致）：
             // 仅当删除恰好构成一个覆盖日志尾部的单区间时保留其前缀块，否则全清。

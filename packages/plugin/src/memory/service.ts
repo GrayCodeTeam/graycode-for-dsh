@@ -86,7 +86,13 @@ export class MemoryService {
   private async ensurePluginSeed(manager: MemoryManager): Promise<void> {
     if (Object.keys(this.configDefaults).length === 0) return
     if (!this.pluginSeedApply) {
-      this.pluginSeedApply = manager.applyPluginSeed(this.configDefaults).then(() => undefined)
+      // M3: 单飞失败即重置为 null，后续调用可重试——一次性瞬时故障不再瘫痪整个记忆子系统
+      this.pluginSeedApply = manager.applyPluginSeed(this.configDefaults)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          this.pluginSeedApply = null
+          throw error
+        })
     }
     await this.pluginSeedApply
   }
@@ -95,7 +101,7 @@ export class MemoryService {
   getGlobal(): Promise<MemoryManager> {
     if (this.global) return Promise.resolve(this.global)
     if (!this.globalInit) {
-      this.globalInit = (async () => {
+      const init = (async () => {
         const manager = new MemoryManager(this.memoryPath(), this.configDefaults)
         await manager.init()
         await this.ensurePluginSeed(manager)
@@ -103,6 +109,11 @@ export class MemoryService {
         this.global = manager
         return manager
       })()
+      // M3: 初始化失败后重置单飞状态，允许后续调用重试（不永久拒绝）
+      this.globalInit = init.catch((error: unknown) => {
+        this.globalInit = null
+        throw error
+      })
     }
     return this.globalInit
   }
@@ -159,7 +170,8 @@ export class MemoryService {
         const manager = new MemoryManager(dir, this.configDefaults, this.sharedConfigPath())
         await manager.loadConfig()
         await this.ensurePluginSeed(manager)
-        await manager.loadConfig()
+        // L9: 移除重复 loadConfig——applyPluginSeed 已在锁内把 configState.value 更新为
+        // 写后值，二次读取纯属冗余（且多一次磁盘读）。
         const writeInstance = this.workspaceInstances.get(scopeKey)
         if (writeInstance) return writeInstance
         const writePending = this.workspaceInitPromises.get(scopeKey)
