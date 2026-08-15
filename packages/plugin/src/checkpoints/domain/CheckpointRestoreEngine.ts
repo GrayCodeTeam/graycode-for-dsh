@@ -568,17 +568,20 @@ export async function restoreWorkspaceSnapshot(
     if (failures.length === 0) {
         await runBounded(deletionList, options.concurrency ?? DEFAULT_CHECKPOINT_CONCURRENCY, async scopedKey => {
             throwIfAborted(options.signal);
-            let absolutePath: string;
+            let resolved: { absolutePath: string; root: RuntimeWorkspaceRoot };
             try {
-                absolutePath = (await resolveScopedPath(scopedKey, roots)).absolutePath;
+                resolved = await resolveScopedPath(scopedKey, roots);
             } catch {
                 failures.push({ path: scopedKey, reason: 'delete_failed' });
                 processed += 1;
                 options.onProgress?.(processed, progressTotal);
                 return;
             }
+            const absolutePath = resolved.absolutePath;
             try {
-                await workspaceWriter.unlink(absolutePath);
+                // S-2/H-11a：删除目标随工作区根上下文传给 writer，由其在 syscall 前
+                // 做最终包含性校验（lstat 逐段 + realpath 锚定）
+                await workspaceWriter.unlink(absolutePath, { workspaceRoot: resolved.root.fsPath });
                 deleted += 1;
                 deletedPaths.push(absolutePath);
             } catch (err) {
@@ -598,14 +601,15 @@ export async function restoreWorkspaceSnapshot(
 
     throwIfAborted(options.signal);
 
-    // 4. 恢复空目录（L4：循环内检查取消信号）
+    // 4. 恢复空目录（L4：循环内检查取消信号；失败计入 failures，不再静默忽略）
     for (const scopedKey of targetEmptyDirs) {
         throwIfAborted(options.signal);
         try {
-            const absolutePath = (await resolveScopedPath(scopedKey, roots)).absolutePath;
-            await workspaceWriter.mkdir(absolutePath);
+            const resolved = await resolveScopedPath(scopedKey, roots);
+            await workspaceWriter.mkdir(resolved.absolutePath, { workspaceRoot: resolved.root.fsPath });
         } catch {
-            // 空目录恢复失败不视为整体失败（不影响文件内容）
+            // L4：目录操作失败计入 failures（参与 success 判定），不再静默忽略
+            failures.push({ path: scopedKey, reason: 'copy_failed' });
         }
     }
 
@@ -616,10 +620,11 @@ export async function restoreWorkspaceSnapshot(
         for (const scopedKey of untrackedEmptyDirs) {
             throwIfAborted(options.signal);
             try {
-                const absolutePath = (await resolveScopedPath(scopedKey, roots)).absolutePath;
-                await workspaceWriter.rmdir(absolutePath);
+                const resolved = await resolveScopedPath(scopedKey, roots);
+                await workspaceWriter.rmdir(resolved.absolutePath, { workspaceRoot: resolved.root.fsPath });
             } catch {
-                // 目录非空或不存在：忽略
+                // L4：目录操作失败计入 failures（参与 success 判定），不再静默忽略
+                failures.push({ path: scopedKey, reason: 'delete_failed' });
             }
         }
     }

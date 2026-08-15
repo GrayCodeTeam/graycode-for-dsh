@@ -80,4 +80,31 @@ describe('CheckpointSnapshotBuilder partial snapshot (affectedPaths)', () => {
       await cleanup(workspaceDir)
     }
   })
+
+  test('H-11b: stat reuse must not freeze a stale hash when content differs (same size+mtime)', async () => {
+    const workspaceDir = await createTempDir('dsh-checkpoint-snap-')
+    try {
+      await writeFile(workspaceDir, 'f.txt', 'aaaa')
+      const roots = rootsOf(workspaceDir)
+      const wsId = roots[0]!.id
+      const first = await buildWorkspaceSnapshot({ roots })
+      const scoped = `${wsId}/f.txt`
+
+      // 伪造 previous：同 size + 同 mtime（statUnchanged 成立），但哈希是「陈旧/错误」值
+      const staleHash = 'f'.repeat(64)
+      const second = await buildWorkspaceSnapshot({
+        roots,
+        previous: {
+          fileHashes: { [scoped]: staleHash },
+          fileStats: { [scoped]: first.fileStats[scoped]! },
+        },
+      })
+
+      // 修复后：stat 匹配仍须校验内容 → 记录真实哈希，绝不冻结陈旧哈希
+      expect(second.fileHashes[scoped]).toBe(first.fileHashes[scoped])
+      expect(second.fileHashes[scoped]).not.toBe(staleHash)
+    } finally {
+      await cleanup(workspaceDir)
+    }
+  })
 })

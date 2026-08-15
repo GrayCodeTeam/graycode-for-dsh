@@ -287,6 +287,41 @@ describe('restore plan (adapted from CheckpointRestoreEngine.test.ts)', () => {
     }
   })
 
+  test('L4: empty-dir mkdir failures count into failures (not silently ignored)', async () => {
+    const ctx = await setupContext()
+    try {
+      await writeFile(ctx.workspaceDir, 'src/main.ts', 'changed')
+      const chain = [await createFullBlobBackup(ctx, 'cp_full', { 'src/main.ts': 'original' })]
+      const target: RestoreTargetState = {
+        fileHashes: { [scoped(ctx, 'src/main.ts')]: sha256('original') },
+        emptyDirs: [scoped(ctx, 'docs')],
+      }
+      const current = await collectCurrentState(ctx)
+
+      // writer 的 mkdir 失败（模拟权限/IO 拒绝）：L4 要求计入 failures 并置 success=false
+      const writer: RestoreWorkspaceWriter = {
+        writeFile: async () => {},
+        unlink: async () => {},
+        mkdir: async () => {
+          throw new Error('mkdir denied')
+        },
+        rmdir: async () => {},
+      }
+      const result = await restoreWorkspaceSnapshot(
+        { checkpointsDir: ctx.checkpointsDir, blobsDir: ctx.blobsDir, roots: ctx.roots, workspaceWriter: writer },
+        chain,
+        target,
+        current.hashes,
+        current.emptyDirs,
+      )
+
+      expect(result.failures.some(f => f.path === scoped(ctx, 'docs') && f.reason === 'copy_failed')).toBe(true)
+      expect(result.success).toBe(false)
+    } finally {
+      await cleanup(ctx.workspaceDir, path.dirname(ctx.checkpointsDir))
+    }
+  })
+
   test('computeRestorePlan classifies added/modified/deleted/skipped', async () => {
     const ctx = await setupContext()
     try {
@@ -387,9 +422,15 @@ describe('restore via DSH fs workspace writer (P0-08)', () => {
         path.join(ctx.blobsDir, sha256('lib')),
         expect.objectContaining({ workspaceRoot: ctx.roots[0]!.fsPath }),
       )
-      // 删除文件 / 空目录重建同样经 writer
-      expect(unlinkSpy).toHaveBeenCalledWith(path.join(ctx.workspaceDir, 'extra.txt'))
-      expect(mkdirSpy).toHaveBeenCalledWith(path.join(ctx.workspaceDir, 'docs'))
+      // 删除文件 / 空目录重建同样经 writer（S-2/H-11a：携带 workspaceRoot 供写前最终校验）
+      expect(unlinkSpy).toHaveBeenCalledWith(
+        path.join(ctx.workspaceDir, 'extra.txt'),
+        expect.objectContaining({ workspaceRoot: ctx.roots[0]!.fsPath }),
+      )
+      expect(mkdirSpy).toHaveBeenCalledWith(
+        path.join(ctx.workspaceDir, 'docs'),
+        expect.objectContaining({ workspaceRoot: ctx.roots[0]!.fsPath }),
+      )
       // 引擎没有绕过 writer：本应由恢复创建/删除的路径未被直写
       // （src/main.ts 是 fixture 预置文件，恢复后仍保持原内容 'changed'）
       expect(await readWorkspaceFile(ctx, 'src/main.ts')).toBe('changed')

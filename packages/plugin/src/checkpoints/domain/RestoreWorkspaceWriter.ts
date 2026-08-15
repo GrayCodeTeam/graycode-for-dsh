@@ -40,9 +40,11 @@
  * 见 CheckpointService.restoreCheckpoint），writeText 调用为策略插件（如未来
  * `dsh-fs-policy`）与沙箱后端（sandboxPolicy 参数）保留了挂接点。
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { FileSystem } from '@deepseek-ai/dsh-fs';
+import { CheckpointPathError } from './CheckpointWorkspace.ts';
 
 /** 一次 workspace 文件写入的选项 */
 export interface RestoreWorkspaceWriteOptions {
@@ -54,51 +56,170 @@ export interface RestoreWorkspaceWriteOptions {
     workspaceRoot: string;
 }
 
+/** 目录/删除操作的 workspace 上下文（S-2/H-11a：写/删前最终包含性校验所需根目录） */
+export interface RestoreWorkspaceDirectoryOptions {
+    /** 目标所在工作区根（写/删前最终包含性校验的边界） */
+    workspaceRoot: string;
+}
+
 /**
  * 恢复引擎向用户 workspace 变更文件所需的全部能力。
  *
  * 约定：
  * - `writeFile` 的 `sourcePath` 位于插件私有 root（blob 池/备份目录），实现自行读取；
- * - 实现必须保证写入是原子的（DSH writeText 天然原子；node 回退为 copyFile）；
+ * - 实现必须保证写入是原子的（DSH writeText 天然原子；node 回退为临时文件 + rename）；
  * - 抛错语义：源缺失抛 ENOENT（引擎映射为 missing_in_chain），其余失败由引擎映射为
- *   copy_failed / delete_failed，与改造前一致。
+ *   copy_failed / delete_failed，与改造前一致；
+ * - S-2/H-11a：所有写/删/建/删目录操作在 syscall 前必须调用
+ *   {@link assertFinalTargetInsideRoot} 做最终包含性校验（lstat 逐段 + realpath 锚定），
+ *   防止校验通过后中间目录被替换为 symlink/junction 导致越界写/删。
  */
 export interface RestoreWorkspaceWriter {
     /** 写入（新增或覆盖）一个文件到用户 workspace */
     writeFile(destination: string, sourcePath: string, options: RestoreWorkspaceWriteOptions): Promise<void>;
     /** 删除用户 workspace 中的一个文件 */
-    unlink(destination: string): Promise<void>;
+    unlink(destination: string, options: RestoreWorkspaceDirectoryOptions): Promise<void>;
     /** 创建空目录（目标快照的空目录重建；须递归创建父链） */
-    mkdir(directory: string): Promise<void>;
+    mkdir(directory: string, options: RestoreWorkspaceDirectoryOptions): Promise<void>;
     /** 删除空目录（仅空目录；非空/不存在时实现负责忽略） */
-    rmdir(directory: string): Promise<void>;
+    rmdir(directory: string, options: RestoreWorkspaceDirectoryOptions): Promise<void>;
 }
 
 /**
- * 无 DSH 注入时的回退实现：语义与改造前引擎直写完全一致
- * （mkdir 父目录 → copyFile → best-effort chmod；unlink/mkdir/rmdir 直写）。
+ * 写/删/建/删目录前的最终包含性校验（S-2 / H-11a TOCTOU 修复）。
+ *
+ * 恢复引擎在规划阶段已通过 resolveSafePathInsideRoot 做 lstat 校验，但校验与
+ * 写/删分离存在 TOCTOU 窗口：校验通过后，中间目录可被替换为 symlink/junction，
+ * node 回退写入（copyFile/unlink/mkdir/rmdir）会跟随符号链接越界写/删外部文件。
+ * 本函数在写入端口内、实际 syscall 前重新校验，并基于 realpath 判定包含性：
+ * 1. 词法包含性：destination 必须位于 workspaceRoot 内（path.relative 判定）；
+ * 2. 逐段 lstat（不跟随链接）：从 workspaceRoot 到目标（含目标自身，若已存在）的
+ *    每个已存在组件均不得是符号链接（含 junction）；不存在的组件停止向下校验；
+ * 3. realpath 锚定：对最深的已存在祖先取 realpath，确认 realpath 结果仍位于
+ *    realpath(workspaceRoot) 内——校验基于真实路径而非词法路径，链接换位后
+ *    解析到的真实目录若越出根目录即拒绝。
+ *
+ * 校验通过返回；失败抛 CheckpointPathError
+ * （CHECKPOINT_PATH_SYMLINK / CHECKPOINT_PATH_OUTSIDE_WORKSPACE），引擎映射为
+ * copy_failed / delete_failed。
+ */
+export async function assertFinalTargetInsideRoot(workspaceRoot: string, destination: string): Promise<void> {
+    const root = path.resolve(workspaceRoot);
+    const resolvedTarget = path.resolve(destination);
+
+    // 1. 词法包含性（含目标等于根自身之外的全部层级）
+    const relative = path.relative(root, resolvedTarget);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new CheckpointPathError(
+            'CHECKPOINT_PATH_OUTSIDE_WORKSPACE',
+            `Restore target escapes workspace root: ${destination}`
+        );
+    }
+
+    // 2. 逐段 lstat（不跟随链接）：已存在组件必须不是符号链接
+    if (relative !== '') {
+        const segments = relative.split(path.sep);
+        let current = root;
+        for (const segment of segments) {
+            current = path.join(current, segment);
+            try {
+                const stat = await fs.lstat(current);
+                if (stat.isSymbolicLink()) {
+                    throw new CheckpointPathError(
+                        'CHECKPOINT_PATH_SYMLINK',
+                        `Restore path traverses a symbolic link: ${destination}`
+                    );
+                }
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                    break;
+                }
+                throw error;
+            }
+        }
+    }
+
+    // 3. realpath 锚定：最深的已存在祖先（含目标自身）必须仍位于 realpath(root) 内。
+    //    root 是用户 workspace，恢复期间必然存在；realpath(root) 失败按真实错误上抛。
+    const realRoot = await fs.realpath(root);
+    let anchor = resolvedTarget;
+    for (;;) {
+        try {
+            const realAncestor = await fs.realpath(anchor);
+            const rel = path.relative(realRoot, realAncestor);
+            if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+                throw new CheckpointPathError(
+                    'CHECKPOINT_PATH_OUTSIDE_WORKSPACE',
+                    `Restore target realpath escapes workspace root: ${destination}`
+                );
+            }
+            return;
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT' && anchor !== root) {
+                anchor = path.dirname(anchor);
+                continue;
+            }
+            throw error;
+        }
+    }
+}
+
+/**
+ * 临时文件 + rename 原子化写入（S-2/H-11a）：先把内容写到目标同目录下的随机名
+ * 临时文件，再 rename 就位。两点安全收益：
+ * - rename 同目录内原子替换目标条目——目标若是符号链接，会被替换而非跟随
+ *   （fs.copyFile 会跟随最终组件符号链接越界写）；
+ * - 写入中途失败不留半截文件（失败即清理临时文件）。
+ */
+async function atomicCopyInto(sourcePath: string, destination: string, mode?: number): Promise<void> {
+    const parent = path.dirname(destination);
+    const tmpPath = path.join(parent, `.${path.basename(destination)}.${crypto.randomUUID()}.tmp`);
+    try {
+        await fs.copyFile(sourcePath, tmpPath);
+        if (mode !== undefined) {
+            try {
+                await fs.chmod(tmpPath, mode & 0o777);
+            } catch {
+                // mode 应用失败不视为写入失败（内容已正确写入）
+            }
+        }
+        await fs.rename(tmpPath, destination); // 提交点（同目录原子替换）
+    } catch (err) {
+        await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+        throw err;
+    }
+}
+
+/**
+ * 无 DSH 注入时的回退实现：语义与改造前引擎直写一致
+ * （mkdir 父目录 → 临时文件 + rename → best-effort chmod；unlink/mkdir/rmdir 直写），
+ * 并叠加 S-2/H-11a 写/删前最终包含性校验与临时文件 + rename 原子化写入。
  * 仅用于无 `ctx.fs` 的测试/兼容场景；生产路径由 index.ts 注入 DSH 实现。
  */
 export function createNodeFsRestoreWorkspaceWriter(): RestoreWorkspaceWriter {
     return {
-        async writeFile(destination, sourcePath, { mode }) {
-            await fs.mkdir(path.dirname(destination), { recursive: true });
-            await fs.copyFile(sourcePath, destination);
-            if (mode !== undefined) {
-                try {
-                    await fs.chmod(destination, mode & 0o777);
-                } catch {
-                    // mode 应用失败不视为写入失败（内容已正确写入）
-                }
-            }
+        async writeFile(destination, sourcePath, { mode, workspaceRoot }) {
+            const parent = path.dirname(destination);
+            // 先确保父链存在（mkdir 递归；若中间目录是符号链接，紧随其后的最终校验会拒绝）
+            await fs.mkdir(parent, { recursive: true });
+            // S-2/H-11a：写入前最终包含性校验（lstat 逐段 + realpath 锚定）
+            await assertFinalTargetInsideRoot(workspaceRoot, destination);
+            await atomicCopyInto(sourcePath, destination, mode);
         },
-        async unlink(destination) {
+        async unlink(destination, { workspaceRoot }) {
+            // S-2/H-11a：删除前最终包含性校验，防止校验后中间目录被替换为符号链接越界删除
+            await assertFinalTargetInsideRoot(workspaceRoot, destination);
             await fs.unlink(destination);
         },
-        async mkdir(directory) {
+        async mkdir(directory, { workspaceRoot }) {
+            // S-2/H-11a：建目录前最终包含性校验（已存在组件不得是符号链接）
+            await assertFinalTargetInsideRoot(workspaceRoot, directory);
             await fs.mkdir(directory, { recursive: true });
         },
-        async rmdir(directory) {
+        async rmdir(directory, { workspaceRoot }) {
+            // S-2/H-11a：删目录前最终包含性校验（含目录自身不得是符号链接）
+            await assertFinalTargetInsideRoot(workspaceRoot, directory);
             await fs.rmdir(directory);
         }
     };
@@ -118,6 +239,10 @@ export function createDshFsRestoreWorkspaceWriter(fsService: FileSystem): Restor
     const decoder = new TextDecoder('utf-8', { fatal: true });
     return {
         async writeFile(destination, sourcePath, { mode, signal, workspaceRoot }) {
+            // S-2/H-11a：写入前最终包含性校验（与 node 回退一致的纵深防御——
+            // 即使 DSH writeText 可携带 sandboxPolicy，本地沙箱未启用/后端忽略时
+            // 仍需要本地边界）
+            await assertFinalTargetInsideRoot(workspaceRoot, destination);
             const bytes = await fs.readFile(sourcePath);
             let text: string | undefined;
             try {
@@ -134,27 +259,26 @@ export function createDshFsRestoreWorkspaceWriter(fsService: FileSystem): Restor
                 });
                 return;
             }
-            // GAP 1：二进制/非 UTF-8 内容无公开 writeBytes API → node fs 回退（逐字节正确）
+            // GAP 1：二进制/非 UTF-8 内容无公开 writeBytes API → node fs 回退
+            // （mkdir 父目录 → 最终校验 → 临时文件 + rename，逐字节正确且不跟随
+            // 最终组件符号链接）
             await fs.mkdir(path.dirname(destination), { recursive: true });
-            await fs.copyFile(sourcePath, destination);
-            if (mode !== undefined) {
-                try {
-                    await fs.chmod(destination, mode & 0o777);
-                } catch {
-                    // best-effort，与 node 实现一致
-                }
-            }
+            await assertFinalTargetInsideRoot(workspaceRoot, destination);
+            await atomicCopyInto(sourcePath, destination, mode);
         },
-        // GAP 2：rc.6 无 delete API → node fs 直删
-        async unlink(destination) {
+        // GAP 2：rc.6 无 delete API → node fs 直删（删除前最终包含性校验）
+        async unlink(destination, { workspaceRoot }) {
+            await assertFinalTargetInsideRoot(workspaceRoot, destination);
             await fs.unlink(destination);
         },
-        // GAP 3：rc.6 无 mkdir API → node fs 直建
-        async mkdir(directory) {
+        // GAP 3：rc.6 无 mkdir API → node fs 直建（建前最终包含性校验）
+        async mkdir(directory, { workspaceRoot }) {
+            await assertFinalTargetInsideRoot(workspaceRoot, directory);
             await fs.mkdir(directory, { recursive: true });
         },
-        // GAP 3：rc.6 无 rmdir API → node fs 直删（非空/不存在由引擎语义忽略）
-        async rmdir(directory) {
+        // GAP 3：rc.6 无 rmdir API → node fs 直删（非空/不存在由引擎语义忽略；删前校验）
+        async rmdir(directory, { workspaceRoot }) {
+            await assertFinalTargetInsideRoot(workspaceRoot, directory);
             await fs.rmdir(directory);
         }
     };

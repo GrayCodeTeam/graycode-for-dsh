@@ -17,6 +17,7 @@ import {
   resolvePathInsideRoot,
   resolveSafePathInsideRoot,
 } from '../../src/checkpoints/domain/CheckpointWorkspace.ts'
+import { workspaceUriToFsPath } from '../../src/checkpoints/domain/affectedPaths.ts'
 import { createTempDir, writeFile, cleanup } from './helpers.ts'
 
 /** 环境是否支持创建符号链接（探针结果；false 时 symlink 用例被跳过） */
@@ -108,4 +109,26 @@ describe('CheckpointWorkspace path traversal defense', () => {
       }
     },
   )
+})
+
+describe('workspaceUriToFsPath file://localhost handling (L2)', () => {
+  test('file://localhost/... strips the localhost authority and resolves the path', () => {
+    expect(workspaceUriToFsPath('file://localhost/home/user/project')).toBe(path.resolve('/home/user/project'))
+  })
+
+  test('file:///... (empty authority) keeps its previous behavior', () => {
+    expect(workspaceUriToFsPath('file:///home/user/project')).toBe(path.resolve('/home/user/project'))
+  })
+
+  test('authority host matching is case-insensitive', () => {
+    expect(workspaceUriToFsPath('file://LOCALHOST/home/user/x')).toBe(path.resolve('/home/user/x'))
+  })
+
+  test('file://localhost with encoded Windows drive still parses', () => {
+    expect(workspaceUriToFsPath('file://localhost/C%3A/foo/bar.txt')).toBe(path.resolve('C:/foo/bar.txt'))
+  })
+
+  test('non-localhost authority returns null (remote host path cannot resolve locally)', () => {
+    expect(workspaceUriToFsPath('file://otherhost/share/file.txt')).toBeNull()
+  })
 })

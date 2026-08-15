@@ -283,4 +283,23 @@ describe('CheckpointOperationLockManager (cross-process file lock)', () => {
       await cleanup(lockDir)
     }
   })
+
+  test('L1: fileLocks Map entries are removed after release (no unbounded growth)', async () => {
+    const lockDir = await createTempDir('dsh-cp-lock-')
+    const manager = new CheckpointOperationLockManager({ lockDir, pollIntervalMs: 20 })
+    try {
+      await manager.runExclusive(['ws-l1'], 'create', 'owner-l1', async () => 'done')
+      // 释放后 fileLocks 条目被清除（内部 Map 不随多工作区长生命周期无界增长）
+      const fileLocks = (manager as unknown as { fileLocks: Map<string, unknown> }).fileLocks
+      expect(fileLocks.size).toBe(0)
+
+      // 再次使用同一工作区可正常获取（条目按需重建，互斥语义不变），释放后仍归零
+      await expect(
+        manager.runExclusive(['ws-l1'], 'create', 'owner-l1', async () => 'again'),
+      ).resolves.toBe('again')
+      expect(fileLocks.size).toBe(0)
+    } finally {
+      await cleanup(lockDir)
+    }
+  })
 })

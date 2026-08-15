@@ -41,6 +41,20 @@ export interface BlobRefsPayload {
     counts: Record<string, { count: number; orphanedAt?: number }>;
 }
 
+/**
+ * blobRefs.json 损坏（无法解析 / 形状非法，M6）。
+ *
+ * 读取方应抛错（fail-closed）而非静默返回空表——否则后续 writeRefs 会用空表覆盖
+ * 损坏文件，引用计数（含 orphanedAt 归零时刻）被静默清空，GC 可能提前回收仍被
+ * 引用的 blob。调用方（GC/create/delete）按各自错误处理路径上报，不再静默继续。
+ */
+export class BlobRefsCorruptError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'BlobRefsCorruptError';
+    }
+}
+
 export interface StageCommitResult {
     ok: true;
     hash: string;
@@ -289,34 +303,57 @@ export class BlobStore {
 
     // ==================== 引用计数（domain 记录） ====================
 
-    /** 读取引用计数表（缺失返回空表；损坏条目按 count=0 净化，杜绝 NaN 写回） */
+    /**
+     * 读取引用计数表（缺失返回空表；损坏条目按 count=0 净化，杜绝 NaN 写回）。
+     *
+     * M6：文件级损坏（JSON 无法解析 / counts 形状非法）抛 BlobRefsCorruptError
+     * （fail-closed），不再静默返回 {}——否则后续 writeRefs 会用空表覆盖损坏文件，
+     * 引用计数与 orphanedAt 归零时刻被静默清空。缺失（ENOENT）仍按空表处理
+     * （首次使用 / 表从未建立）。
+     */
     async readRefs(): Promise<BlobRefsPayload['counts']> {
+        let raw: string;
         try {
-            const raw = await fs.readFile(this.refsFile, 'utf-8');
-            const parsed = JSON.parse(raw) as Partial<BlobRefsPayload>;
-            if (parsed && typeof parsed === 'object' && parsed.counts && typeof parsed.counts === 'object') {
-                const counts: BlobRefsPayload['counts'] = {};
-                for (const [hash, entry] of Object.entries(parsed.counts)) {
-                    if (!entry || typeof entry !== 'object') {
-                        continue;
-                    }
-                    const rawCount = (entry as { count?: unknown }).count;
-                    const count = Number(rawCount);
-                    // L6a：count 非有限数值（NaN/字符串/负数/缺失）→ 按 0 净化，
-                    // 杜绝 NaN 写回 blobRefs.json（incrementRefs/decrementRefs 直接 +1/-1）
-                    counts[hash] = {
-                        count: Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0,
-                        ...(typeof (entry as { orphanedAt?: unknown }).orphanedAt === 'number'
-                            ? { orphanedAt: (entry as { orphanedAt?: number }).orphanedAt }
-                            : {})
-                    };
-                }
-                return counts;
+            raw = await fs.readFile(this.refsFile, 'utf-8');
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                return {}; // 缺失 = 空表（首次使用）
             }
-            return {};
-        } catch {
-            return {};
+            throw error;
         }
+
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            throw new BlobRefsCorruptError(`blobRefs.json is corrupt (invalid JSON): ${this.refsFile}`);
+        }
+        if (
+            !parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+            || !(parsed as Partial<BlobRefsPayload>).counts
+            || typeof (parsed as Partial<BlobRefsPayload>).counts !== 'object'
+            || Array.isArray((parsed as Partial<BlobRefsPayload>).counts)
+        ) {
+            throw new BlobRefsCorruptError(`blobRefs.json is corrupt (invalid shape): ${this.refsFile}`);
+        }
+
+        const counts: BlobRefsPayload['counts'] = {};
+        for (const [hash, entry] of Object.entries((parsed as BlobRefsPayload).counts)) {
+            if (!entry || typeof entry !== 'object') {
+                continue;
+            }
+            const rawCount = (entry as { count?: unknown }).count;
+            const count = Number(rawCount);
+            // L6a：count 非有限数值（NaN/字符串/负数/缺失）→ 按 0 净化，
+            // 杜绝 NaN 写回 blobRefs.json（incrementRefs/decrementRefs 直接 +1/-1）
+            counts[hash] = {
+                count: Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0,
+                ...(typeof (entry as { orphanedAt?: unknown }).orphanedAt === 'number'
+                    ? { orphanedAt: (entry as { orphanedAt?: number }).orphanedAt }
+                    : {})
+            };
+        }
+        return counts;
     }
 
     /** 原子写引用计数表（tmp + rename；tmp 带随机后缀，避免并发写同路径 tmp 互相覆盖） */

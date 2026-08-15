@@ -5,7 +5,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { BlobStore } from '../../src/checkpoints/domain/BlobStore.ts'
+import { BlobRefsCorruptError, BlobStore } from '../../src/checkpoints/domain/BlobStore.ts'
 import { createTempDir, cleanup } from './helpers.ts'
 
 describe('BlobStore refcounts (L6a)', () => {
@@ -72,6 +72,50 @@ describe('BlobStore refcounts (L6a)', () => {
       expect(after[hash]!.count).toBe(0)
       expect(typeof after[hash]!.orphanedAt).toBe('number')
       expect(await fs.readFile(store.refsFile, 'utf-8')).not.toContain('NaN')
+    } finally {
+      await cleanup(rootDir)
+    }
+  })
+})
+
+describe('BlobStore refs corruption (M6)', () => {
+  test('readRefs throws on invalid JSON and never overwrites the corrupt file', async () => {
+    const rootDir = await createTempDir('dsh-checkpoint-blobstore-')
+    try {
+      const store = new BlobStore(rootDir)
+      await store.initialize()
+      const corrupt = '{ this is not valid json'
+      await fs.writeFile(store.refsFile, corrupt, 'utf-8')
+
+      await expect(store.readRefs()).rejects.toThrow(BlobRefsCorruptError)
+      // incrementRefs 不会用空表覆盖损坏文件（fail-closed）
+      await expect(store.incrementRefs(['a'.repeat(64)])).rejects.toThrow(BlobRefsCorruptError)
+      expect(await fs.readFile(store.refsFile, 'utf-8')).toBe(corrupt)
+    } finally {
+      await cleanup(rootDir)
+    }
+  })
+
+  test('readRefs throws when counts is not an object (invalid shape)', async () => {
+    const rootDir = await createTempDir('dsh-checkpoint-blobstore-')
+    try {
+      const store = new BlobStore(rootDir)
+      await store.initialize()
+      await fs.writeFile(store.refsFile, JSON.stringify({ version: 1, counts: 'garbage' }), 'utf-8')
+      await expect(store.readRefs()).rejects.toThrow(BlobRefsCorruptError)
+      // 损坏文件原样保留（未被空表覆盖）
+      expect(await fs.readFile(store.refsFile, 'utf-8')).toBe(JSON.stringify({ version: 1, counts: 'garbage' }))
+    } finally {
+      await cleanup(rootDir)
+    }
+  })
+
+  test('missing blobRefs.json returns an empty table (not corruption)', async () => {
+    const rootDir = await createTempDir('dsh-checkpoint-blobstore-')
+    try {
+      const store = new BlobStore(rootDir)
+      await store.initialize()
+      await expect(store.readRefs()).resolves.toEqual({})
     } finally {
       await cleanup(rootDir)
     }

@@ -136,14 +136,38 @@ const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform ===
  * - Windows 与 POSIX 分隔符不一致
  * - 重复斜杠导致的路径比较失败
  * - `./foo` / `/foo` / `foo/` 这种等价写法干扰哈希键和匹配逻辑
+ * - L3（纵深防御）：折叠 `.` / `..` 段——`a/../b` → `b`，避免含 `..` 的键
+ *   绕过下游包含性判断或产生歧义哈希键。入口已由 normalizeSafeCheckpointPath
+ *   前置拒绝含 `..` 的路径，此处折叠是第二道防线；前缀 `..`（向上越出根）
+ *   无法折叠时原样保留（保留根路径语义），仍由入口拒绝兜底。
  */
 export function normalizeCheckpointPath(relativePath: string): string {
-    return relativePath
+    const normalized = relativePath
         .replace(/\\/g, '/')
         .replace(/\/+/g, '/')
         .replace(/^\.\//, '')
         .replace(/^\/+/, '')
         .replace(/\/$/, '');
+    if (normalized.length === 0) {
+        return normalized;
+    }
+    // L3：段折叠（保留根路径语义——前缀 `..` 无法折叠时原样保留）
+    const stack: string[] = [];
+    for (const segment of normalized.split('/')) {
+        if (segment === '' || segment === '.') {
+            continue;
+        }
+        if (segment === '..') {
+            if (stack.length > 0 && stack[stack.length - 1] !== '..') {
+                stack.pop();
+            } else {
+                stack.push(segment);
+            }
+            continue;
+        }
+        stack.push(segment);
+    }
+    return stack.join('/');
 }
 
 /**

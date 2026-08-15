@@ -14,6 +14,7 @@
  * 路径语义：checkpointId 即 manifest 文件名（非目录名）；读写前必须通过
  * isSafeCheckpointDirName 校验（CP-PATH-1：防止损坏/恶意 ID 越界拼接）。
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { CheckpointIgnoreSnapshot } from './types.ts';
@@ -145,21 +146,28 @@ export class CheckpointManifestRepository {
         if (manifest.checkpointId !== checkpointId) {
             throw new Error(`writeManifest checkpointId mismatch: ${manifest.checkpointId} !== ${checkpointId}`);
         }
+        let tmpPath: string | undefined;
         try {
             await this.chainWrite(checkpointId, async () => {
                 const targetPath = this.getManifestPath(checkpointId);
-                const tmpPath = `${targetPath}.tmp`;
+                // L5：tmp 带随机后缀——固定 `.tmp` 名在未来绕过写队列的并发写路径上会
+                // 互踩；随机后缀 + 同目录 rename 保证原子提交互不干扰
+                tmpPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
                 await fs.mkdir(path.dirname(targetPath), { recursive: true });
                 await fs.writeFile(tmpPath, JSON.stringify(manifest, null, 2), 'utf-8');
                 await fs.rename(tmpPath, targetPath); // 提交点
+                tmpPath = undefined;
             });
         } catch (err) {
             // 写失败（只读介质/磁盘满等）：清掉该存档缓存，避免「内存与磁盘不一致」残留
             this.clearCache(checkpointId);
-            try {
-                await fs.rm(`${this.getManifestPath(checkpointId)}.tmp`, { force: true });
-            } catch {
-                // 清理失败不影响主错误
+            // L5：按本次实际使用的 tmp 名清理（随机后缀，不能再用固定名）
+            if (tmpPath) {
+                try {
+                    await fs.rm(tmpPath, { force: true });
+                } catch {
+                    // 清理失败不影响主错误
+                }
             }
             throw err;
         }

@@ -373,7 +373,8 @@ export class CheckpointOperationLockManager {
                             this.acquiringWorkspaceIds.delete(id);
                             this.activeWorkspaceIds.add(id);
                         }
-                        // 组合释放：清除本地活跃标记（释放队列后续项）+ 释放跨进程文件锁 + 调度队列
+                        // 组合释放：清除本地活跃标记（释放队列后续项）+ 释放跨进程文件锁 +
+                        // 清理 fileLocks Map 条目（L1）+ 调度队列
                         let released = false;
                         const release = async (): Promise<void> => {
                             if (released) {
@@ -384,6 +385,11 @@ export class CheckpointOperationLockManager {
                                 this.activeWorkspaceIds.delete(id);
                             }
                             await fileRelease();
+                            // L1：锁释放后清理 fileLocks Map 条目——多工作区长生命周期不再
+                            // 无界增长。WorkspaceFileLock 无跨获取的持久状态（每次 tryAcquire
+                            // 重新打开锁文件），删除后下一位获取者重新创建即可；仅当该工作区
+                            // 仍有活跃/正在获取的请求时保留（避免删除仍被使用的对象）。
+                            this.releaseFileLockEntries(candidate.workspaceIds);
                             this.drain();
                         };
                         candidate.resolve(release);
@@ -481,6 +487,21 @@ export class CheckpointOperationLockManager {
             this.fileLocks.set(workspaceId, lock);
         }
         return lock;
+    }
+
+    /**
+     * L1：锁释放后清理 fileLocks Map 条目（无活跃/正在获取请求时删除）。
+     *
+     * 多工作区长生命周期下，若 Map 只增不减会无界增长。释放时删除是安全的：
+     * WorkspaceFileLock 不保存跨获取的持久状态（tryAcquire 每次重新打开锁文件），
+     * 删除后下一位请求者经 fileLockFor 按需重建（同一 lockPath，互斥语义不变）。
+     */
+    private releaseFileLockEntries(workspaceIds: readonly string[]): void {
+        for (const id of workspaceIds) {
+            if (!this.activeWorkspaceIds.has(id) && !this.acquiringWorkspaceIds.has(id)) {
+                this.fileLocks.delete(id);
+            }
+        }
     }
 
     getActiveWorkspaceCount(): number {

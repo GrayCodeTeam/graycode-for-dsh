@@ -181,7 +181,8 @@ export async function buildWorkspaceSnapshot(
                 fileHashes,
                 fileStats,
                 sizeExcluded,
-                unreadable
+                unreadable,
+                excluded
             });
         });
 
@@ -223,20 +224,33 @@ interface StatAndHashEntryParams {
     fileStats: Record<string, SnapshotFileStat>;
     sizeExcluded: SnapshotExcludedEntry[];
     unreadable: SnapshotExcludedEntry[];
-    /** 调用方已 stat（部分快照分支判定文件/目录用）；缺省时内部 stat */
+    /** 符号链接/特殊文件排除记录（M4：哈希路径 lstat 校验后不读内容的排除条目） */
+    excluded: CheckpointExcludedEntry[];
+    /** 调用方已 stat（部分快照分支判定文件/目录用）；缺省时内部 lstat */
     stat?: BigIntStats;
 }
 
 /**
  * 单文件 stat + 哈希（全量/部分快照分支共用）。
  *
- * 逻辑与全量分支原实现逐位一致：大小上限排除 → stat 未变化复用上一快照哈希 →
- * 流式哈希；任何失败（stat/哈希异常）记录为不可读，不进入哈希表。
+ * 逻辑与全量分支原实现一致：lstat（M4，不跟随符号链接，符号链接/特殊文件按
+ * unsupported_file_type 排除）→ 大小上限排除 → stat 未变化时仍流式哈希校验内容
+ * （H-11b，记录本次内容哈希，绝不冻结陈旧哈希）→ 流式哈希；
+ * 任何失败（stat/哈希异常）记录为不可读，不进入哈希表。
  */
 async function statAndHashEntry(params: StatAndHashEntryParams): Promise<void> {
-    const { absolutePath, scopedPath, maxSize, previous, fileHashes, fileStats, sizeExcluded, unreadable } = params;
+    const { absolutePath, scopedPath, maxSize, previous, fileHashes, fileStats, sizeExcluded, unreadable, excluded } = params;
     try {
-        const stat = params.stat ?? (await fs.stat(absolutePath, { bigint: true }));
+        // M4：哈希路径同样用 lstat（不跟随符号链接）——全量分支扫描分类用 Dirent、
+        // 哈希此前用 fs.stat（跟随链接）：扫描后被替换为符号链接的文件会把工作区外
+        // 目标内容哈希进存档（恢复侧拒绝符号链接段，内容不可恢复）。lstat 校验后
+        // 符号链接/特殊文件不读内容，按 unsupported_file_type 计入 excluded（与
+        // resolver / 部分快照分支同口径，参考 CheckpointIgnoreResolver CP-SYMLINK-1）。
+        const stat = params.stat ?? (await fs.lstat(absolutePath, { bigint: true }));
+        if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+            excluded.push({ path: scopedPath, reason: 'unsupported_file_type', source: 'filesystem' });
+            return;
+        }
         const size = Number(stat.size);
         const mtimeMs = Number(stat.mtimeMs);
         const mtimeNs = stat.mtimeNs.toString();
@@ -247,7 +261,12 @@ async function statAndHashEntry(params: StatAndHashEntryParams): Promise<void> {
             return;
         }
 
-        // stat 复用：与上一快照一致时直接复用哈希，避免重复读盘
+        // stat 复用：与上一快照一致时直接复用哈希，避免重复读盘。
+        // H-11b：stat 匹配仅作快速路径——同 size+mtimeNs 的文件仍可能被改写（mtime
+        // 精度粗糙的文件系统上同一时间刻度内重写且字节数不变），直接复用会让 blob
+        // 静默记录旧内容。因此 stat 匹配时仍对源文件流式哈希并记录**本次内容哈希**：
+        // 与上一哈希一致（内容确实未变）→ 键值不变；不一致（同 size+mtime 重写）→
+        // 记录新哈希，绝不冻结陈旧内容。
         const prevStat = previous?.fileStats[scopedPath];
         const statUnchanged = prevStat
             ? (prevStat.mtimeNs !== undefined
@@ -260,7 +279,8 @@ async function statAndHashEntry(params: StatAndHashEntryParams): Promise<void> {
             statUnchanged &&
             previous?.fileHashes[scopedPath] !== undefined
         ) {
-            fileHashes[scopedPath] = previous.fileHashes[scopedPath];
+            const contentHash = await hashFileStreaming(absolutePath);
+            fileHashes[scopedPath] = contentHash;
             fileStats[scopedPath] = { mtimeMs, size, mtimeNs, mode: Number(stat.mode) };
             return;
         }
@@ -390,6 +410,7 @@ async function buildAffectedPathsSnapshot(
             fileStats,
             sizeExcluded,
             unreadable,
+            excluded,
             stat
         });
     }

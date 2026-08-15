@@ -83,6 +83,16 @@ export function workspaceUriToFsPath(uri: string): string | null {
             // 先剥离未编码的 fragment/query（file URI 语义中 # 之后是 fragment、? 之后是
             // query，不属于路径；文件名中的字面 #/? 应以 %23/%3F 编码，不受影响），再解码。
             let p = uri.slice('file://'.length).split('#')[0]!.split('?')[0]!;
+            // L2：file://localhost/...（authority = localhost）与 file:///...（空 authority）
+            // 都指向本机路径——authority 部分（localhost，主机名大小写不敏感）不属于路径
+            // 本体，必须剥离，否则会被误当作路径首段（如把 /home/user 解析成
+            // <root>/localhost/home/user）。非本机 authority（file://host/path 指向远端
+            // 主机）无法确定本机 fs 路径 → 回退全量（安全侧）。
+            if (/^localhost(?=$|\/)/i.test(p)) {
+                p = p.slice('localhost'.length);
+            } else if (p !== '' && !p.startsWith('/')) {
+                return null;
+            }
             try {
                 // file:///X%3A/example/path -> /X:/example/path -> X:/example/path
                 p = decodeURIComponent(p);
