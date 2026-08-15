@@ -33,6 +33,7 @@ import { normalizeCoord, resolveOutputFormat, toDimensions, exceedsOutputPixelLi
 import { validateGenerateImageTask, validateRemoveBackgroundTask } from './domain/validate.ts'
 import {
   DEFAULT_MAX_BATCH,
+  MAX_MEDIA_MAX_BATCH,
   MAX_READ_BYTES,
   type CropTask,
   type GenerateImageTask,
@@ -93,6 +94,22 @@ function failResultFor(
 /** 取消结果投影（inputPath 显式指定） */
 function cancelledResultFor(inputPath: string, index: number): MediaTaskResult {
   return failResultFor(inputPath, index, MediaErrorCode.CANCELLED, 'user cancelled the operation', true)
+}
+
+/**
+ * 进程内单调时间戳（L4）：保证同一毫秒内多次调用生成的默认输出文件名互不覆盖。
+ * 默认输出名嵌入 Date.now()，同毫秒的连续调用（如快速小图批量、紧邻的两次
+ * generate_image）会生成相同文件名互相覆盖；本函数保证进程内严格递增。
+ */
+let lastOutputTimestamp = 0
+function nextOutputTimestamp(): number {
+  const now = Date.now()
+  if (now > lastOutputTimestamp) {
+    lastOutputTimestamp = now
+  } else {
+    lastOutputTimestamp += 1
+  }
+  return lastOutputTimestamp
 }
 
 /** 剔除值为 undefined 的键（lossless-JSON 契约：不序列化 undefined 值键） */
@@ -206,7 +223,7 @@ function resolveOutput(
 ): { ok: true; absolute: string; display: string } | { ok: false; result: MediaTaskResult } {
   const task = { image_path: inputPath }
   try {
-    const ts = Date.now()
+    const ts = nextOutputTimestamp()
     const absolute = outputPath
       ? resolveInsideWorkspace(cwd, outputPath)
       : buildDefaultOutputPath(cwd, inputPath, ext, ts, index)
@@ -562,7 +579,7 @@ async function executeGenerateImageTask(
 
   // 输出格式：显式 format → 输出路径扩展名 → png（README：png 优先）
   const outputFormat = resolveOutputFormat(task.format, task.output_path, undefined)
-  const ts = Date.now()
+  const ts = nextOutputTimestamp()
   const defaultPath = buildGeneratedOutputPath(cwd, outputFormat.ext, ts)
   const output = resolveModelOutput(cwd, task.output_path, defaultPath, index)
   if (!output.ok) return output.result
@@ -634,7 +651,7 @@ async function executeRemoveBackgroundTask(
 
   if (signal?.aborted) return cancelledResultFor(task.image_path, index)
 
-  const ts = Date.now()
+  const ts = nextOutputTimestamp()
   const defaultPath = buildBackgroundRemovedOutputPath(cwd, task.image_path, ts)
   const output = resolveModelOutput(cwd, task.output_path, defaultPath, index)
   if (!output.ok) return output.result
@@ -787,7 +804,10 @@ function summarize(
   })
 }
 
-/** 批量执行主循环（顺序执行；每任务失败不中断，收集到 results；每步检查 signal） */
+/** 批量执行主循环（顺序执行；每任务失败不中断，收集到 results；每步检查 signal）。
+ * L2：取消信号触发后不再执行剩余任务（原来只是每个剩余任务被 executor 逐项判为
+ * cancelled，浪费迭代）；剩余任务直接投影为 cancelled 结果，保持「全部取消 →
+ * GRAY_CANCELLED」的汇总语义不变。 */
 async function runBatch<T extends { image_path: string }>(
   deps: MediaToolDeps,
   cwd: string,
@@ -798,6 +818,10 @@ async function runBatch<T extends { image_path: string }>(
 ): Promise<MediaToolResult> {
   const results: MediaTaskResult[] = []
   for (let index = 0; index < tasks.length; index += 1) {
+    if (signal?.aborted) {
+      results.push(cancelledResult(index, tasks[index]!))
+      continue
+    }
     results.push(await executor(tasks[index]!, index))
   }
   return summarize(kind, tasks.length > 1, tasks.length, results)
@@ -915,7 +939,8 @@ function batchItemSchema(extra: Record<string, ParameterPropertySpec>): ObjectVa
 
 /** 创建 media 工具的 defineTool 定义（本地三件套 + 模型渠道两工具） */
 export function createMediaToolDefinitions(deps: MediaToolDeps): ToolDefinition[] {
-  const maxBatch = deps.maxBatch > 0 ? deps.maxBatch : DEFAULT_MAX_BATCH
+  // L9：运行时同样钳制到硬顶（schema 在 settings 层已拦，此处兜底直传 Config/注入）
+  const maxBatch = Math.min(deps.maxBatch > 0 ? deps.maxBatch : DEFAULT_MAX_BATCH, MAX_MEDIA_MAX_BATCH)
   // 模型渠道：未注入时 fail-closed（rc.6 无公开图像生成 API → GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE）
   const channel = deps.channel ?? createUnavailableChannelImagePort()
 

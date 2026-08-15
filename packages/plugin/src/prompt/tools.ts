@@ -19,6 +19,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { renderModeSectionText } from './domain/entries.ts'
 import { PromptError, PromptErrorCode } from './domain/promptTypes.ts'
+import { previewPlaceholderValues } from './promptInjector.ts'
 import type { PromptSettingsService } from './service.ts'
 
 /** Error projection: stable code + human-readable message. */
@@ -58,12 +59,19 @@ function projectMode(mode: { id: string; name: string; kind: 'builtin' | 'custom
 /**
  * Create the three prompt tools, closed over the plugin service. The
  * `getSendHistoryThoughts` getter feeds the D-11 = c fake-thought gate into
+<<<<<<< HEAD
  * previews so they match what would actually be injected. The optional
  * `getRequestLayer` getter (A1) mirrors the current request-layer switch into
  * previews: when on, user/assistant preset entries are excluded from the
  * preview text (they are injected as real messages at the request layer) and
  * a note is appended. Omitted getter defaults to false (legacy D-11 = c
  * preview shape).
+=======
+ * previews so they match what would actually be injected. `getRequestLayer`
+ * mirrors the A1 request-layer flag of the real injection path; both are
+ * optional so legacy callers keep compiling (defaults: thought gate off,
+ * request layer off).
+>>>>>>> c85b791 (fix(media-file-prompt-remote-settings-shared): rpc whitelist, ReDoS guard, size-first reads (P15))
  */
 export function createPromptTools(
   service: PromptSettingsService,
@@ -179,27 +187,24 @@ export function createPromptTools(
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
         const mode = args.modeId ? await service.getMode(args.modeId) : await service.getCurrentMode()
         if (!mode) {
           throw new PromptError(`prompt mode "${args.modeId}" not found`, PromptErrorCode.MODE_NOT_FOUND)
         }
-        // Render the system part only (requestLayer mirrors the A1 switch: on,
-        // user/assistant preset entries are injected as real messages at the
-        // request layer and do not appear in this system-text preview).
-        const requestLayer = getRequestLayer?.() ?? false
-        const sectionText = renderModeSectionText(mode, {
-          sendHistoryThoughts: getSendHistoryThoughts(),
-          requestLayer,
-        })
-        const text = requestLayer
-          ? `${sectionText.length > 0 ? `${sectionText}\n\n` : ''}Note: user/assistant preset entries will be injected as real messages at the request layer (llm/stream) and are not included in this system-text preview.`
-          : sectionText
+        // M2：预览必须与真实注入路径同源——补上 requestLayer 与 placeholderValues
+        // （ENVIRONMENT 等 {{$MODULE}} 占位值），否则预览与注入文本不一致（预览会显示
+        // "[placeholder ENVIRONMENT: not available in DSH]" 而实际注入的是真实环境段落）。
+        const cwd = exec?.agent?.session?.header?.cwd
         return {
           success: true,
           modeId: mode.id,
-          text,
+          text: renderModeSectionText(mode, {
+            sendHistoryThoughts: getSendHistoryThoughts(),
+            requestLayer: getRequestLayer?.(),
+            placeholderValues: previewPlaceholderValues(cwd),
+          }),
         }
       } catch (error) {
         return errorOf(error)

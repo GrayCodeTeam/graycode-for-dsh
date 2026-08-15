@@ -4,7 +4,7 @@ import { createMediaToolDefinitions } from './tools.ts'
 import { createDshFsMediaFs } from './adapters/mediaFs.ts'
 import { createUnavailableChannelImagePort } from './adapters/modelChannel.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
-import { DEFAULT_MAX_BATCH } from './domain/types.ts'
+import { DEFAULT_MAX_BATCH, MAX_MEDIA_MAX_BATCH } from './domain/types.ts'
 
 export const name = 'graycode-media'
 
@@ -32,7 +32,8 @@ export interface Config {
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   agentScope: agentScopeSchema,
-  maxBatch: z.number().default(DEFAULT_MAX_BATCH),
+  // L9：maxBatch 设有硬顶（MAX_MEDIA_MAX_BATCH），配置超限在 settings 层即拒绝
+  maxBatch: z.number().default(DEFAULT_MAX_BATCH).max(MAX_MEDIA_MAX_BATCH),
 })
 
 export function apply(ctx: Context, config: Config): () => void {

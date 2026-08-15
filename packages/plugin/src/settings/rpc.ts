@@ -59,6 +59,42 @@ export const GRAYCODE_CHANNEL = '/graycode'
 
 const TOP_LEVEL_KEYS = new Set(Object.keys(DEFAULTS))
 
+/**
+ * 浏览器桥（/graycode remote.invoke）允许转发的 Gray Remote 端点白名单（M1）。
+ *
+ * 背景：该通道 authority 为 'trusted-host'，但防御纵深要求桥层不无差别透传全部
+ * 端点——后续新增端点默认不可达，须显式加入本白名单（fail-closed）。当前条目覆盖
+ * 浏览器面板实际消费的全部端点；破坏性端点（memory/forget、checkpoints/restore/
+ * delete/gc、stagedDiff/accept|reject、branches/rename）各自携带 handler 级确认门
+ * （confirm:true / previewToken / CAS revision），白名单不重复拦截，但任何新端点
+ * 默认被拒，杜绝「新注册端点自动暴露给浏览器」的扩散面。
+ */
+export const REMOTE_BRIDGE_ENDPOINT_ALLOWLIST: ReadonlySet<string> = new Set([
+  'activity/stats',
+  'branches/list',
+  'branches/rename',
+  'checkpoints/create',
+  'checkpoints/list',
+  'checkpoints/verify',
+  'checkpoints/previewRestore',
+  'checkpoints/restore',
+  'checkpoints/delete',
+  'checkpoints/gc',
+  'memory/list',
+  'memory/note',
+  'memory/edit',
+  'memory/forget',
+  'memory/configGet',
+  'memory/configUpdate',
+  'migration/scopeMap',
+  'stagedDiff/list',
+  'stagedDiff/preview',
+  'stagedDiff/accept',
+  'stagedDiff/reject',
+  'workflows/list',
+  'workflows/get',
+])
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -79,6 +115,25 @@ function readUpdatePatch(payload: unknown): GrayCodePatch | undefined {
     return readPatch(payload.patch)
   }
   return readPatch(payload)
+}
+
+/**
+ * 校验 patch 的嵌套值（L12）：对每个顶层键用其子 schema（schema.dict[key]，与
+ * schema.spec.ts 对 GrayCodeSchema.dict 的既有读取口径一致）做一次构造级校验。
+ * 下游 scope.update 本身也会校验（dsh-settings：校验失败在持久化前拒绝），此处
+ * 提前到 RPC 层，让非法嵌套值以 bad-request（带具体字段）返回而非 generic internal。
+ */
+function validatePatchNested(schema: z<GrayCodeConfig>, patch: GrayCodePatch): string | null {
+  for (const [key, value] of Object.entries(patch)) {
+    const sub = schema.dict?.[key]
+    if (sub === undefined) continue
+    try {
+      sub(value as never)
+    } catch (error) {
+      return `${key}: ${messageOf(error)}`
+    }
+  }
+  return null
 }
 
 function readRemoteCall(payload: unknown): {
@@ -126,6 +181,11 @@ export function createGrayCodeConfigHandler(
         if (patch === undefined) {
           return badRequest('graycode: config.update expects { patch } with known top-level keys')
         }
+        // L12：嵌套值在 RPC 层先行校验（错误码从 generic internal 提前为 bad-request）
+        const nestedIssue = validatePatchNested(schema, patch)
+        if (nestedIssue !== null) {
+          return badRequest(`graycode: config.update rejected by schema (${nestedIssue})`)
+        }
         await scope.update(patch)
         return { ok: true, value: getForWire() }
       }
@@ -140,6 +200,12 @@ export function createGrayCodeConfigHandler(
         }
         if (remote === undefined) {
           return internal('graycode: Gray Remote service is unavailable')
+        }
+        // M1：端点白名单校验（fail-closed）——未列入白名单的端点不转发
+        if (!REMOTE_BRIDGE_ENDPOINT_ALLOWLIST.has(`${call.namespace}/${call.method}`)) {
+          return badRequest(
+            `graycode: remote.invoke endpoint "${call.namespace}/${call.method}" is not whitelisted for the browser bridge`,
+          )
         }
         return { ok: true, value: await remote.invoke(call.namespace, call.method, call.args, signal) }
       }

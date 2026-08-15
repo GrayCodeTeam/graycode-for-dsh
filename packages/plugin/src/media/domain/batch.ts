@@ -17,7 +17,14 @@ export type MediaToolKind = 'crop_image' | 'resize_image' | 'rotate_image'
  *   与老版「参数错误直接返回」语义一致）；
  * - 否则尝试单张模式（image_path + 该工具的专属参数齐全才接受）。
  *
- * 返回 null 表示两种模式都不可用（由调用方投影为 GRAY_MEDIA_NO_TASKS）。
+ * 三种结局（L3 语义澄清，与测试/工具投影一致）：
+ * - 返回 null → 两种模式都不可用（无 images 且无 image_path），调用方投影
+ *   GRAY_MEDIA_NO_TASKS；
+ * - 抛 INVALID_ARGUMENTS → 用户已表达单张/批量意图但参数非法（如 image_path
+ *   存在而专属参数缺失、images 存在但某项非法），调用方投影整批拒绝；
+ * - 返回任务数组 → 正常执行。
+ * 注意：单张模式「有 image_path 但缺专属参数」是 INVALID_ARGUMENTS 而非 NO_TASKS
+ * ——image_path 已声明操作对象，属参数不全而非无任务。
  */
 export function toTasks(kind: MediaToolKind, args: MediaBatchArgs): MediaTask[] | null {
   if (Array.isArray(args.images) && args.images.length > 0) {

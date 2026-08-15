@@ -10,13 +10,14 @@
  *   修饰的嵌套量词（如 `(a+)+`、`(a|a)+`、`(a{2,})*`）是经典灾难性回溯来源
  * - 构造异常捕获：非法正则返回可读错误而不是把堆栈抛给调用方
  *
- * 已知盲区（有意为之，仅文档化，不扩展启发式）：
- * - 无分组的多重相邻/交替无界量词（如 `a+a+`、`a*b*c*`、`(ab)*a+`、`.*a.*b`）：当前启发式
- *   只拦截「组内量词/分支 + 闭组被量词修饰」的嵌套形态（DANGEROUS_GROUP_QUANTIFIER）与
- *   嵌套分组/裸量词原子（hasNestedQuantifiedGroups），对无分组的连续量词串不拦截——这类
- *   模式在回溯引擎上对失败匹配同样存在回溯放大，但误伤面大（`\d+\s+\w+` 等常见合法正则
- *   会被连续量词启发式命中），故仅文档化。若后续需要加固，可补充低成本启发式：
- *   「连续无界量词（+ * {n,} {n,m}）数量超过阈值（如 3 个）即拒绝」，并先评估误伤面。
+ * 已知盲区（部分已由 hasAmbiguousAdjacentQuantifiers 补上，仍有以下局限，仅文档化）：
+ * - 无分组的相邻无界量词（`a+a+`、`a*a+`、`.*a.*b`、`a+.*x`、`[a-z]+[a-z]+`）：
+ *   由 hasAmbiguousAdjacentQuantifiers 拦截（同 token 或含 `.` 通配）。
+ * - 量化闭组与后随量词原子的交叉歧义（如 `(ab)*a+`）：需对组内容做字符集/结构
+ *   分析（误伤风险大于收益），不扩展；
+ * - 不同 token 但字符集重叠的相邻量词（如 `\w+_+\d+`）：需字符集交集分析，不扩展。
+ *   若后续需要加固，可补充低成本启发式：「连续无界量词（+ * {n,} {n,m}）数量超过
+ *   阈值（如 3 个）即拒绝」，并先评估误伤面。
  *
  * 零依赖纯 TS：不 import 项目内任何模块（后端 jest 与前端 vitest/vite 均可直接编译打包）。
  */
@@ -204,6 +205,107 @@ export function hasNestedQuantifiedGroups(pattern: string): boolean {
 }
 
 /**
+ * 无分组相邻/交替无界量词启发式（M3）：弥补 DANGEROUS_GROUP_QUANTIFIER 与
+ * hasNestedQuantifiedGroups 对「无分组连续量词」的盲区（`a+a+`、`a*a+`、`.*a.*b`）。
+ *
+ * 规则：扫描所有「被无界量词（+ * {n,} {n,m}，含懒惰修饰 ?）修饰的原子」，对序列中
+ * 相邻的两个（中间可隔未量化字面量，如 `.*a.*b` 的两个 `.*`）判定：
+ * - 两原子 token 相同（同字面量/同转义/同字符类）→ 匹配集重叠、失败时二次回溯 → 命中；
+ * - 任一原子是 `.` 通配符（可匹配任意字符）→ 与任何相邻量词原子重叠 → 命中
+ *   （`.*a.*b` 的二次回溯放大即来自此）。
+ *
+ * 误伤评估：`\d+\s+\w+`（\d/\s/\w 互异且互不相交，线性安全）、`a+b+c`（不同字面量）、
+ * `(?:ab)+`、`^[a-z0-9_-]+$` 等常见合法形态均不命中；`\w+_+\d+` 这类「不同 token 但
+ * 字符集重叠」与 `(ab)*a+` 这类「量化闭组 + 后随量词原子」仍为文档化局限（需更精细的
+ * 字符集/组内容分析，误伤风险大于收益）。
+ */
+export function hasAmbiguousAdjacentQuantifiers(pattern: string): boolean {
+    let prevToken: string | undefined;
+    let inClass = false;
+
+    const consider = (token: string): boolean => {
+        if (prevToken !== undefined && (prevToken === token || prevToken === '.' || token === '.')) {
+            return true;
+        }
+        prevToken = token;
+        return false;
+    };
+
+    /** 从 start 读取无界量词；定长 {n} 与非法形态返回 undefined。 */
+    const readUnboundedQuantifier = (start: number): number | undefined => {
+        if (start >= pattern.length) return undefined;
+        const ch = pattern[start];
+        if (ch === '+' || ch === '*') {
+            return start + (pattern[start + 1] === '?' ? 1 : 0); // 懒惰修饰 ? 属同强度
+        }
+        if (ch === '{') {
+            const match = /^\{(\d+)(?:,(\d*))?\}/.exec(pattern.slice(start));
+            if (match === null || match[2] === undefined) return undefined; // 非量词或定长 {n}
+            return start + match[0].length - 1;
+        }
+        return undefined;
+    };
+
+    for (let i = 0; i < pattern.length; i += 1) {
+        const ch = pattern[i];
+        if (ch === '\\') {
+            if (i + 1 >= pattern.length) break;
+            const token = `\\${pattern[i + 1]}`; // 转义序列整体作为原子（\d \w \s \. 等）
+            const quantEnd = readUnboundedQuantifier(i + 2);
+            if (quantEnd !== undefined) {
+                if (consider(token)) return true;
+                i = quantEnd; // 循环头 i += 1 后跳过整个转义+量词
+            } else {
+                i += 1; // 无量词：跳过转义字符本体，循环头再前进
+            }
+            continue;
+        }
+        if (inClass) {
+            if (ch === ']') inClass = false;
+            continue;
+        }
+        if (ch === '[') {
+            let j = i + 1;
+            let closed = false;
+            while (j < pattern.length) {
+                if (pattern[j] === '\\') { j += 2; continue; }
+                if (pattern[j] === ']') { closed = true; break; }
+                j += 1;
+            }
+            if (!closed) break; // 未闭合字符类：构造阶段会报 Invalid，这里不再判定
+            const token = pattern.slice(i, j + 1);
+            const quantEnd = readUnboundedQuantifier(j + 1);
+            if (quantEnd !== undefined) {
+                if (consider(token)) return true;
+                i = quantEnd;
+            } else {
+                i = j;
+            }
+            continue;
+        }
+        // 非原子字符（分组括号/锚点/分支/可选量词）：不参与相邻量词判定。
+        // `?` 本身是有界量词（0-1 次），不产生重复歧义，与懒惰修饰（紧跟 +/* 后）区分。
+        if (ch === '.' ) {
+            const quantEnd = readUnboundedQuantifier(i + 1);
+            if (quantEnd !== undefined) {
+                if (consider('.')) return true;
+                i = quantEnd;
+            }
+            continue;
+        }
+        if (ch === '(' || ch === ')' || ch === '|' || ch === '^' || ch === '$' || ch === '?' || ch === '{' || ch === '}') {
+            continue;
+        }
+        const quantEnd = readUnboundedQuantifier(i + 1);
+        if (quantEnd !== undefined) {
+            if (consider(ch ?? '')) return true;
+            i = quantEnd;
+        }
+    }
+    return false;
+}
+
+/**
  * 校验并构造正则（带 ReDoS 护栏）。
  *
  * @param pattern 正则源串（不包含修饰符）
@@ -221,9 +323,14 @@ export function validateRegexPattern(
     }
 
     // 危险模式检测在构造前执行：即使引擎能编译，运行时也可能灾难性回溯阻塞扩展宿主。
-    // 两层检测互补：正则启发式（净化后）覆盖平铺组内量词/分支（(a+)+、(a|a)+），
-    // 扫描式覆盖嵌套分组与裸量词原子（((a+)+)+、(?:a+|(?:ab))+ 等 `[^()]*` 无法跨过的形态）。
-    if (DANGEROUS_GROUP_QUANTIFIER.test(sanitizePatternForHeuristic(pattern)) || hasNestedQuantifiedGroups(pattern)) {
+    // 三层检测互补：正则启发式（净化后）覆盖平铺组内量词/分支（(a+)+、(a|a)+），
+    // 扫描式覆盖嵌套分组与裸量词原子（((a+)+)+、(?:a+|(?:ab))+ 等 `[^()]*` 无法跨过的形态），
+    // 相邻量词启发式覆盖无分组连续量词（a+a+、.*a.*b，M3）。
+    if (
+        DANGEROUS_GROUP_QUANTIFIER.test(sanitizePatternForHeuristic(pattern)) ||
+        hasNestedQuantifiedGroups(pattern) ||
+        hasAmbiguousAdjacentQuantifiers(pattern)
+    ) {
         return {
             ok: false,
             error: `Dangerous regular expression pattern detected (possible ReDoS): nested quantifiers like "(a+)+", "(a|a)+" or "(a{2,})*" are not allowed. Please simplify the pattern.`

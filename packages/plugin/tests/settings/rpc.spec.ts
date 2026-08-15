@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   GRAYCODE_CHANNEL,
+  REMOTE_BRIDGE_ENDPOINT_ALLOWLIST,
   createGrayCodeConfigHandler,
   registerGrayCodeChannel,
   type ChannelHostContextLike,
@@ -95,6 +96,30 @@ describe('/graycode browser bridge', () => {
     })
     expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', details: { issues: [] } } })
     expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('M1：未列入白名单的 Remote 端点被拒（fail-closed），已注册端点照常转发', async () => {
+    const { scope } = makeScopeStub()
+    const invoke = vi.fn(async () => ({ ok: true, value: 'x' }))
+    const handler = createGrayCodeConfigHandler(scope, GrayCodeSchema, { invoke })
+    // 白名单外的端点：不转发
+    const blocked = await handler('remote.invoke', { namespace: 'bogus', method: 'wipeAll', args: {} })
+    expect(blocked).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect((blocked as { ok: false; error: { message: string } }).error.message).toContain('not whitelisted')
+    expect(invoke).not.toHaveBeenCalled()
+    // 白名单内的端点：照常转发（浏览器面板实际消费的端点都列在 allowlist）
+    expect(REMOTE_BRIDGE_ENDPOINT_ALLOWLIST.has('checkpoints/previewRestore')).toBe(true)
+    const ok = await handler('remote.invoke', { namespace: 'checkpoints', method: 'previewRestore', args: {} })
+    expect(ok).toEqual({ ok: true, value: { ok: true, value: 'x' } })
+  })
+
+  it('L12：config.update 的非法嵌套值在 RPC 层以 bad-request 拒绝（不落到 scope.update）', async () => {
+    const { scope, update } = makeScopeStub()
+    const handler = createGrayCodeConfigHandler(scope, GrayCodeSchema)
+    const result = await handler('config.update', { patch: { memory: { wakeLines: 0 } } })
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect((result as { ok: false; error: { message: string } }).error.message).toContain('rejected by schema')
+    expect(update).not.toHaveBeenCalled()
   })
 })
 
