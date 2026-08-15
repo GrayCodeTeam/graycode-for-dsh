@@ -59,6 +59,8 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
   let active = false
   let detachListener: (() => void) | undefined
   let detachDisposedListener: (() => void) | undefined
+  /** L5：fiber 卸载回调只绑定一次（re-arm 不累积 ctx.effect 注册）。 */
+  let effectTied = false
 
   /** Whether this agent receives the registrations under the current mode. */
   const targets = (agent: Agent): boolean =>
@@ -92,6 +94,9 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
       }
     }
     installed.clear()
+    // L5：清空已注册定义，re-arm（dispose 后再次 register）不残留旧定义——重复 register
+    // 的去重/增量安装都基于当前 definitions，陈旧定义会永久占据去重索引（累积）。
+    definitions.length = 0
   }
 
   const activate = (): void => {
@@ -114,7 +119,12 @@ export function createScopedToolRegistrar(ctx: Context, mode: AgentScopeMode): S
       if (targets(agent)) install(agent)
     }
     // Bind teardown to this plugin's fiber so unload never leaks.
-    ctx.effect(() => () => deactivate())
+    // L5：effect 只绑定一次（effectTied 守卫），re-arm（dispose 后再次 register）不会
+    // 在同一插件实例上累积多余的卸载回调。
+    if (!effectTied) {
+      effectTied = true
+      ctx.effect(() => () => deactivate())
+    }
   }
 
   return {

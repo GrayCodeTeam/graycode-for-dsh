@@ -30,6 +30,8 @@ interface FakeCtx {
   }
   createdListeners: Array<(payload: { agent: Agent }) => void>
   disposedListeners: Array<(payload: { agent: Agent }) => void>
+  /** L5：记录 effect 注册次数（断言 re-arm 不累积）。 */
+  effectCount: number
 }
 
 function makeFakeScope(): FakeAgentScope {
@@ -101,11 +103,13 @@ function makeFakeCtx(agents: Array<{ agent: Agent; scope: FakeAgentScope }>): Fa
       throw new Error(`unexpected event ${event}`)
     },
     effect: setup => {
+      ctx.effectCount += 1
       const teardown = setup()
       return () => teardown()
     },
     createdListeners,
     disposedListeners,
+    effectCount: 0,
   }
   return ctx
 }
@@ -263,5 +267,29 @@ describe('createScopedToolRegistrar', () => {
     registrar.register(TWO_DEFS)
     registrar.dispose()
     expect(ctx.createdListeners).toHaveLength(0)
+  })
+
+  test('L5：dispose 后同实例 re-register 不累积 effect、不残留旧定义（re-arm 去重/合并）', () => {
+    const root = makeFakeAgent('root-1', true)
+    const ctx = makeFakeCtx([root])
+
+    const registrar = createScopedToolRegistrar(toContext(ctx), 'roots')
+    registrar.register(fakeDefinitions(2))
+    expect([...root.scope.registered.keys()]).toEqual(['fake_tool_0', 'fake_tool_1'])
+    expect(ctx.effectCount).toBe(1)
+
+    registrar.dispose()
+    expect(root.scope.registered.size).toBe(0)
+
+    // 同实例 re-arm：只装新定义（旧定义被清空），且 ctx.effect 仍只注册一次。
+    const rearmed = fakeDefinitions(2).map((definition, index) => ({
+      ...definition,
+      name: `new_tool_${index}`,
+    }))
+    registrar.register(rearmed)
+    expect([...root.scope.registered.keys()]).toEqual(['new_tool_0', 'new_tool_1'])
+    expect(ctx.effectCount).toBe(1)
+
+    registrar.dispose()
   })
 })

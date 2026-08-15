@@ -11,7 +11,6 @@
  * predictable shadowing target.
  */
 
-import * as path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { PERSONA_ORDER } from '@deepseek-ai/dsh-system-prompt'
@@ -23,6 +22,22 @@ export const PERSONA_SECTION_NAME = 'graycode:persona'
 
 /** Workspace variable the template may interpolate (`{{graycode_workspace}}`). */
 export const PERSONA_WORKSPACE_VARIABLE = 'graycode_workspace'
+
+/**
+ * 从 cwd 提取工作区显示名（persona `{{graycode_workspace}}` 插值，L6）。
+ * - 归一化反斜杠与尾部斜杠后取末段；
+ * - 空值、路径根（`/`）与盘符根（`C:/`）返回 undefined（安全降级：不退化空串，
+ *   也不把盘符当工作区名）；
+ * - UNC（`//server/share`）取共享名（share）。
+ */
+export function workspaceNameOf(cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined
+  const normalized = cwd.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (normalized === '') return undefined
+  const last = normalized.split('/').pop()
+  if (!last || last.length === 0 || /^[A-Za-z]:$/.test(last)) return undefined
+  return last
+}
 
 /** Built-in default persona (English, short; GrayCode capability statement). */
 export const DEFAULT_PERSONA_TEMPLATE = [
@@ -94,8 +109,9 @@ export function createPersonaRegistrar(ctx: Context, config: Config): PersonaReg
         text: template,
       }),
       agent.ctx.systemPrompt.variable(PERSONA_WORKSPACE_VARIABLE, () => {
-        const cwd = agent.session.header.cwd
-        return cwd ? path.basename(cwd.replace(/\\/g, '/')) : undefined
+        // L6：agent.session 可能缺失（判空安全降级）；盘符根/路径根无 basename 时
+        // 同样降级（不退化空串）。见 workspaceNameOf。
+        return workspaceNameOf(agent.session?.header?.cwd)
       }),
     ]
     installed.set(agent, disposers)

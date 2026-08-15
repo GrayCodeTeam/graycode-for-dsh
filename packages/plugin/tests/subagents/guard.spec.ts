@@ -175,6 +175,21 @@ describe('G1 hop 熔断（seam 包装）', () => {
     expect(calls.reportFrom).toHaveLength(2)
   })
 
+  it('L3：无 id 子代理按实例独立 hop 预算（不共用退化 "" 桶）', async () => {
+    const { seam, calls } = fakeSeam()
+    install({ seam, calls }, { maxHopDepth: 1 })
+    const opts: SubagentReportOptionsLike = { delivery: 'quiet', signal: new AbortController().signal }
+    const content = [{ type: 'text' as const, text: 'r' }]
+    const a = { id: undefined, session: undefined } as unknown as Agent
+    const b = { id: undefined, session: undefined } as unknown as Agent
+    // a 用尽自己的预算。
+    await expect(seam.reportFrom(a, content, opts)).resolves.toBe('mid:undefined')
+    await expect(seam.reportFrom(a, content, opts)).rejects.toBeInstanceOf(HopDepthExceededError)
+    // b 是独立线程：第一跳仍放行，不共享 a 的预算。
+    await expect(seam.reportFrom(b, content, opts)).resolves.toBe('mid:undefined')
+    expect(calls.reportFrom).toHaveLength(2)
+  })
+
   it('被拒投递不消耗预算：熔断后持续拒绝且原方法调用数不变', async () => {
     const { seam, calls } = fakeSeam()
     install({ seam, calls }, { maxHopDepth: 1 })
@@ -186,7 +201,7 @@ describe('G1 hop 熔断（seam 包装）', () => {
     expect(calls.followup).toHaveLength(1)
   })
 
-  it('subagent/start 重置线程预算；subagent/end 清理后重新计数', async () => {
+  it('subagent/start 仅重置无活跃预算的线程（resume 不绕开 hop 熔断，L4）；subagent/end 清理', async () => {
     const { seam, calls } = fakeSeam()
     const events = fakeEvents()
     install({ seam, calls }, { maxHopDepth: 2 }, events.port)
@@ -194,13 +209,14 @@ describe('G1 hop 熔断（seam 包装）', () => {
     await seam.followup(...args)
     await seam.followup(...args)
     await expect(seam.followup(...args)).rejects.toBeInstanceOf(HopDepthExceededError)
-    // 新激活纪元：预算重置，可继续投递。
+    // 活跃线程的再次 start 是 resume：预算不得被重置（否则 resume+ping-pong 无限绕开熔断）。
+    events.emit('subagent/start', { id: sid('child-1') })
+    await expect(seam.followup(...args)).rejects.toBeInstanceOf(HopDepthExceededError)
+    // 结算：清理计数（内存回收 + 再起线程）；后续 start 因无活跃预算而拿到干净预算。
+    events.emit('subagent/end', { id: sid('child-1') })
     events.emit('subagent/start', { id: sid('child-1') })
     await expect(seam.followup(...args)).resolves.toBe('mid:child-1')
-    // 结算：清理计数（内存回收 + 再起线程）。
-    events.emit('subagent/end', { id: sid('child-1') })
-    await expect(seam.followup(...args)).resolves.toBe('mid:child-1')
-    expect(calls.followup).toHaveLength(4)
+    expect(calls.followup).toHaveLength(3)
   })
 
   it('maxHopDepth=0 关闭熔断（不拦截）', async () => {
@@ -331,6 +347,21 @@ describe('G3 并发上限（seam 包装）', () => {
     ] as never
     const count = countRunningChildrenViaList(seam)
     await expect(count(sid('parent-1'))).resolves.toBe(2)
+  })
+
+  it('M1：listChildren 滞后（countRunning 恒 0）时同步占用仍封顶并发（消除 check-then-act 窗口）', async () => {
+    const fake = fakeSeam()
+    // run.result 永不结算 → 占用保持，模拟「新子代理尚未出现在 listChildren」。
+    fake.seam.start = vi.fn(async (name: string, request: SubagentStartRequestLike) => {
+      fake.calls.start.push([name, request])
+      return { id: sid('run-1'), result: new Promise<never>(() => {}), dispose: async () => {} }
+    }) as SubagentsSeamLike['start']
+    install({ seam: fake.seam, calls: fake.calls }, { maxConcurrent: 1, countRunning: async () => 0 })
+    const request = { parent: fakeAgent('parent-1'), signal: new AbortController().signal }
+    await expect(fake.seam.start('spawn', request)).resolves.toMatchObject({ id: 'run-1' })
+    // 第二次委派：countRunning 仍报 0，但本地占用已到上限 → 拒绝。
+    await expect(fake.seam.start('spawn', request)).rejects.toBeInstanceOf(MaxConcurrentSubagentsError)
+    expect(fake.calls.start).toHaveLength(1)
   })
 })
 
