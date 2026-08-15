@@ -4,7 +4,7 @@ import type { GrayCodeConfig } from './types.ts'
 
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },
-  memory: { dataRoot: '', wakeLines: 96, entryChars: 280, partChars: 20_000, partLines: 500, agentScope: 'roots' },
+  memory: { dataRoot: '', wakeLines: 96, entryChars: 280, partChars: 20_000, partLines: 500, agentScope: 'roots', enabled: true, systemPrompt: '' },
   checkpoints: {
     dataRoot: '',
     maxCheckpoints: -1,
@@ -21,9 +21,12 @@ export const DEFAULTS: GrayCodeConfig = {
     dataRoot: '',
     enabled: true,
     agentScope: 'roots',
-    sendHistoryThoughts: false,
+    sendHistoryThoughts: true,
     modeToolPolicy: true,
-    requestLayer: false,
+    requestLayer: true,
+    overrideHostPrompt: true,
+    dynamicTodo: true,
+    dynamicMemory: true,
   },
   migration: { dataRoot: '', enabled: false, allowLegacyReaders: false },
   stagedDiff: { dataRoot: '', enabled: false, agentScope: 'roots' },
@@ -33,5 +36,5 @@ export const DEFAULTS: GrayCodeConfig = {
   todo: { enabled: true, agentScope: 'roots' },
   subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
   notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
-  thoughts: { enabled: false, sendHistoryThoughts: false },
+  thoughts: { enabled: true, sendHistoryThoughts: true },
 }
