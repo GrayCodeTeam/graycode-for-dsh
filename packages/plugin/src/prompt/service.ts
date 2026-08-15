@@ -57,7 +57,7 @@ export interface PromptSettingsConfig {
 const BUILTIN_ROLE: readonly PromptEntryRole[] = ['system', 'user', 'assistant', 'chat_history']
 
 /** Legacy (Gray Code 1.5.4) entry fields with no new-format equivalent: dropped on import. */
-const LEGACY_ENTRY_DROPPED_FIELDS = ['name'] as const
+const LEGACY_ENTRY_DROPPED_FIELDS = [] as const
 
 /**
  * Legacy (Gray Code 1.5.4) mode fields with no new-format equivalent: dropped
@@ -393,6 +393,10 @@ function parseEntryRecord(
   if (typeof content !== 'string') {
     throw new PromptError('entry content must be a string', errorCode)
   }
+  const name = record.name
+  if (name !== undefined && typeof name !== 'string') {
+    throw new PromptError('entry name must be a string', errorCode)
+  }
   const fakeThought = record.fakeThought
   if (fakeThought !== undefined && typeof fakeThought !== 'string') {
     throw new PromptError('entry fakeThought must be a string', errorCode)
@@ -410,6 +414,7 @@ function parseEntryRecord(
     role: role as PromptEntryRole,
     order: typeof order === 'number' ? order : 0,
     enabled: record.enabled !== false,
+    name: typeof name === 'string' && name.trim().length > 0 ? name.trim() : undefined,
     content: normalizeTemplate(content),
     fakeThought: fakeThought !== undefined ? normalizeTemplate(fakeThought) : undefined,
   }
@@ -806,7 +811,9 @@ export class PromptSettingsService {
         id: newModeId(),
         name,
         kind: 'custom',
-        template: normalizeTemplate(input.template ?? ''),
+        // P-06：UI 不再提供模板输入，空模板回退内置 code 模板，避免新模式空 section
+        // 被注入器瀑布丢弃（overrideHostPrompt 下模型看不到任何模式内容）。
+        template: normalizeTemplate(input.template ?? '') || BUILTIN_MODE_TEMPLATES.code,
         customPrefix: input.customPrefix !== undefined ? normalizeTemplate(input.customPrefix) : undefined,
         customSuffix: input.customSuffix !== undefined ? normalizeTemplate(input.customSuffix) : undefined,
         toolPolicy: normalizeToolPolicy(input.toolPolicy, PromptErrorCode.INVALID_PAYLOAD),

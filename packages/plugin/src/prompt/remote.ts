@@ -116,6 +116,10 @@ function parsePromptEntry(raw: unknown, index: number): PromptEntry {
   if (typeof content !== 'string') {
     throw new PromptError(`promptEntries[${index}].content must be a string`, PromptErrorCode.INVALID_PAYLOAD)
   }
+  const name = record.name
+  if (name !== undefined && typeof name !== 'string') {
+    throw new PromptError(`promptEntries[${index}].name must be a string`, PromptErrorCode.INVALID_PAYLOAD)
+  }
   const fakeThought = record.fakeThought
   if (fakeThought !== undefined && typeof fakeThought !== 'string') {
     throw new PromptError(`promptEntries[${index}].fakeThought must be a string`, PromptErrorCode.INVALID_PAYLOAD)
@@ -134,6 +138,7 @@ function parsePromptEntry(raw: unknown, index: number): PromptEntry {
     role: role as PromptEntryRole,
     order: typeof order === 'number' ? order : 0,
     enabled: enabled !== false,
+    name: typeof name === 'string' && name.trim().length > 0 ? name.trim() : undefined,
     content,
     fakeThought: fakeThought !== undefined ? fakeThought : undefined,
   }

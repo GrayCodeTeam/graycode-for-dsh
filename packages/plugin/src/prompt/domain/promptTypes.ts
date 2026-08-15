@@ -14,6 +14,11 @@ export type PromptEntryRole = 'system' | 'user' | 'assistant' | 'chat_history'
 export interface PromptEntry {
   /** Stable per-mode entry id (UI and manual edits reference it). */
   id: string
+  /**
+   * Optional display name (UI only; not part of injection/fingerprint).
+   * Defaults to "Prompt N" / "Chat History" in the UI when absent.
+   */
+  name?: string
   role: PromptEntryRole
   /** Ascending render order within the mode. */
   order: number

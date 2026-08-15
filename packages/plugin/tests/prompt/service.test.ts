@@ -203,6 +203,8 @@ describe('导入 / 导出', () => {
     expect(assistant.role).toBe('assistant')
     expect(assistant.content).toBe('body')
     expect(assistant.fakeThought).toBe('think')
+    // 条目显示名保留（对齐原插件 promptEntries.name）
+    expect(assistant.name).toBe('Prompt 1')
 
     // D-4：toolPolicy / toolPolicyCustomized 被保存（不再丢弃）
     expect(mode.toolPolicy).toEqual(['read_file'])
@@ -224,10 +226,9 @@ describe('导入 / 导出', () => {
     expect(result.warnings).toEqual(expect.arrayContaining([
       'mode "Old Mode": dropped legacy field(s): icon, promptAssemblyMode, dynamicContextStrategy',
       'mode "Old Mode": mapped legacy dynamicTemplate (enabled) to a user preset entry',
-      'entry dropped legacy field(s): name',
       'entry mapped legacy type:chat_history to role:chat_history',
     ]))
-    expect(result.warnings.filter(w => w.includes('dropped legacy field(s)'))).toHaveLength(3) // 1 条模式级 + 2 条条目级（两个条目都带 name）
+    expect(result.warnings.filter(w => w.includes('dropped legacy field(s)'))).toHaveLength(1) // 仅模式级（条目 name 现在保留）
   })
 
 
