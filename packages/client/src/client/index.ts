@@ -18,6 +18,7 @@ import {
 } from './settings/locales.ts'
 import { GrayCodeSettingsSection, type GrayCodeSettingsSectionInjected } from './settings/GrayCodeSettingsSection.tsx'
 import { createGrayCodeStore } from './settings/store.ts'
+import { createGrayRemoteInvoker } from './settings/remote.ts'
 import { createWorkflowNodeDefinition } from './workflowNode/definition.ts'
 import {
   GRAYCODE_WORKFLOW_NS,
@@ -83,13 +84,10 @@ import { notificationsFromWindow } from './notifications/fold.ts'
 export { createWorkflowNodeRenderer, isWorkflowChatNode } from './workflowNode/renderer.tsx'
 export type { WorkflowNodeRenderer, WorkflowNodeRendererOptions } from './workflowNode/renderer.tsx'
 
-// Phase 4 management surfaces (P4-02~P4-07): DSH rc.6 exposes no management-
-// view slot to this package and no browser→host remote channel (Typert is
-// host-only today), so every surface ships as a contract-driven consumer +
-// mountable component. The host mounts them once a view container exists;
-// until then the locale namespaces are registered here (safe, additive) and
-// the components/data-source factories are re-exported for the mount recipe
-// in each surface's README.
+// Phase 4 management surfaces (P4-02~P4-07): DSH rc.6 exposes no dedicated
+// management-view slot, so these remain mountable exports. Browser→host calls
+// are now available through the trusted `/graycode` bridge; the native
+// settings section uses it directly for checkpoint management.
 export { WorkflowOverviewPanel } from './workflowOverview/WorkflowOverviewPanel.tsx'
 export type { WorkflowOverviewPanelProps } from './workflowOverview/WorkflowOverviewPanel.tsx'
 export { MemoryManagePanel } from './memoryManage/MemoryManagePanel.tsx'
@@ -235,6 +233,8 @@ export function apply(ctx: ClientContext): void {
   // through the slot registration's inject face and never touches ctx itself.
   const connection = ctx.get('connection') as ConnectionHandle
   const store = createGrayCodeStore(connection)
+  const remote = createGrayRemoteInvoker(connection)
+  void store.refresh()
   const localeFace = ctx.locale as unknown as GrayCodeSettingsSectionInjected['locale']
   const t = ctx.locale.bind(GRAYCODE_SETTINGS_NS) as GrayCodeSettingsSectionInjected['t']
   // The host config document may change outside the panel (settings file
@@ -250,7 +250,13 @@ export function apply(ctx: ClientContext): void {
         order: 200,
         label: () => t('nav'),
         locale: GRAYCODE_SETTINGS_NS,
-        inject: (): GrayCodeSettingsSectionInjected => ({ t, store, locale: localeFace }),
+        inject: (): GrayCodeSettingsSectionInjected => ({
+          t,
+          store,
+          locale: localeFace,
+          remote,
+          defaultWorkspace: connection.hostDescription.getSnapshot()?.cwd,
+        }),
       },
       GrayCodeSettingsSection,
     ))

@@ -7,7 +7,6 @@
  *
  * - `refresh()`：重新拉取全量配置（`connection/reset` 时也会触发）；
  * - `patch()`：推送顶层浅补丁，宿主合并后回读全量；
- * - `replace()`：以导入的 JSON 文档整体替换用户层；
  * - `reset()`：丢弃用户层，回落到默认值。
  */
 
@@ -31,8 +30,9 @@ export interface GrayCodeStore {
   /** uSES getSnapshot 侧。 */
   getSnapshot(): GrayCodeStoreState
   refresh(): Promise<void>
+  /** Queue one field edit and rebase it on the latest acknowledged snapshot. */
+  set(path: readonly string[], value: unknown): Promise<void>
   patch(patch: GrayCodePatch): Promise<void>
-  replace(config: GrayCodeConfig): Promise<void>
   reset(): Promise<void>
 }
 
@@ -68,9 +68,12 @@ class StoreImpl implements GrayCodeStore {
     await this.call('config.update', { patch })
   }
 
-  /** 以一份导入的文档整体替换用户层。 */
-  async replace(config: GrayCodeConfig): Promise<void> {
-    await this.call('config.replace', config)
+  /** Recompute the module patch only when this edit reaches the write queue. */
+  async set(path: readonly string[], value: unknown): Promise<void> {
+    await this.call('config.update', () => {
+      if (this.snapshot.status !== 'ready') throw new Error('graycode: configuration is not ready')
+      return { patch: setAtPath(this.snapshot.config, path, value).patch }
+    })
   }
 
   /** 丢弃用户层；文档回落到默认值。 */
@@ -79,7 +82,7 @@ class StoreImpl implements GrayCodeStore {
   }
 
   private pump(): Promise<void> {
-    this.queue = this.queue.then(async () => {
+    this.queue = this.queue.catch(() => undefined).then(async () => {
       if (!this.invalidated) return
       this.invalidated = false
       try {
@@ -100,24 +103,28 @@ class StoreImpl implements GrayCodeStore {
     return this.queue
   }
 
-  private async call(endpoint: string, payload: unknown): Promise<void> {
-    try {
-      const result = await this.connection.rpc.call(GRAYCODE_CHANNEL, endpoint, payload)
-      if (result.ok) {
-        this.snapshot = { status: 'ready', config: result.value as GrayCodeConfig }
-        this.invalidated = false
+  private call(endpoint: string, payload: unknown | (() => unknown)): Promise<void> {
+    this.queue = this.queue.catch(() => undefined).then(async () => {
+      try {
+        const resolvedPayload = typeof payload === 'function' ? payload() : payload
+        const result = await this.connection.rpc.call(GRAYCODE_CHANNEL, endpoint, resolvedPayload)
+        if (result.ok) {
+          this.snapshot = { status: 'ready', config: result.value as GrayCodeConfig }
+          this.invalidated = false
+          this.notify()
+          return
+        }
+        throw new Error(result.error.message)
+      } catch (error) {
+        this.snapshot = {
+          status: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        }
         this.notify()
-        return
+        throw error
       }
-      throw new Error(result.error.message)
-    } catch (error) {
-      this.snapshot = {
-        status: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      }
-      this.notify()
-      throw error
-    }
+    })
+    return this.queue
   }
 
   private notify(): void {
@@ -141,8 +148,8 @@ export function createGrayCodeStore(connection: ConnectionHandle): GrayCodeStore
     subscribe: listener => store.subscribe(listener),
     getSnapshot: () => store.getSnapshot(),
     refresh: () => store.refresh(),
+    set: (path, value) => store.set(path, value),
     patch: patch => store.patch(patch),
-    replace: config => store.replace(config),
     reset: () => store.reset(),
   }
 }

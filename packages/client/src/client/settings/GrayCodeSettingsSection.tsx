@@ -1,15 +1,15 @@
 /**
  * 挂载在 DSH 原生设置页的 Gray Code 设置分区（`settings.section` 槽位，
- * id `graycode`）。渲染 17 个 Gray-Code 分类的页签栏 + 可滚动内容列；
+ * id `graycode`）。渲染 6 个真实 GrayCode 功能分区 + 可滚动内容列；
  * 所有数据都走插件自己的 `/graycode` 配置通道（DSH settings scope 对第三方
  * namespace 有白名单，见本目录 README）。
  */
 
-import { useCallback, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { CATEGORIES } from './pages.tsx'
 import type { GcTranslate } from './fields.tsx'
-import { setAtPath, useGrayCodeStore, type GrayCodeStore } from './store.ts'
+import { useGrayCodeStore, type GrayCodeStore } from './store.ts'
 import {
   buttonStyle,
   contentStyle,
@@ -24,7 +24,7 @@ import {
   tabStyle,
   tabsStyle,
 } from './styles.ts'
-import type { GrayCodeConfig } from './types.ts'
+import type { GrayRemoteInvoke } from './types.ts'
 
 /** locale 面的最小结构（结构性；locale 包可能漂移）。 */
 export interface GrayCodeLocaleFace {
@@ -37,6 +37,8 @@ export interface GrayCodeSettingsSectionInjected {
   t: GcTranslate
   store: GrayCodeStore
   locale: GrayCodeLocaleFace
+  remote: GrayRemoteInvoke
+  defaultWorkspace?: string
 }
 
 /** 宿主 owner props（设置外壳）+ 注入面。 */
@@ -45,17 +47,11 @@ export interface GrayCodeSettingsSectionProps extends GrayCodeSettingsSectionInj
   close?: () => void
 }
 
-function isPlausibleConfig(value: unknown): value is GrayCodeConfig {
-  if (typeof value !== 'object' || value === null) return false
-  const config = value as Record<string, unknown>
-  return typeof config.channels === 'object'
-    && typeof config.toolsEnabled === 'object'
-    && typeof config.subagents === 'object'
-    && typeof config.general === 'object'
-}
-
-export function GrayCodeSettingsSection({ t, store, locale }: GrayCodeSettingsSectionProps): ReactNode {
+export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorkspace }: GrayCodeSettingsSectionProps): ReactNode {
   const state = useGrayCodeStore(store)
+  useEffect(() => {
+    void store.refresh()
+  }, [store])
   // 活动 locale 变化时重新渲染，让文案就地刷新。
   useSyncExternalStore(
     listener => locale.subscribe(listener),
@@ -66,26 +62,14 @@ export function GrayCodeSettingsSection({ t, store, locale }: GrayCodeSettingsSe
 
   const handleChange = useCallback((path: readonly string[], value: unknown): void => {
     if (state.status !== 'ready') return
-    const { patch } = setAtPath(state.config, path, value)
-    void store.patch(patch).catch(() => undefined)
+    void store.set(path, value).catch(() => undefined)
   }, [state, store])
-
-  const handleImport = useCallback((value: unknown): void => {
-    if (!isPlausibleConfig(value)) {
-      window.alert(t('actions.importError'))
-      return
-    }
-    void store.replace(value).then(
-      () => window.alert(t('actions.importSuccess')),
-      () => window.alert(t('actions.importError')),
-    )
-  }, [store, t])
 
   const handleReset = useCallback((): void => {
     if (!window.confirm(t('actions.resetConfirm'))) return
     void store.reset().then(
       () => window.alert(t('actions.resetDone')),
-      () => window.alert(t('actions.importError')),
+      () => window.alert(t('error')),
     )
   }, [store, t])
 
@@ -128,8 +112,9 @@ export function GrayCodeSettingsSection({ t, store, locale }: GrayCodeSettingsSe
           t,
           config: state.config,
           onChange: handleChange,
-          onImport: handleImport,
           onReset: handleReset,
+          remote,
+          defaultWorkspace,
         })}
       </div>
     </div>
