@@ -71,6 +71,74 @@ restore 执行前**默认**先创建一个新 checkpoint 作为可恢复保护�
 - 实现位置：`service.ts` 的 `createProtectionPoint`（复用 `executeBackup`，在已持有的工作区
   锁内直接执行，不再二次取锁，避免同工作区排队自锁）。
 
+## 自动存档（对齐审计 C-01/C-02/C-03，host 侧，已落地）
+
+默认开启：工具执行前后 / 新用户回合 / 模型回合关闭时自动创建存档（origin='auto'，client 列表以徽标区分）。
+
+### Config（index.ts，schemastery 默认值）
+
+```ts
+enabled: boolean            // 默认 true；false → 自动存档停 + 7 个模型工具不注册（remote 端点不受影响）
+autoCheckpoint: boolean     // 默认 true（enabled 子开关，只控自动存档）
+modelToolsEnabled: boolean  // 默认 true；false → 7 个模型工具不注册（自动存档仍可用）
+beforeTools: string[]       // 默认 DSH 版 24 工具（见 DEFAULT_AUTO_CHECKPOINT_TOOLS）
+afterTools: string[]        // 默认同上
+messageCheckpoint: {
+  beforeMessages: ('user'|'model')[]   // 默认 ['user']
+  afterMessages: ('user'|'model')[]    // 默认 []
+  modelOuterLayerOnly: boolean          // 默认 true（仅根 agent 存档）
+  mergeUnchangedCheckpoints: boolean    // 默认 true（无变更不重复建档）
+}
+```
+
+默认 beforeTools/afterTools（DSH 版 24 工具）＝ 7 个 DSH host 内建工具（`write` / `edit` /
+`str_replace_editor` / `bash` / `pwsh` / `grep` / `glob`，deepseek-harness 源码核实）＋ 本插件工具
+（`delete_code`、media 5 工具、workflows 11 工具，modeToolsPolicy 白名单同名核实）。
+原插件 `insert_code` / `create_directory` / `delete_file` / `search_in_files` / `execute_command`
+在 DSH 无同名工具，由 DSH 内建工具承担对应语义（映射见 `DEFAULT_AUTO_CHECKPOINT_TOOLS` 注释）。
+
+### 事件挂点（rc.6 .d.ts 核实）与语义
+
+| 挂点 | payload 字段 | 触发条件 | 存档 title |
+| --- | --- | --- | --- |
+| `tools/execute`（waterfall，dsh-tools index.d.ts:49） | 工具名 **`exec.name`**（非 toolName）、`exec.agent?`、`exec.signal` | toolName ∈ beforeTools → **next() 前**创建；∈ afterTools → **next() 返回后**创建 | `auto: before <tool>` / `auto: after <tool>` |
+| `agent/pre-step`（waterfall，runtime-types.d.ts:235） | `agent`、`turn`、`signal` | turn 变化（含首次见该 agent）且 beforeMessages 含 'user' | `auto: user message` |
+| `agent/turn-stopping`（serial，runtime-types.d.ts:301） | `agent`、`turn`、`signal` | afterMessages 含 'model' | `auto: model message` |
+
+- 全部自动存档 `origin='auto'`、`service.createCheckpoint(cwd, { title, origin: 'auto', signal })`；
+  cwd 取 `agent.session.header.cwd`（缺省回退 `process.cwd()`，与 tools.ts resolveCwd 口径一致）。
+- 失败降级：任何存档创建失败只 `warn`，绝不阻断工具执行 / 步骤决策（`next()` 结果原样返回，
+  绝不二次调用 `next()`）。
+- 串行化：同 agent 的存档创建按到达顺序执行（runSerialized，参考 memory/autoInject.ts），不重叠。
+- modelOuterLayerOnly=true：三个挂点都先判根 agent（`ctx.agents.roots()`）；无 agent 的工具调用
+  （agent-less）一律跳过。
+
+### 差异文档化（有意取舍）
+
+1. **DSH 无「工具批次」事件 → 逐工具存档**（不做批内去重）：原插件 tool_batch 优化不移植
+   （审计 C-03 的 batchToolNames/affectedPaths 语义）。默认 beforeTools=afterTools=24 工具时，
+   一次 `write` 会创建 before + after 两份存档。
+2. **beforeMessages 仅 'user' 有挂点**（pre-step 回合边界）；**afterMessages 仅 'model' 有挂点**
+   （turn-stopping）。配置其它组合当前不产生存档（字段为未来挂点预留）。
+3. **mergeUnchangedCheckpoints 判定**（autoCheckpoint.ts `rollbackIfUnchanged`）：创建后判定——
+   ① 启发式门：`type==='incremental' && sizeBytes===0`（本次无新写 blob 字节）；
+   ② 确认：列表取本档与基快照 contentHash，相等才回滚（内容回退到既有 blob 的 0 新字节
+   变更不会被误删）；本档/基快照不在页内或读取失败 → 回退启发式判定。
+   回滚走 `deleteCheckpoint`（**不 force**）：期间有后继存档引用本档被链保护拒绝时保留 + warn。
+   已知残留差异：判定依赖 records 读取，极端并发（回滚前其他 agent 已基于本档建档）下
+   存档保留，属可接受噪声而非数据丢失。
+4. **origin 字段**：`CheckpointSummary.origin: 'auto' | 'manual'` 新增，records.json 持久化；
+   旧记录缺 origin → 读取时容错为 `'manual'`。remote `checkpoints/create` 与工具 `checkpoint_create`
+   保持 manual（不加参数）。`checkpoint_list` 工具 output schema 已补 origin 字段
+   （schema `additionalProperties:false`，返回值必须声明）。
+
+### 门控
+
+- `enabled=false` → 自动存档引擎不 attach + 工具不注册；remote 查询/命令端点仍可用（client 列表不受影响）。
+- `modelToolsEnabled=false` → 工具不注册，自动存档照常。
+- `autoCheckpoint=false` → 引擎不 attach，工具照常注册。
+- 引擎 disposer 并入 apply 返回的清理函数（与 registrar/service 一起释放）。
+
 ## 跨进程文件锁（CheckpointOperationLock，CP-LOCK-5）
 
 工作区级互斥从进程内 Map 升级为**跨进程文件锁**（API 不变）：

@@ -1,6 +1,7 @@
 /** Standalone defaults used by settings-domain unit tests. */
 
 import type { GrayCodeConfig } from './types.ts'
+import { DEFAULT_AUTO_CHECKPOINT_TOOLS } from '../checkpoints/index.ts'
 
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },
@@ -14,6 +15,17 @@ export const DEFAULTS: GrayCodeConfig = {
     blobGracePeriodDays: 7,
     restoreProtectionPoint: true,
     agentScope: 'roots',
+    enabled: true,
+    autoCheckpoint: true,
+    modelToolsEnabled: true,
+    beforeTools: [...DEFAULT_AUTO_CHECKPOINT_TOOLS],
+    afterTools: [...DEFAULT_AUTO_CHECKPOINT_TOOLS],
+    messageCheckpoint: {
+      beforeMessages: ['user'],
+      afterMessages: [],
+      modelOuterLayerOnly: true,
+      mergeUnchangedCheckpoints: true,
+    },
   },
   branches: { dataRoot: '', agentScope: 'roots' },
   persona: { enabled: true, agentScope: 'roots', template: '' },

@@ -33,6 +33,8 @@ export interface CheckpointSummary {
     backupBytes: number;
     excludedCount: number;
     manifestVersion: number;
+    /** 存档来源：'auto' = 自动存档引擎（工具 before/after、消息边界）；'manual' = 工具/端点显式创建（缺省） */
+    origin: 'auto' | 'manual';
 }
 
 /** 带磁盘占用的存档摘要（withSize 时下发；size 优先用 backupBytes） */
@@ -378,6 +380,8 @@ export interface CheckpointRecord {
     status?: 'active';
     /** 最近一次发布的事件（如 `checkpoint-created:<id>@<timestamp>`） */
     lastEvent?: string;
+    /** 存档来源（对齐审计 C-01/C-02/C-03）：'auto' = 自动存档引擎；缺省（旧记录）='manual' */
+    origin?: 'auto' | 'manual';
 }
 
 /** 批量删除检查点的请求项 */

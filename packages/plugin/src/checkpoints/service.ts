@@ -428,7 +428,7 @@ export class CheckpointService {
      */
     async createCheckpoint(
         cwd: string | undefined,
-        options?: { title?: string; notes?: string; signal?: AbortSignal }
+        options?: { title?: string; notes?: string; signal?: AbortSignal; origin?: 'auto' | 'manual' }
     ): Promise<CreateCheckpointResult | null> {
         const roots = this.resolveRuntimeRoots(cwd);
         const conversationId = roots[0]?.id ?? '';
@@ -452,7 +452,8 @@ export class CheckpointService {
                         storage,
                         title: options?.title,
                         notes: options?.notes,
-                        signal
+                        signal,
+                        origin: options?.origin
                     });
                 },
                 signal
@@ -486,6 +487,8 @@ export class CheckpointService {
         title?: string;
         notes?: string;
         signal?: AbortSignal;
+        /** 存档来源（缺省 'manual'；自动存档引擎传 'auto'） */
+        origin?: 'auto' | 'manual';
     }): Promise<CreateCheckpointResult | null> {
         const { conversationId, roots, checkpointId, opId, storage } = params;
         const signal = params.signal;
@@ -679,6 +682,7 @@ export class CheckpointService {
                 description: description || undefined,
                 type: isIncremental ? 'incremental' : 'full',
                 baseCheckpointId: isIncremental ? prevState?.checkpointId : undefined,
+                origin: params.origin ?? 'manual',
                 changes,
                 // CP-HASH-REUSE：持久化快照 stat（size/mtimeNs/mode），供下一次快照
                 // 构建 stat 级哈希复用（复用判定在 CheckpointSnapshotBuilder.statAndHashEntry）；
@@ -899,7 +903,8 @@ export class CheckpointService {
             fileCount: record.fileCount,
             backupBytes: typeof record.backupBytes === 'number' ? record.backupBytes : 0,
             excludedCount: typeof record.excludedCount === 'number' ? record.excludedCount : 0,
-            manifestVersion: typeof record.manifestVersion === 'number' ? record.manifestVersion : 0
+            manifestVersion: typeof record.manifestVersion === 'number' ? record.manifestVersion : 0,
+            origin: record.origin ?? 'manual'
         };
     }
 
