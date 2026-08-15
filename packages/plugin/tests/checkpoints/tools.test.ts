@@ -29,6 +29,8 @@ interface CreateToolResult {
   fileCount: number
   sizeBytes: number
   excludedCount: number
+  baseCheckpointId?: string
+  description?: string
 }
 
 interface ListToolResult {
@@ -93,6 +95,12 @@ describe('checkpoint 工具层', () => {
       expect(result.excludedCount).toBe(1) // node_modules 目录 1 条排除
       expect(result.sizeBytes).toBeGreaterThan(0)
 
+      // H-1：工具层返回无 undefined 值键（lossless JSON）——description 存在、baseCheckpointId 省略
+      expect(result.description).toBe('my title — my notes')
+      expect(result.baseCheckpointId).toBeUndefined()
+      expect('baseCheckpointId' in result).toBe(false)
+      expect(JSON.parse(JSON.stringify(result))).toEqual(result)
+
       // render 纯函数投影：JSON 文本包含 checkpointId
       const content = create.output.render({}, result as unknown as JsonValue)
       expect(content[0]!.type).toBe('text')
@@ -125,6 +133,7 @@ describe('checkpoint 工具层', () => {
       expect(all.total).toBe(2)
       expect(all.items).toHaveLength(2)
       expect(all.nextCursor).toBeUndefined()
+      expect(JSON.parse(JSON.stringify(all))).toEqual(all)
 
       const page = (await list.execute({ workspace: workspaceDir, limit: 1 }, makeExec(workspaceDir))) as ListToolResult
       expect(page.items).toHaveLength(1)
@@ -154,6 +163,7 @@ describe('checkpoint 工具层', () => {
       expect(p.preview.restored).toBe(1)
       expect(p.previewToken).toBeTruthy()
       expect(p.baselineDigest).toMatch(/^[a-f0-9]{64}$/)
+      expect(JSON.parse(JSON.stringify(p))).toEqual(p)
 
       const restore = tools.get('checkpoint_restore')!
       // 无 token：结构化失败（error 以稳定前缀开头，文案仅作补充）
@@ -172,6 +182,8 @@ describe('checkpoint 工具层', () => {
       )) as RestoreToolResult
       expect(restored.success).toBe(true)
       expect(restored.restored).toBe(1)
+      expect('error' in restored).toBe(false)
+      expect(JSON.parse(JSON.stringify(restored))).toEqual(restored)
       expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('original')
     } finally {
       service.dispose()

@@ -1048,7 +1048,7 @@ describe('CheckpointService restore protection point (PLAN_V2 §7.6)', () => {
 })
 
 describe('CheckpointService stat-level hash reuse (CP-HASH-REUSE)', () => {
-  test('unchanged files are not re-hashed when size+mtime are unchanged; changed files are re-hashed', async () => {
+  test('stat reuse provides candidate hash; blob reuse re-verifies source content (H-11b)', async () => {
     const { workspaceDir, service } = await makeEnv()
     try {
       await writeFile(workspaceDir, 'a.txt', 'v1')
@@ -1064,7 +1064,10 @@ describe('CheckpointService stat-level hash reuse (CP-HASH-REUSE)', () => {
       expect(firstRecord.fileStats![`${wsId}/a.txt`]).toMatchObject({ size: 2 })
       expect(typeof firstRecord.fileStats![`${wsId}/b.txt`]!.mode).toBe('number')
 
-      // 只改 a.txt：b.txt 应复用哈希（不重新读盘哈希），a.txt 重算
+      // 只改 a.txt：快照构建对 b.txt 做 stat 级复用——H-11b 修复后 stat 命中仍重哈希
+      // 确认内容（builder 侧 1 次），blob 已存在时 service 复用前再哈希比对（service 侧
+      // 1 次），共 2 次；结果一致仍复用（不新增 blob）。a.txt 变化 → builder 重算 1 次，
+      // 新 blob 不存在 → 无 service 侧复用校验。
       await writeFile(workspaceDir, 'a.txt', 'v2')
       const hashing = vi.mocked(fileHashing.hashFileStreaming)
       hashing.mockClear()
@@ -1074,8 +1077,8 @@ describe('CheckpointService stat-level hash reuse (CP-HASH-REUSE)', () => {
 
       const bPath = path.join(workspaceDir, 'b.txt')
       const aPath = path.join(workspaceDir, 'a.txt')
-      expect(hashing.mock.calls.some(call => call[0] === bPath)).toBe(false) // 未变化 → 未重哈希
-      expect(hashing.mock.calls.some(call => call[0] === aPath)).toBe(true) // 变化 → 重哈希
+      expect(hashing.mock.calls.filter(call => call[0] === bPath)).toHaveLength(2) // stat 复用重哈希 + blob 复用前校验
+      expect(hashing.mock.calls.filter(call => call[0] === aPath)).toHaveLength(1) // 变化 → 重算
 
       // 复用结果正确：b.txt hash 与第一份一致；a.txt hash 变化；changes 只含 a.txt
       const wsDir = path.join(service.checkpointsDir, wsId)
@@ -1085,6 +1088,238 @@ describe('CheckpointService stat-level hash reuse (CP-HASH-REUSE)', () => {
       expect(m2.files[`${wsId}/a.txt`].hash).not.toBe(m1.files[`${wsId}/a.txt`].hash)
       expect(m2.changes).toHaveLength(1)
       expect(m2.changes[0]).toMatchObject({ path: `${wsId}/a.txt`, type: 'modified' })
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService lossless JSON tool returns (H-1)', () => {
+  test('create/list/preview/restore results contain no undefined-valued keys', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+
+      // create：full 类型 → baseCheckpointId/description 未定义 → 键省略（lossless JSON）
+      expect('baseCheckpointId' in created!).toBe(false)
+      expect('description' in created!).toBe(false)
+      expect(JSON.parse(JSON.stringify(created))).toEqual(created)
+
+      // list：摘要可选字段（messageNodeId/baseCheckpointId）与 nextCursor 省略
+      const listed = await service.listCheckpoints(workspaceDir)
+      const item = listed.items[0]!
+      expect('messageNodeId' in item).toBe(false)
+      expect('baseCheckpointId' in item).toBe(false)
+      expect('nextCursor' in listed).toBe(false)
+      expect(JSON.parse(JSON.stringify(listed))).toEqual(listed)
+
+      // preview：成功路径无 undefined 值键（unbackedPaths/excludedNote 省略）
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      expect('unbackedPaths' in preview.preview).toBe(false)
+      expect('excludedNote' in preview.preview).toBe(false)
+      expect(JSON.parse(JSON.stringify(preview))).toEqual(preview)
+
+      // restore 成功路径：failures/error/unbackedPaths/excludedNote 省略
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect('failures' in restored).toBe(false)
+      expect('error' in restored).toBe(false)
+      expect('unbackedPaths' in restored).toBe(false)
+      expect('excludedNote' in restored).toBe(false)
+      expect(JSON.parse(JSON.stringify(restored))).toEqual(restored)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService blob reuse re-verification (H-11b)', () => {
+  test('stale candidate hash (blob exists for old content) is corrected to current content', async () => {
+    const mocked = vi.mocked(fileHashing.hashFileStreaming)
+    const real = mocked.getMockImplementation()!
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'AAAA')
+      const first = await service.createCheckpoint(workspaceDir)
+      expect(first).not.toBeNull()
+      const blobsDir = blobsDirOf(service, workspaceDir)
+      expect(await listBlobHashes(blobsDir)).toHaveLength(1)
+
+      // 同 size 改写内容：stat 变化会触发快照构建重哈希——注入 builder 返回旧 hash，
+      // 模拟「stat 级复用/陈旧候选 hash」场景（blob 池中该 hash 已存在 → 走复用分支）。
+      const aPath = path.join(workspaceDir, 'a.txt')
+      const oldHash = await real(aPath) // 'AAAA' 的真实内容哈希
+      await fs.writeFile(aPath, 'BBBB', 'utf-8')
+      let workspaceHashCalls = 0
+      mocked.mockImplementation(async filePath => {
+        if (/[\\/]staging[\\/]/.test(filePath)) {
+          return real(filePath)
+        }
+        workspaceHashCalls += 1
+        // 第 1 次（快照构建）返回陈旧候选 hash；之后（H-11b 复用前校验）返回真实 hash
+        return workspaceHashCalls === 1 ? oldHash : real(filePath)
+      })
+      const second = await service.createCheckpoint(workspaceDir)
+      expect(second).not.toBeNull()
+      // H-11b：复用前重哈希发现内容已变 → 写入新 blob（内容寻址，hash 不同）
+      expect(await listBlobHashes(blobsDir)).toHaveLength(2)
+
+      // 恢复第二份 → 内容为最新 'BBBB'（修复前：复用旧 blob，恢复出陈旧 'AAAA'）
+      await fs.writeFile(aPath, 'XXXX', 'utf-8')
+      const preview = await service.previewRestore(workspaceDir, second!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      const restored = await service.restoreCheckpoint(workspaceDir, second!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect(await fs.readFile(aPath, 'utf-8')).toBe('BBBB')
+    } finally {
+      mocked.mockImplementation(real)
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService deleteUntrackedFiles binding (H-16)', () => {
+  test('restore denied when deleteUntrackedFiles differs from the value confirmed at preview', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      await writeFile(workspaceDir, 'new.txt', 'untracked')
+
+      // 预览未确认删除 untracked（默认 false）→ restore 带 true 必须拒绝
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      const denied = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!, {
+        deleteUntrackedFiles: true,
+      })
+      expect(denied.success).toBe(false)
+      expect(denied.error).toMatch(/^Restore denied:/)
+      expect(denied.error).toContain('deleteUntrackedFiles')
+      // 工作区未被改写
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('snapshot')
+      await expect(fs.access(path.join(workspaceDir, 'new.txt'))).resolves.toBeUndefined()
+
+      // 重新预览（确认删除）后 restore 带 true → 成功且 untracked 被删
+      const preview2 = await service.previewRestore(workspaceDir, created!.checkpointId, { deleteUntrackedFiles: true })
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview2.previewToken!, {
+        deleteUntrackedFiles: true,
+      })
+      expect(restored.success).toBe(true)
+      await expect(fs.access(path.join(workspaceDir, 'new.txt'))).rejects.toThrow()
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService create cancellation propagation (M2)', () => {
+  test('create aborted mid-backup rejects with the canonical cancellation error, not a generic create failure', async () => {
+    const mocked = vi.mocked(fileHashing.hashFileStreaming)
+    const real = mocked.getMockImplementation()!
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const controller = new AbortController()
+      let aborted = false
+      mocked.mockImplementation(async filePath => {
+        if (!aborted && !/[\\/]staging[\\/]/.test(filePath)) {
+          aborted = true
+          controller.abort()
+        }
+        return real(filePath)
+      })
+      await expect(service.createCheckpoint(workspaceDir, { signal: controller.signal })).rejects.toThrow(
+        'Checkpoint operation was cancelled',
+      )
+      // 无残留记录/manifest（取消路径同样清理）
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8').catch(() => '[]'))
+      expect(recordsRaw).toEqual([])
+    } finally {
+      mocked.mockImplementation(real)
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService list empty cursor (M3)', () => {
+  test('empty cursor string is treated as no cursor (first page, not empty page)', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      await service.createCheckpoint(workspaceDir)
+      const noCursor = await service.listCheckpoints(workspaceDir)
+      expect(noCursor.total).toBe(1)
+      expect(noCursor.items).toHaveLength(1)
+
+      const emptyCursor = await service.listCheckpoints(workspaceDir, { cursor: '' })
+      expect(emptyCursor.total).toBe(1)
+      expect(emptyCursor.items).toHaveLength(1)
+      expect(emptyCursor.items[0]!.id).toBe(noCursor.items[0]!.id)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService delete failure reason (M4)', () => {
+  test('metadata write failure during delete is reported as a storage error, not chain protection', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+
+      // 注入：记录写回失败（元数据 IO 错误）→ deleteCheckpointInternal 内部吞掉返回 false
+      const store = (service as unknown as { store: { writeAllRecords: () => Promise<void> } }).store
+      const spy = vi.spyOn(store, 'writeAllRecords').mockRejectedValue(new Error('injected metadata write failure'))
+      const outcome = await service.deleteCheckpoint(workspaceDir, created!.checkpointId)
+      expect(outcome.success).toBe(false)
+      expect(outcome.deleted).toBe(false)
+      // 修复前：误报为链保护拒绝（rejected 字段）；修复后：区分出存储/IO 错误
+      expect(outcome.rejected).toBeUndefined()
+      expect(outcome.reason).toBe('Failed to delete checkpoint (metadata write failed)')
+      spy.mockRestore()
+
+      // 记录未被删除
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8'))
+      expect(recordsRaw).toHaveLength(1)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+
+describe('CheckpointService verify unsafe conversationId (M5)', () => {
+  test('verifyCheckpoint records an unsafe conversationId as an issue instead of throwing', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+
+      // 模拟损坏记录：conversationId 改为不安全目录名（越界拼接）
+      const recordsFile = path.join(service.checkpointsDir, 'records.json')
+      const records = JSON.parse(await fs.readFile(recordsFile, 'utf-8'))
+      const corrupted = records.map((r: { id: string }) =>
+        r.id === created!.checkpointId ? { ...r, conversationId: '../../escape' } : r,
+      )
+      await fs.writeFile(recordsFile, JSON.stringify(corrupted, null, 2), 'utf-8')
+
+      // 修复前：workspaceStorageFor 抛 'Unsafe workspace id' → verify 直接 reject
+      // 修复后：catch → 记入 issues，verify 正常返回
+      const verified = await service.verifyCheckpoint(created!.checkpointId)
+      expect(verified.ok).toBe(false)
+      expect(verified.issues.some(issue => issue.includes('Unsafe workspace id'))).toBe(true)
     } finally {
       service.dispose()
       await cleanup(workspaceDir)

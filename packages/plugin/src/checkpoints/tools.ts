@@ -14,7 +14,7 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CheckpointService } from './service.ts'
+import { omitUndefined, type CheckpointService } from './service.ts'
 
 /** 从执行上下文解析工作区 cwd（undefined 回退 process.cwd()） */
 function resolveCwd(exec: ToolRunContext): string {
@@ -62,7 +62,9 @@ function createTool(service: CheckpointService) {
         if (!result) {
           throw new Error('Failed to create checkpoint (see logs for details)')
         }
-        return {
+        // H-1：baseCheckpointId/description 可能为 undefined——剔除 undefined 值键后返回
+        // （snapshotToolValue 对含 undefined 值键的对象抛 ToolOutputError）。
+        return omitUndefined({
           checkpointId: result.checkpointId,
           type: result.type,
           fileCount: result.fileCount,
@@ -70,7 +72,7 @@ function createTool(service: CheckpointService) {
           excludedCount: result.excludedCount,
           baseCheckpointId: result.baseCheckpointId,
           description: result.description,
-        }
+        })
       },
     }),
 

@@ -39,6 +39,7 @@ import type { CheckpointRecordMetadataStore } from './domain/recordStore.ts';
 import {
     CheckpointDeletionService,
     cleanupCheckpointStorage,
+    computeForcedKeepIds,
     type CheckpointWorkspaceStorage
 } from './domain/CheckpointDeletionService.ts';
 import { buildIgnoreSnapshot } from './domain/CheckpointExclusionProfiles.ts';
@@ -209,6 +210,11 @@ interface PreviewTokenBinding {
     manifestHash: string;
     /** 目标基线摘要：preview 时当前工作区文件哈希聚合，apply 前重新比对 */
     baselineDigest: string;
+    /**
+     * H-16：预览时确认的 deleteUntrackedFiles 标志——restore 必须与之一致，
+     * 不一致拒绝（防止预览未确认删除 untracked 时 restore 越权删除快照后新建文件）。
+     */
+    deleteUntrackedFiles: boolean;
 }
 
 /** 轻量日志辅助（源 Logger 的 DSH 内联最小实现：console 前缀） */
@@ -267,6 +273,29 @@ async function renameStoreOverwrite(tmpPath: string, storePath: string): Promise
 /** 工作区目录 → uri（与源测试/远端工作区序列化同形：file:// 前缀 + posix 分隔符） */
 function cwdToUri(cwd: string): string {
     return `file:///${cwd.replace(/\\/g, '/')}`;
+}
+
+/**
+ * 递归剔除对象中值为 undefined 的键（H-1：dsh-tools 的 snapshotToolValue 要求 lossless
+ * JSON——对象值只能是 string/number/boolean/null/数组/嵌套对象，且嵌套对象无 undefined
+ * 值键）。数组元素中的嵌套对象同样处理；undefined 顶层值原样返回（由调用方在返回对象
+ * 层面剔除）。字段语义不变：undefined 字段直接省略，不给空串。
+ */
+export function omitUndefined<T>(value: T): T {
+    if (value === null || typeof value !== 'object') {
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map(item => omitUndefined(item)) as T;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (item === undefined) {
+            continue;
+        }
+        out[key] = omitUndefined(item);
+    }
+    return out as T;
 }
 
 /** 恢复门闸令牌上限（进程内 Map；超过后按插入序驱逐最旧，防止长会话无界增长） */
@@ -536,8 +565,18 @@ export class CheckpointService {
                 throwIfAborted(signal);
                 try {
                     if (await storage.blobs.blobExists(target.hash)) {
-                        reuseCount += 1;
-                        return;
+                        // H-11b：复用前重新计算源文件当前内容 hash——stat 级复用只提供候选 hash
+                        // （内容被改写但 size+mtime 未变时会记录陈旧内容），必须与 blob 实际内容
+                        // 比对：不一致不得复用，更新为该文件当前真实 hash 并重新写 blob
+                        // （manifest/changes/contentHash 均以新 hash 为准）。源文件已删/不可读时
+                        // hashFileStreaming 抛错，走下方 quarantine + markUnbacked（恢复时受保护）。
+                        const currentHash = await hashFileStreaming(target.srcPath);
+                        if (currentHash === target.hash) {
+                            reuseCount += 1;
+                            return;
+                        }
+                        currentHashes[target.scopedPath] = currentHash;
+                        target.hash = currentHash;
                     }
                     const result = await storage.blobs.stageAndCommit(opId, target.srcPath, target.hash, target.size);
                     if (result.reused) {
@@ -686,7 +725,9 @@ export class CheckpointService {
             await this.quarantineStagingLeftovers(storage, opId);
             await storage.blobs.cleanupStaging(opId);
 
-            return {
+            // H-1：baseCheckpointId/description 可能为 undefined——剔除 undefined 值键后再返回
+            // 工具层（lossless JSON），字段语义不变。
+            return omitUndefined({
                 checkpointId,
                 type: checkpoint.type ?? 'full',
                 fileCount: Object.keys(files).length,
@@ -694,7 +735,7 @@ export class CheckpointService {
                 excludedCount: snapshot.excluded.length,
                 baseCheckpointId: checkpoint.baseCheckpointId,
                 description: checkpoint.description
-            };
+            });
         } catch (err) {
             if (!(err instanceof CheckpointAbortError)) {
                 error('Failed to create checkpoint:', err);
@@ -720,6 +761,11 @@ export class CheckpointService {
                 await storage.manifests.deleteManifest(checkpointId);
             } catch (rmErr) {
                 warn('Failed to remove uncommitted manifest:', rmErr);
+            }
+            // M2：取消错误不混入「创建失败」——清理完成后按取消语义传播，
+            // 由 createCheckpoint 归一为 CHECKPOINT_LOCK_CANCELLED_MESSAGE（工具层按取消上报）。
+            if (err instanceof CheckpointAbortError) {
+                throw err;
             }
             return null;
         }
@@ -820,18 +866,21 @@ export class CheckpointService {
         const sorted = [...records].sort((a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : -1));
         const limit = Math.max(1, Math.min(options?.limit ?? 20, 100));
         let startIndex = 0;
-        if (options?.cursor) {
+        // M3：空 cursor（'' 等 falsy 值）按无 cursor 处理——返回第一页而非空页。
+        if (options?.cursor && options.cursor.length > 0) {
             const cursorIndex = sorted.findIndex(record => record.id === options.cursor);
             // 并发删除使游标消失时视为分页结束；不能回到第一页制造重复项。
             startIndex = cursorIndex >= 0 ? cursorIndex + 1 : sorted.length;
         }
         const page = sorted.slice(startIndex, startIndex + limit);
         const nextCursor = startIndex + limit < sorted.length ? page[page.length - 1]?.id : undefined;
-        return {
+        // H-1：摘要（messageNodeId/baseCheckpointId 等可选字段）与 nextCursor 的 undefined
+        // 值键剔除（lossless JSON），字段语义不变。
+        return omitUndefined({
             items: page.map(record => this.toSummary(record)),
             total: sorted.length,
             nextCursor
-        };
+        });
     }
 
     /** 记录 → 轻量摘要（源 CheckpointQueryService.toSummary） */
@@ -945,17 +994,21 @@ export class CheckpointService {
                             checkpointId,
                             workspaceFingerprint,
                             manifestHash: checkpoint.manifestHash ?? '',
-                            baselineDigest: this.digestOfHashes(currentHashes)
+                            baselineDigest: this.digestOfHashes(currentHashes),
+                            // H-16：token 绑定预览时确认的删除 untracked 标志，restore 必须一致
+                            deleteUntrackedFiles: options?.deleteUntrackedFiles === true
                         }
                     };
                 }
             );
             const token = outcome.mint ? this.mintPreviewToken(outcome.mint) : undefined;
-            return {
+            // H-1：preview 载荷（unbackedPaths/excludedNote/error/failures 等可选字段）与
+            // previewToken/baselineDigest 的 undefined 值键剔除（lossless JSON）。
+            return omitUndefined({
                 preview: outcome.preview,
                 previewToken: token,
                 baselineDigest: outcome.mint?.baselineDigest
-            };
+            });
         } catch (err) {
             error('Failed to preview restore:', err);
             return {
@@ -1001,6 +1054,18 @@ export class CheckpointService {
                 deleted: 0,
                 skipped: 0,
                 error: 'Restore denied: invalid or missing previewToken (run checkpoint_preview first and pass its previewToken unchanged)'
+            };
+        }
+
+        // H-16：预览确认的 deleteUntrackedFiles 必须与 restore 一致——预览未确认删除时
+        // restore 带 true 会越权删除快照后新建文件（拒绝并提示重新 preview 确认）。
+        if (binding.deleteUntrackedFiles !== (options?.deleteUntrackedFiles === true)) {
+            return {
+                success: false,
+                restored: 0,
+                deleted: 0,
+                skipped: 0,
+                error: 'Restore denied: deleteUntrackedFiles does not match the value confirmed at preview time; run checkpoint_preview again with the intended deleteUntrackedFiles value'
             };
         }
 
@@ -1105,7 +1170,9 @@ export class CheckpointService {
                         failureCount: failures.length
                     });
 
-                    return {
+                    // H-1：成功路径的 failures/error/unbackedPaths/excludedNote 均为可选字段，
+                    // undefined 值键直接剔除（lossless JSON），字段语义不变。
+                    return omitUndefined({
                         success: engineResult.success,
                         restored: engineResult.restored,
                         deleted: engineResult.deleted,
@@ -1114,7 +1181,7 @@ export class CheckpointService {
                         error: hasFailures ? this.formatFailureSummary(failures) : undefined,
                         unbackedPaths: this.toDisplayUnbackedPaths(checkpoint.unbackedPaths, roots),
                         excludedNote: this.buildExcludedNote(prepared.ctx.manifest)
-                    };
+                    });
                 },
                 options?.signal
             );
@@ -1204,7 +1271,8 @@ export class CheckpointService {
     ): Promise<{ ok: true; ctx: RestorePreparedContext } | { ok: false; result: RestoreResult }> {
         const failResult = (message: string, extra?: Partial<RestoreResult>): { ok: false; result: RestoreResult } => ({
             ok: false,
-            result: { success: false, restored: 0, deleted: 0, skipped: 0, error: message, ...extra }
+            // H-1：extra 可能携带可选字段（failures 等）——undefined 值键剔除后再返回工具层
+            result: omitUndefined({ success: false, restored: 0, deleted: 0, skipped: 0, error: message, ...extra })
         });
 
         const checkpoints = await this.store.getCheckpointRecords(conversationId);
@@ -1443,21 +1511,31 @@ export class CheckpointService {
                 'delete',
                 `checkpoint:${conversationId}:${checkpointId}:delete:${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                 async () => {
+                    // M4：先读记录判断存在性——deleteCheckpointInternal 返回 false 的三种原因
+                    // （记录不存在 / 链保护拒绝 / 元数据写回 IO 失败）共用返回值，必须在此区分，
+                    // 避免「IO 失败」被误报为「链保护拒绝」（记录仍存在时旧实现一律走 rejected）。
+                    const records = await this.store.getCheckpointRecords(conversationId);
+                    if (!records.some(cp => cp.id === checkpointId)) {
+                        return { success: false, deleted: false, reason: 'Checkpoint not found' };
+                    }
                     const deleted = await this.deletionService.deleteCheckpointInternal(conversationId, checkpointId, {
                         force: options?.force === true
                     });
                     if (deleted) {
                         return { success: true, deleted: true };
                     }
-                    const records = await this.store.getCheckpointRecords(conversationId);
-                    const exists = records.some(cp => cp.id === checkpointId);
-                    return {
-                        success: false,
-                        deleted: false,
-                        ...(exists
-                            ? { rejected: 'Checkpoint is referenced as a base snapshot by another checkpoint (chain protection); pass force=true to delete anyway' }
-                            : { reason: 'Checkpoint not found' })
-                    };
+                    // 记录仍存在：链保护（computeForcedKeepIds 祖先闭包，与内部同一口径）或 IO 失败
+                    if (options?.force !== true) {
+                        const keepIds = new Set(records.filter(cp => cp.id !== checkpointId).map(cp => cp.id));
+                        if (computeForcedKeepIds(records, keepIds).has(checkpointId)) {
+                            return {
+                                success: false,
+                                deleted: false,
+                                rejected: 'Checkpoint is referenced as a base snapshot by another checkpoint (chain protection); pass force=true to delete anyway'
+                            };
+                        }
+                    }
+                    return { success: false, deleted: false, reason: 'Failed to delete checkpoint (metadata write failed)' };
                 },
                 options?.signal
             );
@@ -1697,9 +1775,15 @@ export class CheckpointService {
         let manifest: CheckpointManifest | null = null;
         let manifestWorkspace: string | undefined;
         if (record) {
-            manifest = await this.workspaceStorageFor(record.conversationId).manifests.loadManifest(checkpointId);
-            if (manifest) {
-                manifestWorkspace = record.conversationId;
+            // M5：损坏记录的 conversationId 可能越界——workspaceStorageFor 抛错时记入 issues，
+            // 不直接冒泡（verify 是只读诊断，应以 issues 报告损坏而非中断）。
+            try {
+                manifest = await this.workspaceStorageFor(record.conversationId).manifests.loadManifest(checkpointId);
+                if (manifest) {
+                    manifestWorkspace = record.conversationId;
+                }
+            } catch (err) {
+                issues.push(`Failed to load manifest for checkpoint record: ${err instanceof Error ? err.message : String(err)}`);
             }
         }
         if (!manifest) {
@@ -1755,9 +1839,14 @@ export class CheckpointService {
                     issues.push(`Unsafe backupDir on chain node ${cp.id}: ${cp.backupDir}`);
                     continue;
                 }
-                const nodeManifest = await this.workspaceStorageFor(cp.conversationId).manifests.loadManifest(cp.id);
-                if (!nodeManifest) {
-                    issues.push(`Chain node manifest missing: ${cp.id}`);
+                try {
+                    const nodeManifest = await this.workspaceStorageFor(cp.conversationId).manifests.loadManifest(cp.id);
+                    if (!nodeManifest) {
+                        issues.push(`Chain node manifest missing: ${cp.id}`);
+                    }
+                } catch (err) {
+                    // M5：链节点 conversationId 越界（损坏记录）同样记入 issues 而非冒泡
+                    issues.push(`Failed to load chain node manifest for ${cp.id}: ${err instanceof Error ? err.message : String(err)}`);
                 }
             }
         }
