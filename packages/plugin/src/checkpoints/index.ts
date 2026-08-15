@@ -185,10 +185,17 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
 
   // 自动存档引擎（独立于模型工具注册）：默认挂接 tools/execute + agent/pre-step +
   // agent/turn-stopping；modelOuterLayerOnly 时仅根 agent 存档。
+  // 跨域 M-2：isRoot 附加持久谱系过滤——branches 域 fork 子会话经 ctx.agents.create
+  // （meta.parentSession，见 branches/adapters/dshSessionAdapter.ts）创建，AgentRegistry.roots()
+  // 只认 owner===undefined，会把这类子会话也判为根；带 header.parentSession 的会话是
+  // fork/分支/子代理后代（dsh-session SessionHeader.parentSession = seed 谱系），不算外层根，
+  // 必须排除——否则 reroll 重放时自动存档引擎对同一 workspace 重复建档。
   let detachAutoCheckpoint: (() => void) | undefined
   if (autoCheckpoint) {
     const engine = createAutoCheckpointEngine(service, resolveAutoCheckpointConfig(config), {
-      isRoot: agent => ctx.agents.roots().some(root => root.id === agent.id),
+      isRoot: agent =>
+        ctx.agents.roots().some(root => root.id === agent.id) &&
+        agent.session?.header?.parentSession === undefined,
       logger: ctx.logger,
     })
     detachAutoCheckpoint = engine.attach(ctx)

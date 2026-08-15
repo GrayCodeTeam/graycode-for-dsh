@@ -10,10 +10,11 @@
  *   无 agent 的调用跳过
  * - pre-step turn 变化触发 user 存档、同 turn 不重复、首次也触发；决策原样透传
  * - turn-stopping 触发 model 存档（afterMessages 配置）；缺省不触发
- * - modelOuterLayerOnly：非根 agent 跳过（可注入 isRoot）
- * - 失败降级：createCheckpoint 抛错不阻断 next()，warn 记录
+ * - modelOuterLayerOnly：非根 agent 跳过（可注入 isRoot）；带 parentSession header 的
+ *   fork 子会话即使被 roots() 误判为根也跳过（跨域 M-2）
+ * - 失败降级：createCheckpoint 抛错不阻断 next()，warn 记录；返回 null 也 warn（L-1）
  * - mergeUnchanged：无变更回滚 / 有变更保留 / 回退到既有 blob 的内容变化保留 /
- *   回滚失败 warn + 保留
+ *   base 不在分页窗口或列表读取失败 → 保守保留 + warn（M-2 fail-closed）/ 回滚失败 warn + 保留
  * - 串行化：同 agent 并发 pre-step 只创建一次
  * - attach/detach：真实 Context 上 ctx.waterfall / ctx.serial 分发验证挂接与拆除
  */
@@ -34,9 +35,9 @@ import { makeEnv, writeFile, cleanup } from './helpers.ts'
 
 const WS = 'X:/synthetic/graycode-project'
 
-/** fake agent（只暴露引擎用到的 id / session.header.cwd）。 */
-function fakeAgent(id: string, cwd = WS): Agent {
-  return { id, session: { header: { cwd } } } as unknown as Agent
+/** fake agent（只暴露引擎用到的 id / session.header；header 可注入 parentSession 等谱系字段）。 */
+function fakeAgent(id: string, cwd = WS, header: Record<string, unknown> = {}): Agent {
+  return { id, session: { header: { cwd, ...header } } } as unknown as Agent
 }
 
 /** fake tools/execute payload（ToolDispatchExecution；引擎只用 name/agent/signal）。 */
@@ -69,8 +70,8 @@ function turnStop(agent: Agent, signal = new AbortController().signal): TurnStop
 
 const enter = (): Promise<PreStepDecision> => Promise.resolve({ kind: 'enter', messages: [] as UserMessage[] })
 
-/** stub CheckpointService（引擎只调 create/delete/list 三个方法）。 */
-function stubService(overrides: Partial<CheckpointService> = {}): CheckpointService {
+/** stub CheckpointService（引擎只调 create/delete/list 三个方法；overrides 宽松接受任意 stub）。 */
+function stubService(overrides: Partial<Record<keyof CheckpointService, unknown>> = {}): CheckpointService {
   return {
     createCheckpoint: vi.fn(async () => null),
     deleteCheckpoint: vi.fn(async () => ({ success: true, deleted: true })),
@@ -294,6 +295,37 @@ describe('modelOuterLayerOnly（仅根 agent 存档）', () => {
     await engine.onTurnStopping(turnStop(root))
     expect(createCheckpoint).toHaveBeenCalledTimes(3)
   })
+
+  test('带 parentSession header 的 fork 子会话不存档（跨域 M-2：branches reroll 重放防护）', async () => {
+    const createCheckpoint = vi.fn(async () => null)
+    // 与 index.ts 注入的 isRoot 同一判据：roots() 命中 且 header.parentSession === undefined
+    const isRoot = (agent: Agent): boolean =>
+      agent.id === 'root' && agent.session?.header?.parentSession === undefined
+    const engine = makeEngine(
+      stubService({ createCheckpoint }),
+      engineConfig({
+        beforeTools: ['write'],
+        afterTools: ['bash'],
+        messageCheckpoint: { beforeMessages: ['user'], afterMessages: ['model'], modelOuterLayerOnly: true },
+      }),
+      { isRoot },
+    )
+    // fork 子会话：AgentRegistry.roots() 只认 owner===undefined 会把它误判为根，但
+    // header.parentSession 已设置（branches dshSessionAdapter forkChild 写 meta.parentSession）
+    // ——三个挂点全部跳过，reroll 重放不再对同一 workspace 重复建档
+    const forkChild = fakeAgent('root', WS, { parentSession: 'session://parent-root' })
+    await engine.onToolsExecute(toolExec('write', forkChild), () => Promise.resolve(okResult()))
+    expect(createCheckpoint).not.toHaveBeenCalled()
+    await engine.onPreStep(preStep(forkChild, 1), enter)
+    expect(createCheckpoint).not.toHaveBeenCalled()
+    await engine.onTurnStopping(turnStop(forkChild))
+    expect(createCheckpoint).not.toHaveBeenCalled()
+
+    // 真根 agent（无 parentSession）正常存档
+    const root = fakeAgent('root')
+    await engine.onToolsExecute(toolExec('write', root), () => Promise.resolve(okResult()))
+    expect(createCheckpoint).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('失败降级', () => {
@@ -318,6 +350,19 @@ describe('失败降级', () => {
 
     await engine.onTurnStopping(turnStop(agent))
     expect(warnings.length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('createCheckpoint 返回 null（非抛错）→ warn 记录，不阻断 next()（L-1）', async () => {
+    const warnings: string[] = []
+    const engine = makeEngine(
+      stubService({ createCheckpoint: vi.fn(async () => null) }),
+      engineConfig({ beforeTools: ['write'], afterTools: [] }),
+      { logger: { warn: message => warnings.push(message) } },
+    )
+
+    const result = await engine.onToolsExecute(toolExec('write', fakeAgent('root')), () => Promise.resolve(okResult()))
+    expect(result).toEqual(okResult())
+    expect(warnings.some(w => w.includes('auto: before write') && w.includes('returned null'))).toBe(true)
   })
 
   test('signal 已 abort 时跳过存档（不产生 warn）', async () => {
@@ -435,6 +480,71 @@ describe('mergeUnchangedCheckpoints（真实服务）', () => {
       service.dispose()
       await cleanup(workspaceDir, dataRoot)
     }
+  })
+
+  test('base 不在分页窗口（>100 存档）→ 保守保留 + warn，不回滚（M-2）', async () => {
+    const warnings: string[] = []
+    const deleteCheckpoint = vi.fn(async () => ({ success: true, deleted: true }))
+    const service = stubService({
+      // 创建成功：incremental、0 新字节、有 base——但 base 排在首 100 条之外
+      createCheckpoint: vi.fn(async () => ({
+        checkpointId: 'cp_self0000000000000000000000000000',
+        type: 'incremental',
+        fileCount: 1,
+        sizeBytes: 0,
+        excludedCount: 0,
+        baseCheckpointId: 'cp_base0000000000000000000000000000',
+      })),
+      deleteCheckpoint,
+      // 首页只含 self、不含 base（total=150 说明 base 在窗口之外）
+      listCheckpoints: vi.fn(async () => ({
+        items: [
+          { id: 'cp_self0000000000000000000000000000', contentHash: 'a'.repeat(64) },
+          { id: 'cp_other000000000000000000000000000', contentHash: 'b'.repeat(64) },
+        ],
+        total: 150,
+      })),
+    })
+    const engine = createAutoCheckpointEngine(
+      service,
+      engineConfig({ beforeTools: ['write'], afterTools: [] }),
+      { isRoot: () => true, logger: { warn: message => warnings.push(message) } },
+    )
+
+    await engine.onToolsExecute(toolExec('write', fakeAgent('root')), () => Promise.resolve(okResult()))
+
+    // 无法确认 ≠ 无变更：绝不回滚，保守保留 + warn（fail-closed）
+    expect(deleteCheckpoint).not.toHaveBeenCalled()
+    expect(warnings.some(w => w.includes('mergeUnchanged confirmation skipped') && w.includes('keeping checkpoint'))).toBe(true)
+  })
+
+  test('列表读取失败 → 保守保留 + warn（fail-closed，M-2）', async () => {
+    const warnings: string[] = []
+    const deleteCheckpoint = vi.fn(async () => ({ success: true, deleted: true }))
+    const service = stubService({
+      createCheckpoint: vi.fn(async () => ({
+        checkpointId: 'cp_self0000000000000000000000000000',
+        type: 'incremental',
+        fileCount: 1,
+        sizeBytes: 0,
+        excludedCount: 0,
+        baseCheckpointId: 'cp_base0000000000000000000000000000',
+      })),
+      deleteCheckpoint,
+      listCheckpoints: vi.fn(async () => {
+        throw new Error('records read failure')
+      }),
+    })
+    const engine = createAutoCheckpointEngine(
+      service,
+      engineConfig({ beforeTools: ['write'], afterTools: [] }),
+      { isRoot: () => true, logger: { warn: message => warnings.push(message) } },
+    )
+
+    await engine.onToolsExecute(toolExec('write', fakeAgent('root')), () => Promise.resolve(okResult()))
+
+    expect(deleteCheckpoint).not.toHaveBeenCalled()
+    expect(warnings.some(w => w.includes('mergeUnchanged confirmation degraded') && w.includes('keeping checkpoint'))).toBe(true)
   })
 })
 

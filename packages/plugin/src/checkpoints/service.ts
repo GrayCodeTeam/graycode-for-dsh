@@ -1276,7 +1276,10 @@ export class CheckpointService {
             storage,
             title: '恢复前自动保护点',
             notes: `auto protection point before restore of ${targetCheckpointId}`,
-            signal
+            signal,
+            // L-2：保护点由恢复流程自动创建（非用户显式工具调用），origin 与自动存档
+            // 引擎一致记为 'auto'——「自动创建」语义统一（原缺省 manual 与语义不符）。
+            origin: 'auto'
         });
         return result ? result.checkpointId : null;
     }

@@ -9,7 +9,8 @@
  *   把返回值原样传下去（包装层只能替换 signal，不允许改写参数）。
  * - `agent/pre-step`（waterfall，@deepseek-ai/dsh-agent lib/types/runtime-types.d.ts:235）：
  *   payload.turn 变化 = 新用户回合 → beforeMessages 含 'user' 时创建存档。
- *   首次见该 agent 也存档。存档在 `next()` 之后创建（决策已定、不延迟管线）。
+ *   首次见该 agent 也存档。存档在 `next()` 之后、本挂点返回前创建（决策已定，
+ *   但快照 await 完成前 waterfall 不返回——只保证不延迟决策，不承诺不延迟挂点完成）。
  * - `agent/turn-stopping`（serial，runtime-types.d.ts:301）：模型回合关闭 →
  *   afterMessages 含 'model' 时创建存档。
  *
@@ -23,7 +24,8 @@
  * - modelOuterLayerOnly=true：仅根 agent 存档（isRoot 可注入，测试可替换）；
  * - mergeUnchangedCheckpoints=true：创建后判定「无变更」并回滚（详见 README：
  *   先按 sizeBytes===0 && type==='incremental' 启发式，再与本档/基快照 contentHash
- *   比对确认；回滚走 deleteCheckpoint（不 force），被链保护拒绝时保留 + warn）。
+ *   比对确认；确认失败（本档/基快照不在页内或列表读取失败）→ 保守保留 + warn，
+ *   绝不按启发式回滚；回滚走 deleteCheckpoint（不 force），被链保护拒绝时保留 + warn）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -152,7 +154,13 @@ export function createAutoCheckpointEngine(
     try {
       if (signal?.aborted) return
       const result = await service.createCheckpoint(cwdOf(agent), { title, origin: 'auto', signal })
-      if (result && mergeUnchanged) {
+      if (!result) {
+        // L-1：createCheckpoint 返回 null（非抛错）＝创建失败被服务吞掉——静默跳过会
+        // 掩盖存档缺失，补 warn（失败降级语义不变：不抛错、不阻断调用方）。
+        logger.warn(`graycode-checkpoints: auto checkpoint "${title}" skipped (createCheckpoint returned null)`)
+        return
+      }
+      if (mergeUnchanged) {
         await rollbackIfUnchanged(agent, result)
       }
     } catch (err) {
@@ -170,7 +178,9 @@ export function createAutoCheckpointEngine(
    *    blob 字节（内容与基快照全同，或全部命中既有 blob）；
    * 2. 确认：本档与基快照 contentHash 比对（listCheckpoints 读 records 一次）。相等
    *    → 确认无变更 → 回滚；不等（内容回退到既有 blob 的真实变更）→ 保留；
-   *    本档/基快照不在页内或读取失败 → 回退到启发式判定（回滚）。
+   *    本档/基快照不在页内或读取失败 → **保守保留 + warn（fail-closed）**——
+   *    绝不回退启发式回滚：base 在 100 条分页窗口之外时「无法确认」≠「无变更」，
+   *    按启发式回滚会静默误删真实状态点（复查 M-2）。
    *
    * 回滚走 `deleteCheckpoint`（不 force）：被链保护拒绝（期间有后继存档引用本档）
    * 时保留本档并 warn —— 接受该差异（README 已文档化）。
@@ -178,22 +188,33 @@ export function createAutoCheckpointEngine(
   const rollbackIfUnchanged = async (agent: Agent, result: CreateCheckpointResult): Promise<void> => {
     if (result.type !== 'incremental' || result.sizeBytes !== 0) return
     if (!result.baseCheckpointId) return
-    let unchanged = true
     try {
       const listed = await service.listCheckpoints(cwdOf(agent), { limit: 100 })
       // CreateCheckpointResult 不含 contentHash：从列表取本档与基快照的摘要比对。
-      // 两者任一不在页内/读取失败 → 回退启发式判定（视为无变更，回滚）。
       const self = listed.items.find(item => item.id === result.checkpointId)
       const base = listed.items.find(item => item.id === result.baseCheckpointId)
-      if (self && base && self.contentHash !== base.contentHash) {
-        // 内容确实变了（回退到既有 blob），不是无变更 —— 保留
-        unchanged = false
+      if (!self || !base) {
+        // M-2：本档/基快照不在首页（>100 存档窗口）或已被并发删除——无法确认无变更，
+        // 保守保留 + warn（fail-closed），绝不回退启发式回滚（会静默误删真实状态点）。
+        logger.warn(
+          `graycode-checkpoints: mergeUnchanged confirmation skipped for ${result.checkpointId} ` +
+            `(self/base checkpoint not in list page); keeping checkpoint`,
+        )
+        return
       }
+      if (self.contentHash !== base.contentHash) {
+        // 内容确实变了（回退到既有 blob），不是无变更 —— 保留
+        return
+      }
+      // 确认无变更 → 走下方回滚
     } catch {
-      // 列表读取失败：按启发式判定（sizeBytes===0 且 incremental）视为无变更
-      unchanged = true
+      // M-2：列表读取失败 → 无法确认 → 保守保留 + warn（与「不在页内」同一 fail-closed 口径）
+      logger.warn(
+        `graycode-checkpoints: mergeUnchanged confirmation degraded for ${result.checkpointId} ` +
+          `(list checkpoints failed); keeping checkpoint`,
+      )
+      return
     }
-    if (!unchanged) return
     try {
       const outcome = await service.deleteCheckpoint(cwdOf(agent), result.checkpointId)
       if (!outcome.success) {

@@ -99,6 +99,7 @@ function createTool(service: CheckpointService) {
                 properties: {
                   id: { type: 'string' },
                   conversationId: { type: 'string' },
+                  messageNodeId: { type: 'string', description: 'Message node id recorded on the checkpoint (branch-tree lineage; absent for host-side records).' },
                   messageIndex: { type: 'integer', description: 'Message index recorded on the checkpoint (fixed at 0 for host-side records).' },
                   toolName: { type: 'string', description: 'Tool that created the checkpoint (checkpoint_create for host-side records).' },
                   phase: { type: 'string', enum: ['before', 'after'], description: 'Checkpoint phase.' },
@@ -110,7 +111,8 @@ function createTool(service: CheckpointService) {
                   backupBytes: { type: 'integer' },
                   excludedCount: { type: 'integer' },
                   manifestVersion: { type: 'integer', description: 'Manifest schema version of the checkpoint.' },
-                  description: { type: 'string' },
+                  // M-1：description 不在 CheckpointSummary/toSummary 返回集内——原声明为死声明，已删除
+                  // （schema additionalProperties:false 只要求声明 ⊆ 返回字段的超集，反向多余声明无意义）。
                   origin: { type: 'string', enum: ['auto', 'manual'], description: 'Checkpoint origin: auto (auto-checkpoint engine) or manual (tool/endpoint).' },
                 },
               },

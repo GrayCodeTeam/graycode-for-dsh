@@ -70,7 +70,7 @@ describe('checkpoint origin 持久化', () => {
     }
   })
 
-  test('createProtectionPoint（恢复保护点）不带 origin → 记录为 manual', async () => {
+  test('createProtectionPoint（恢复保护点）origin 记为 auto（L-2：与自动存档语义统一）', async () => {
     const { workspaceDir, dataRoot, service } = await makeEnv()
     try {
       await writeFile(workspaceDir, 'a.txt', 'v1')
@@ -83,7 +83,13 @@ describe('checkpoint origin 持久化', () => {
 
       const listed = await service.listCheckpoints(workspaceDir)
       expect(listed.total).toBe(2) // 原档 + 恢复保护点
-      expect(listed.items[0]!.origin).toBe('manual')
+      // 保护点由恢复流程自动创建（非用户显式调用）→ origin='auto'（与自动存档引擎一致）
+      expect(listed.items[0]!.origin).toBe('auto')
+
+      // records.json 同样持久化 origin='auto'
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(dataRoot, 'checkpoints', 'records.json'), 'utf-8'))
+      const byId = new Map<string, { origin?: string }>(recordsRaw.map((r: { id: string }) => [r.id, r]))
+      expect(byId.get(listed.items[0]!.id)!.origin).toBe('auto')
     } finally {
       service.dispose()
       await cleanup(workspaceDir, dataRoot)

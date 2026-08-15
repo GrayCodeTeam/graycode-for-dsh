@@ -70,6 +70,8 @@ restore 执行前**默认**先创建一个新 checkpoint 作为可恢复保护�
   可转发该字段）。
 - 实现位置：`service.ts` 的 `createProtectionPoint`（复用 `executeBackup`，在已持有的工作区
   锁内直接执行，不再二次取锁，避免同工作区排队自锁）。
+- origin：保护点由恢复流程自动创建（非用户显式调用），**origin 记为 `'auto'`**（L-2 统一，
+  与自动存档引擎语义一致；`restore_protection_point_created` 事件同时记录 id）。
 
 ## 自动存档（对齐审计 C-01/C-02/C-03，host 侧，已落地）
 
@@ -107,11 +109,16 @@ messageCheckpoint: {
 
 - 全部自动存档 `origin='auto'`、`service.createCheckpoint(cwd, { title, origin: 'auto', signal })`；
   cwd 取 `agent.session.header.cwd`（缺省回退 `process.cwd()`，与 tools.ts resolveCwd 口径一致）。
+- pre-step 时机：存档在 `next()` 之后、挂点返回前创建——决策不被存档延迟，但快照 await
+  完成前 waterfall 不返回（M-3 注释修正：不承诺「不延迟管线」，只承诺「不延迟决策」）。
 - 失败降级：任何存档创建失败只 `warn`，绝不阻断工具执行 / 步骤决策（`next()` 结果原样返回，
   绝不二次调用 `next()`）。
 - 串行化：同 agent 的存档创建按到达顺序执行（runSerialized，参考 memory/autoInject.ts），不重叠。
-- modelOuterLayerOnly=true：三个挂点都先判根 agent（`ctx.agents.roots()`）；无 agent 的工具调用
-  （agent-less）一律跳过。
+- modelOuterLayerOnly=true：三个挂点都先判根 agent——`ctx.agents.roots()` **且**
+  `agent.session.header.parentSession === undefined`（M-2 跨域：AgentRegistry.roots() 只认
+  owner===undefined，branches fork 子会话（ctx.agents.create + meta.parentSession）会被误判为
+  根；带 parentSession 的会话是 fork/分支/子代理后代，不算外层根，排除后 reroll 重放不再
+  对同一 workspace 重复建档）；无 agent 的工具调用（agent-less）一律跳过。
 
 ### 差异文档化（有意取舍）
 
@@ -123,14 +130,25 @@ messageCheckpoint: {
 3. **mergeUnchangedCheckpoints 判定**（autoCheckpoint.ts `rollbackIfUnchanged`）：创建后判定——
    ① 启发式门：`type==='incremental' && sizeBytes===0`（本次无新写 blob 字节）；
    ② 确认：列表取本档与基快照 contentHash，相等才回滚（内容回退到既有 blob 的 0 新字节
-   变更不会被误删）；本档/基快照不在页内或读取失败 → 回退启发式判定。
+   变更不会被误删）；**确认失败（本档/基快照不在首 100 条分页窗口内，或列表读取失败）→
+   保守保留 + warn（fail-closed，M-2）**——base 在窗口之外时「无法确认」≠「无变更」，
+   回退启发式回滚会静默误删真实状态点，故一律不删。
    回滚走 `deleteCheckpoint`（**不 force**）：期间有后继存档引用本档被链保护拒绝时保留 + warn。
    已知残留差异：判定依赖 records 读取，极端并发（回滚前其他 agent 已基于本档建档）下
    存档保留，属可接受噪声而非数据丢失。
 4. **origin 字段**：`CheckpointSummary.origin: 'auto' | 'manual'` 新增，records.json 持久化；
    旧记录缺 origin → 读取时容错为 `'manual'`。remote `checkpoints/create` 与工具 `checkpoint_create`
-   保持 manual（不加参数）。`checkpoint_list` 工具 output schema 已补 origin 字段
+   保持 manual（不加参数）；**自动存档引擎与恢复前保护点（createProtectionPoint）记为 `'auto'`**
+   （L-2：恢复保护点原缺省 manual 与「自动创建」语义不符，已统一为 auto）。
+   `checkpoint_list` 工具 output schema 已补 origin 字段
    （schema `additionalProperties:false`，返回值必须声明）。
+5. **只读工具留在默认 beforeTools/afterTools（评估结论，M-3）**：`grep`/`glob` 为只读工具，
+   存档必为无变更并被 mergeUnchanged 回滚，仅产生短暂开销；移出需同步
+   client `packages/client/src/client/settings/defaults.ts` 的 DSH_TOOL_DEFAULTS（settings 域，
+   本域无权修改）与 client 侧 `toHaveLength(24)` 测试，否则设置页默认值与插件行为分歧。
+   当前结论：**保留**（与 client 默认保持一致、无分歧成本；原插件 search_in_files 亦在默认
+   清单内，语义延续）。如主会话决定移除，需 plugin `DEFAULT_AUTO_CHECKPOINT_TOOLS` 与 client
+   DSH_TOOL_DEFAULTS 一并修改（见复查报告）。
 
 ### 门控
 

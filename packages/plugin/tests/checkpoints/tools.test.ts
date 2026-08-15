@@ -173,6 +173,48 @@ describe('checkpoint 工具层', () => {
     }
   })
 
+  test('checkpoint_list output schema 声明覆盖 toSummary 返回字段（M-1：messageNodeId 必含）', async () => {
+    const { workspaceDir, dataRoot, service, tools } = await setup()
+    try {
+      // 构造带 messageNodeId 的旧格式记录（源记录字段走 toSummary 容错缺省）
+      const wsId = service.conversationIdFor(workspaceDir)
+      const record = {
+        id: 'cp_msgnode0000000000000000000000000001',
+        conversationId: wsId,
+        messageNodeId: 'node-42',
+        messageIndex: 3,
+        toolName: 'checkpoint_create',
+        phase: 'after',
+        timestamp: Date.now(),
+        backupDir: 'cp_msgnode0000000000000000000000000001',
+        fileCount: 0,
+        contentHash: 'a'.repeat(64),
+      }
+      await fs.writeFile(path.join(dataRoot, 'checkpoints', 'records.json'), JSON.stringify([record], null, 2), 'utf-8')
+
+      const list = tools.get('checkpoint_list')!
+      const result = (await list.execute({ workspace: workspaceDir }, makeExec(workspaceDir))) as {
+        items: Array<Record<string, unknown>>
+        total: number
+      }
+      expect(result.total).toBe(1)
+      expect(result.items[0]!.messageNodeId).toBe('node-42')
+
+      // schema 契约：声明字段 ⊇ toSummary 实际返回字段——additionalProperties:false 下
+      // 返回未声明字段会在工具注册层抛 ToolOutputError（M-1 回归保护）
+      const declared = list.output.schema.properties!.items!.items!.properties!
+      for (const key of Object.keys(result.items[0]!)) {
+        expect(declared[key], `schema 未声明 toSummary 返回字段: ${key}`).toBeDefined()
+      }
+      // M-1 明确回归点：messageNodeId 已声明；description 已删除（toSummary 永不返回）
+      expect(declared.messageNodeId).toBeDefined()
+      expect(declared.description).toBeUndefined()
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+
   test('checkpoint_preview → checkpoint_restore：token 门闸经工具层生效；无 token 结构化拒绝', async () => {
     const { workspaceDir, dataRoot, service, tools } = await setup()
     try {
