@@ -4,9 +4,12 @@
  * Three model-facing tools:
  * - prompt_mode_list: current mode + all modes (id/name/kind/entry counts).
  * - prompt_mode_set: switch the active mode (persisted, live re-injection).
- * - prompt_mode_preview: the exact section text D-11 = c would inject for a
- *   mode (template + entries + prefix/suffix, `{{$MODULE}}` resolved or
- *   preserved), so the model can inspect a preset before switching to it.
+ * - prompt_mode_preview: the system section text D-11 = c would inject for a
+ *   mode (template + prefix/suffix, `{{$MODULE}}` resolved or preserved), so
+ *   the model can inspect a preset before switching to it. With the request
+ *   layer enabled (default), user/assistant preset entries are injected as
+ *   real messages at the llm/stream request layer and are therefore NOT part
+ *   of this system-text preview — the preview appends a note explaining that.
  *
  * Mode management beyond switching (create/duplicate/import/rename/delete)
  * stays in PromptSettingsService for UI / JSON payloads; the model surface is
@@ -55,11 +58,17 @@ function projectMode(mode: { id: string; name: string; kind: 'builtin' | 'custom
 /**
  * Create the three prompt tools, closed over the plugin service. The
  * `getSendHistoryThoughts` getter feeds the D-11 = c fake-thought gate into
- * previews so they match what would actually be injected.
+ * previews so they match what would actually be injected. The optional
+ * `getRequestLayer` getter (A1) mirrors the current request-layer switch into
+ * previews: when on, user/assistant preset entries are excluded from the
+ * preview text (they are injected as real messages at the request layer) and
+ * a note is appended. Omitted getter defaults to false (legacy D-11 = c
+ * preview shape).
  */
 export function createPromptTools(
   service: PromptSettingsService,
   getSendHistoryThoughts: () => boolean,
+  getRequestLayer?: () => boolean,
 ): ToolDefinition[] {
   const list = defineTool({
     name: 'prompt_mode_list',
@@ -145,7 +154,7 @@ export function createPromptTools(
   const preview = defineTool({
     name: 'prompt_mode_preview',
     description:
-      'Preview the exact system-prompt section text a prompt mode would inject (D-11 = c: template + preset entries + custom prefix/suffix as one text block; user/assistant entries appear as labeled context paragraphs). Use prompt_mode_list to discover mode ids.',
+      'Preview the system-prompt section text a prompt mode would inject (D-11 = c: template + custom prefix/suffix as one text block). With the request layer enabled (default), user/assistant preset entries are injected as real messages at the request layer and are not part of this system-text preview. Use prompt_mode_list to discover mode ids.',
     parameters: {
       modeId: { type: 'string', description: 'Mode id to preview; omit to preview the current mode.' },
     },
@@ -176,10 +185,21 @@ export function createPromptTools(
         if (!mode) {
           throw new PromptError(`prompt mode "${args.modeId}" not found`, PromptErrorCode.MODE_NOT_FOUND)
         }
+        // Render the system part only (requestLayer mirrors the A1 switch: on,
+        // user/assistant preset entries are injected as real messages at the
+        // request layer and do not appear in this system-text preview).
+        const requestLayer = getRequestLayer?.() ?? false
+        const sectionText = renderModeSectionText(mode, {
+          sendHistoryThoughts: getSendHistoryThoughts(),
+          requestLayer,
+        })
+        const text = requestLayer
+          ? `${sectionText.length > 0 ? `${sectionText}\n\n` : ''}Note: user/assistant preset entries will be injected as real messages at the request layer (llm/stream) and are not included in this system-text preview.`
+          : sectionText
         return {
           success: true,
           modeId: mode.id,
-          text: renderModeSectionText(mode, { sendHistoryThoughts: getSendHistoryThoughts() }),
+          text,
         }
       } catch (error) {
         return errorOf(error)

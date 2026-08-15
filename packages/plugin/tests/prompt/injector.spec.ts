@@ -22,6 +22,7 @@ import {
   PROMPT_SECTION_NAME,
   type PromptRenderState,
 } from '../../src/prompt/promptInjector.ts'
+import { unavailablePlaceholderText } from '../../src/prompt/domain/template.ts'
 import type { PromptMode } from '../../src/prompt/domain/promptTypes.ts'
 
 const WS = 'X:/synthetic/graycode-project'
@@ -111,7 +112,7 @@ describe('createPromptInjector', () => {
     injector.dispose()
   })
 
-  test('section 文本含 user/assistant 上下文段落与 fakeThought 纯文本（D-11=c 形态）', async () => {
+  test('section 文本只含系统部分：user/assistant 条目与 fakeThought 不以文本出现（entries-first）', async () => {
     const { ctx, host } = await makeWorld()
     const mode = makeMode({
       template: 'tpl',
@@ -126,12 +127,16 @@ describe('createPromptInjector', () => {
     const root = await makeAgent(host, 'root-1', WS)
     const { sections } = await assembleFor(root)
     const text = promptSection(sections)!.text
-    expect(text).toContain('[GrayCode preset entry: role=user]\nuser body')
-    expect(text).toContain('[GrayCode preset entry: role=assistant]\n[thinking]\nthinking!\n[/thinking]\n\nassistant body')
+    expect(text).toContain('tpl')
+    expect(text).not.toContain('user body')
+    expect(text).not.toContain('assistant body')
+    expect(text).not.toContain('[GrayCode preset entry:')
+    expect(text).not.toContain('[thinking]')
+    expect(text).not.toContain('thinking!')
     injector.dispose()
   })
 
-  test('sendHistoryThoughts=false（默认门）：fakeThought 文本不注入；开启后出现', async () => {
+  test('sendHistoryThoughts 两态均不在 section 文本注入 [thinking]（typed-only，由 thoughts 域处理）', async () => {
     const { ctx, host } = await makeWorld()
     const mode = makeMode({
       template: 'tpl',
@@ -144,13 +149,15 @@ describe('createPromptInjector', () => {
 
     const root = await makeAgent(host, 'root-1', WS)
     const off = await assembleFor(root)
+    expect(promptSection(off.sections)!.text).toContain('tpl')
     expect(promptSection(off.sections)!.text).not.toContain('[thinking]')
-    expect(promptSection(off.sections)!.text).toContain('body')
+    expect(promptSection(off.sections)!.text).not.toContain('body')
 
     state = { mode, sendHistoryThoughts: true }
     injector.refresh()
     const on = await assembleFor(root)
-    expect(promptSection(on.sections)!.text).toContain('[thinking]\nsecret\n[/thinking]')
+    expect(promptSection(on.sections)!.text).not.toContain('[thinking]')
+    expect(promptSection(on.sections)!.text).not.toContain('secret')
     injector.dispose()
   })
 
@@ -229,6 +236,114 @@ describe('createPromptInjector', () => {
     const noCwdText = promptSection((await assembleFor(noCwd)).sections)!.text
     expect(noCwdText).toContain('No workspace open')
     injector.dispose()
+  })
+
+  test('TODO_LIST 占位符：非空快照渲染为 Total 首行 + - [status] 行；空快照为 ""（dynamicTodo 门）', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = {
+      mode: makeMode({ template: 'TODO:\n{{$TODO_LIST}}' }),
+      sendHistoryThoughts: false,
+    }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-todo', WS)
+    ;(root.session as unknown as { events: unknown[] }).events = [
+      {
+        type: 'todo/write',
+        data: {
+          todos: [
+            { content: 'pending item', status: 'pending' },
+            { content: 'doing item', status: 'in_progress' },
+            { content: 'done item', status: 'completed' },
+            { content: 'cancelled item', status: 'cancelled' },
+          ],
+        },
+      },
+    ]
+    const text = promptSection((await assembleFor(root)).sections)!.text
+    expect(text).toContain('Total: 4 | pending: 1 | in_progress: 1 | completed: 1 | cancelled: 1')
+    expect(text).toContain('- [in_progress] doing item')
+    expect(text).toContain('- [pending] pending item')
+    expect(text).toContain('- [completed] done item')
+    expect(text).toContain('- [cancelled] cancelled item')
+
+    // 空快照 → TODO_LIST 值为 ''：占位符渲染为空，不出现 Total 行
+    ;(root.session as unknown as { events: unknown[] }).events = []
+    const empty = promptSection((await assembleFor(root)).sections)!.text
+    expect(empty).toBe('TODO:')
+    expect(empty).not.toContain('Total:')
+    injector.dispose()
+  })
+
+  test('dynamicTodo=false：TODO_LIST 键省略，模板渲染 unavailable 提示', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = {
+      mode: makeMode({ template: '{{$TODO_LIST}}' }),
+      sendHistoryThoughts: false,
+      dynamicTodo: false,
+    }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+    const root = await makeAgent(host, 'root-todo-off', WS)
+    ;(root.session as unknown as { events: unknown[] }).events = [
+      { type: 'todo/write', data: { todos: [{ content: 'x', status: 'pending' }] } },
+    ]
+    const text = promptSection((await assembleFor(root)).sections)!.text
+    expect(text).toBe(unavailablePlaceholderText('TODO_LIST'))
+    injector.dispose()
+  })
+
+  test('MEMORY 占位符：dynamicMemory=true 提供静态能力说明；false 时渲染 unavailable 提示', async () => {
+    const { ctx, host } = await makeWorld()
+    let state = {
+      mode: makeMode({ template: '{{$MEMORY}}' }),
+      sendHistoryThoughts: false,
+      dynamicMemory: true,
+    }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-mem', WS)
+    const on = promptSection((await assembleFor(root)).sections)!.text
+    expect(on).toContain('Permanent Memory')
+    expect(on).toContain('memory_wake')
+
+    state = { ...state, dynamicMemory: false }
+    injector.refresh()
+    const off = promptSection((await assembleFor(root)).sections)!.text
+    expect(off).toBe(unavailablePlaceholderText('MEMORY'))
+    injector.dispose()
+  })
+
+  test('waterfall 无条件提供 variables.graycode_tools 与 variables.tools 别名（overrideHostPrompt 开/关均提供）', async () => {
+    const { ctx, host } = await makeWorld()
+    let state: PromptRenderState = { mode: makeMode({ template: 'tpl {{$TOOLS}}' }), sendHistoryThoughts: false }
+    const injector = createPromptInjector(ctx, 'roots', () => state)
+
+    const root = await makeAgent(host, 'root-1', WS)
+    const { assembly, sections } = await assembleFor(root)
+    // 无条件提供（即使本测试世界没有注册工具 → 空串也是 string，绝不 undefined）
+    expect(typeof assembly.variables.graycode_tools).toBe('string')
+    expect(typeof assembly.variables.tools).toBe('string')
+    expect(assembly.variables.tools).toBe(assembly.variables.graycode_tools)
+    expect(assembly.variables.graycode_tools).not.toBeUndefined()
+    // {{$TOOLS}} 在 section 文本中渲染为 {{graycode_tools}}（延迟给 DSH 渲染期变量）
+    expect(promptSection(sections)!.text).toContain('{{graycode_tools}}')
+    // 完整 prompt 渲染不抛（graycode_tools 由瀑布提供）
+    expect(() => renderPrompt(assembly)).not.toThrow()
+    injector.dispose()
+
+    // overrideHostPrompt=false：宿主提示保持原样，工具清单变量仍无条件提供
+    state = {
+      mode: makeMode({ template: 'tpl {{$TOOLS}}' }),
+      sendHistoryThoughts: false,
+      overrideHostPrompt: false,
+    }
+    const injector2 = createPromptInjector(ctx, 'roots', () => state)
+    const root2 = await makeAgent(host, 'root-2', WS)
+    const { assembly: assembly2 } = await assembleFor(root2)
+    expect(typeof assembly2.variables.graycode_tools).toBe('string')
+    expect(typeof assembly2.variables.tools).toBe('string')
+    expect(assembly2.variables.tools).toBe(assembly2.variables.graycode_tools)
+    injector2.dispose()
   })
 
   test('差距-2：variable 注册抛错 → 已注册的 section 被清理；重试不重复注入', async () => {

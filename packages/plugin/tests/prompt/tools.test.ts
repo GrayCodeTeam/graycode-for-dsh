@@ -5,7 +5,8 @@
  * 覆盖：list 的 current 标记与内建模式清单、set 的未知 modeId 稳定错误码
  * （F-10：错误码优先，文案仅补充）、preview 两态（当前模式/显式 modeId）、
  * preview render 投影（成功态 'mode <id>' 前缀 / 失败态 JSON）、
- * sendHistoryThoughts 假思考门（D-11 = c 两态）。
+ * preview entries-first 语义（正文只含系统部分；user/assistant 条目与
+ * fakeThought 不以文本出现；requestLayer=true 时追加真实消息说明）。
  */
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
@@ -144,35 +145,56 @@ describe('prompt 工具层', () => {
     }
   })
 
-  test('sendHistoryThoughts 两态：true 时注入 [thinking] 前缀，false 时省略（D-11 = c 门）', async () => {
+  test('preview 只含系统正文：user/assistant 条目与 fakeThought 不以文本出现（entries-first）', async () => {
     const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'prompt-tools-'))
     try {
       const service = new PromptSettingsService({ dataRoot })
       let sendHistoryThoughts = false
-      const tools = new Map(createPromptTools(service, () => sendHistoryThoughts).map(tool => [tool.name, tool]))
+      let requestLayer = false
+      const tools = new Map(
+        createPromptTools(service, () => sendHistoryThoughts, () => requestLayer).map(tool => [tool.name, tool]),
+      )
 
-      // 自定义模式带一条 assistant 假思考条目
+      // 自定义模式带一条 user 与一条 assistant 假思考条目
       await service.createMode({
-        name: 'with-thought',
+        name: 'with-entries',
         template: 'template-body',
         promptEntries: [
-          { id: 'e1', role: 'assistant', order: 0, enabled: true, content: 'hello from assistant', fakeThought: 'inner hmm' },
+          { id: 'u1', role: 'user', order: 0, enabled: true, content: 'user preset text' },
+          { id: 'e1', role: 'assistant', order: 1, enabled: true, content: 'hello from assistant', fakeThought: 'inner hmm' },
         ],
       })
-      const mode = (await service.listModes()).find(candidate => candidate.name === 'with-thought')!
+      const mode = (await service.listModes()).find(candidate => candidate.name === 'with-entries')!
       const preview = tools.get('prompt_mode_preview')!
 
-      sendHistoryThoughts = false
-      const off = (await preview.execute({ modeId: mode.id }, makeExec())) as PreviewResult
-      expect(off.success).toBe(true)
-      expect(off.text).toContain('hello from assistant')
-      expect(off.text).not.toContain('inner hmm')
+      // requestLayer=false：旧式 preview 形态——正文只含系统部分，无说明
+      requestLayer = false
+      const plain = (await preview.execute({ modeId: mode.id }, makeExec())) as PreviewResult
+      expect(plain.success).toBe(true)
+      expect(plain.text).toBe('template-body')
+      expect(plain.text).not.toContain('user preset text')
+      expect(plain.text).not.toContain('hello from assistant')
+      expect(plain.text).not.toContain('inner hmm')
+      expect(plain.text).not.toContain('[thinking]')
 
+      // requestLayer=true：正文仍只含系统部分，末尾追加真实消息说明
+      requestLayer = true
+      const layered = (await preview.execute({ modeId: mode.id }, makeExec())) as PreviewResult
+      expect(layered.success).toBe(true)
+      expect(layered.text).toBe(
+        'template-body\n\nNote: user/assistant preset entries will be injected as real messages at the request layer (llm/stream) and are not included in this system-text preview.',
+      )
+      expect(layered.text).not.toContain('user preset text')
+      expect(layered.text).not.toContain('hello from assistant')
+      expect(layered.text).not.toContain('inner hmm')
+      expect(layered.text).not.toContain('[thinking]')
+
+      // sendHistoryThoughts 开关对 preview 无影响（deprecated no-op）
       sendHistoryThoughts = true
       const on = (await preview.execute({ modeId: mode.id }, makeExec())) as PreviewResult
       expect(on.success).toBe(true)
-      expect(on.text).toContain('[thinking]')
-      expect(on.text).toContain('inner hmm')
+      expect(on.text).not.toContain('[thinking]')
+      expect(on.text).not.toContain('inner hmm')
     } finally {
       await fs.rm(dataRoot, { recursive: true, force: true })
     }
