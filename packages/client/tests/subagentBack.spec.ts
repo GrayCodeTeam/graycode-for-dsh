@@ -4,7 +4,7 @@
  * imported (the component is a thin shell over {@link subagentBackTarget}).
  */
 import { describe, expect, it } from 'vitest'
-import { subagentBackTarget, type SubagentBackSummaryLike } from '../src/client/subagentBack/SubagentBackButton.tsx'
+import { subagentBackTarget, subagentBackTargetFromState, type SubagentBackSummaryLike } from '../src/client/subagentBack/SubagentBackButton.tsx'
 import {
   GRAYCODE_SUBAGENT_BACK_NS,
   graycodeSubagentBackDictionaries,
@@ -28,6 +28,44 @@ describe('subagentBackTarget', () => {
     // A subagent row without a usable parent id renders nothing.
     const broken: SubagentBackSummaryLike = { id: 'child', origin: 'subagent', parentId: '' }
     expect(subagentBackTarget(broken)).toBeUndefined()
+  })
+})
+
+describe('subagentBackTargetFromState', () => {
+  it('returns the parent id when the current session is a subagent and the parent exists in the snapshot', () => {
+    const state = {
+      byId: {
+        child: { id: 'child', origin: 'subagent', parentId: 'parent-1' },
+        'parent-1': { id: 'parent-1', origin: undefined },
+      },
+    }
+    expect(subagentBackTargetFromState(state, 'child')).toBe('parent-1')
+  })
+
+  it('returns undefined when the parent session is missing (deleted parent)', () => {
+    const state = {
+      byId: {
+        child: { id: 'child', origin: 'subagent', parentId: 'parent-1' },
+      },
+    }
+    expect(subagentBackTargetFromState(state, 'child')).toBeUndefined()
+  })
+
+  it('returns undefined when byId is absent (drifted host snapshot)', () => {
+    expect(subagentBackTargetFromState({}, 'child')).toBeUndefined()
+    expect(subagentBackTargetFromState(undefined, 'child')).toBeUndefined()
+  })
+
+  it('returns undefined for non-subagent or parentless sessions even when the parent exists', () => {
+    const state = {
+      byId: {
+        main: { id: 'main', origin: undefined },
+        broken: { id: 'broken', origin: 'subagent', parentId: '' },
+        'parent-1': { id: 'parent-1', origin: undefined },
+      },
+    }
+    expect(subagentBackTargetFromState(state, 'main')).toBeUndefined()
+    expect(subagentBackTargetFromState(state, 'broken')).toBeUndefined()
   })
 })
 

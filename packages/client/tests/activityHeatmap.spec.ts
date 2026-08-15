@@ -21,6 +21,7 @@ import {
 } from '../src/client/activityHeatmap/query.ts'
 import {
   readActivityEnvelope,
+  readActivityNextCursor,
   readActivitySession,
   readActivityStatsResult,
   readActivityThrownError,
@@ -86,7 +87,7 @@ describe('activity query model', () => {
   it('buildActivityStatsRequest always carries a normalized range and forwards toggles only when true', () => {
     expect(buildActivityStatsRequest(createActivityStatsQuery())).toEqual({ range: '7d' })
     expect(buildActivityStatsRequest({ range: 'today' })).toEqual({ range: 'today' })
-    expect(buildActivityStatsRequest({ range: 'bogus' })).toEqual({ range: '7d' })
+    expect(buildActivityStatsRequest({ range: 'bogus' } as never)).toEqual({ range: '7d' })
     const full = withActivityMonthly(withActivityHourly(withActivityRange(createActivityStatsQuery(), '30d'), true), true)
     expect(buildActivityStatsRequest(full)).toEqual({ range: '30d', includeHourly: true, includeMonthly: true })
   })
@@ -187,7 +188,7 @@ describe('activity wire readers', () => {
     expect(readActivityThrownError(new Error('secret: /home/user')).code).toBe('GRAY_INTERNAL')
   })
 
-  it('narrows a token usage projection and defaults missing cache buckets to 0', () => {
+  it('narrows a token usage projection and degrades missing / non-numeric buckets to 0 (3.1-M3)', () => {
     expect(readActivityTokenBuckets({ uncachedInputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 })).toEqual({
       inputTokens: 10,
       outputTokens: 20,
@@ -202,9 +203,23 @@ describe('activity wire readers', () => {
       cacheWriteTokens: 0,
       totalTokens: 11,
     })
-    expect(readActivityTokenBuckets({ uncachedInputTokens: 5 })).toBeNull()
+    // 缺失/非数值字段降级为 0（宿主契约字段名不可验证），不整行丢弃，避免整节静默为空
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 5 })).toEqual({
+      inputTokens: 5,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 5,
+    })
+    expect(readActivityTokenBuckets({ uncachedInputTokens: 'x', outputTokens: 1 })).toEqual({
+      inputTokens: 0,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 1,
+    })
+    // 非 record 输入仍视为不可读（null）
     expect(readActivityTokenBuckets('nope')).toBeNull()
-    expect(readActivityTokenBuckets({ uncachedInputTokens: 'x', outputTokens: 1 })).toBeNull()
   })
 
   it('narrows a session summary item, buckets by the session start day and drops items without usable projections', () => {
@@ -236,6 +251,13 @@ describe('activity wire readers', () => {
     expect(readActivityTokenListItems({ items: 'x' })).toBeNull()
     expect(readActivityTokenListItems({})).toBeNull()
     expect(readActivityTokenListItems(null)).toBeNull()
+  })
+
+  it('narrows the session.list page cursor (absent/blank = no more pages)', () => {
+    expect(readActivityNextCursor({ nextCursor: 'abc' })).toBe('abc')
+    expect(readActivityNextCursor({ nextCursor: '  ' })).toBeUndefined()
+    expect(readActivityNextCursor({})).toBeUndefined()
+    expect(readActivityNextCursor('nope')).toBeUndefined()
   })
 })
 
@@ -489,6 +511,25 @@ describe('mock activity data source', () => {
     const source = new MockActivityStatsDataSource({ failure: 'GRAY_STORAGE_CORRUPT' })
     await expect(source.stats({})).rejects.toMatchObject({ code: 'GRAY_STORAGE_CORRUPT' })
   })
+
+  it('stays internally consistent (daily sums, sessions, monthly aggregation) (4.1-L3)', async () => {
+    const now = Date.UTC(2026, 7, 14, 12, 0, 0)
+    const result = await new MockActivityStatsDataSource({ now }).stats({})
+    for (const day of result.daily) {
+      const hourlyTotal = day.hourly.reduce((sum, minutes) => sum + minutes, 0)
+      expect(day.totalMinutes).toBe(hourlyTotal)
+      expect(day.sessionCount).toBe(day.sessions.length)
+      expect(day.sessions.reduce((sum, session) => sum + session.minutes, 0)).toBe(day.totalMinutes)
+    }
+    const month = result.monthly[0]!
+    const monthDays = result.daily.filter(day => day.date.startsWith(month.month))
+    expect(month.totalMinutes).toBe(monthDays.reduce((sum, day) => sum + day.totalMinutes, 0))
+    expect(month.activeDays).toBe(monthDays.filter(day => day.totalMinutes > 0).length)
+    expect(month.sessionCount).toBe(monthDays.reduce((sum, day) => sum + day.sessionCount, 0))
+    // 固定锚点下 7 天全部落在同一个月（任意测试环境时区下均为 2026-08-08..15）
+    expect(month.activeDays).toBe(7)
+    expect(month.sessionCount).toBe(13)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -573,6 +614,33 @@ describe('connection token data source', () => {
     const rejected = new ConnectionActivityTokensDataSource({ sessions: { list: async () => { throw new Error('net down') } } })
     await expect(rejected.tokens({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
   })
+
+  it('pages through session.list with the cursor until no nextCursor remains (3.1-M2)', async () => {
+    const list = vi.fn(async (payload: { readonly cursor?: string }) => ({
+      result: {
+        ok: true as const,
+        value: payload.cursor === undefined
+          ? { items: [SESSION_LIST_ITEMS[0]], nextCursor: 'page-2' }
+          : { items: [SESSION_LIST_ITEMS[1]], total: 2 },
+      },
+    }))
+    const source = new ConnectionActivityTokensDataSource({ sessions: { list } })
+    const result = await source.tokens({ range: 'all' })
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(list.mock.calls[0]![0]).toEqual({})
+    expect(list.mock.calls[1]![0]).toEqual({ cursor: 'page-2' })
+    // 两页都已拉取；第二页的空白会话（无 token 投影）被丢弃
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0]).toMatchObject({ sessionId: 'session-a', totalTokens: 300 })
+  })
+
+  it('guards against a repeating cursor with a hard page cap (3.1-M2)', async () => {
+    const list = vi.fn(async () => ({
+      result: { ok: true as const, value: { items: [SESSION_LIST_ITEMS[0]], nextCursor: 'loop' } },
+    }))
+    const source = new ConnectionActivityTokensDataSource({ sessions: { list } })
+    await expect(source.tokens({})).rejects.toMatchObject({ code: 'GRAY_INTERNAL' })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -610,7 +678,7 @@ describe('graycode.activityHeatmap locale dictionaries', () => {
       expect(en[`range.${range}`], range).toBeDefined()
     }
     for (const code of ['invalidInput', 'conflict', 'approvalRequired', 'cancelled', 'storageCorrupt', 'notFound', 'endpointNotFound', 'internal', 'unknown']) {
-      expect(en[`error.${code}`], code).toBeDefined()
+      expect((en as Record<string, string>)[`error.${code}`], code).toBeDefined()
     }
   })
 })

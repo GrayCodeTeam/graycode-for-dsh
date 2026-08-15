@@ -46,7 +46,10 @@ the current `/graycode` bridge or a future Typert client can feed unchanged.
 - `loadFirstPage()` fetches page 1 (also the retry entry point);
   `loadNextPage()` appends one page via `nextCursor` and is a no-op at the
   end; `reload()` clears and restarts. **One page per request — never a full
-  fetch**; concurrent loads are ignored while one is in flight.
+  fetch**; concurrent loads are ignored while one is in flight. A `reload()`
+  issued while a load is in flight is queued, never dropped, and every caller
+  awaits the completion of the refresh its request produced (a reload made
+  while a queued reload is already running gets its own promise — M-5).
 - Pages merge by id (`mergeCheckpointItems`): an overlapping/retried page
   collapses to the first occurrence, so entries never duplicate.
 - `GRAY_CANCELLED` is a silent stop: state returns to the previous snapshot

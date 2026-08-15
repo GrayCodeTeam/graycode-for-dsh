@@ -119,6 +119,16 @@ const HINT_TABLE: Readonly<Record<string, RestoreErrorHint>> = {
     rePreviewRequired: false,
     key: 'error.malformed',
   },
+  [RESTORE_CLIENT_ERROR_CODES.TIMEOUT]: {
+    code: RESTORE_CLIENT_ERROR_CODES.TIMEOUT,
+    severity: 'error',
+    // The host may still be mid-flight (or the operation may have finished) —
+    // a blind retry could double-apply a destructive restore, so require a
+    // fresh preview before attempting again.
+    retryable: false,
+    rePreviewRequired: true,
+    key: 'error.timeout',
+  },
 }
 
 const FALLBACK_HINT: RestoreErrorHint = {

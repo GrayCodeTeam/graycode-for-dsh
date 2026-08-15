@@ -47,6 +47,26 @@ export const EMPTY_WORKFLOW_STREAM: WorkflowStreamWindow = {
 }
 
 /**
+ * Upper bound on retained window events (audit M5). The engine keeps a
+ * bounded session window too; beyond this the window evicts its oldest
+ * (lowest-seq) events. An evicted start leaves its result start-less until an
+ * older page is loaded — the engine's documented replay semantics, which
+ * {@link foldWorkflowWindow} already handles.
+ *
+ * KNOWN LIMITATION (documented, not fixed): every update still copies the
+ * whole window (O(n) per op, O(n²) over a long session); a ring-buffer backing
+ * store is out of scope for the browser skeleton. Live SSE push and
+ * disconnected-stream reconnection are separate documented gaps (module doc).
+ */
+export const WORKFLOW_WINDOW_MAX = 2048
+
+function capWorkflowWindow(entries: readonly WorkflowEventLike[]): readonly WorkflowEventLike[] {
+  return entries.length > WORKFLOW_WINDOW_MAX
+    ? entries.slice(entries.length - WORKFLOW_WINDOW_MAX)
+    : entries
+}
+
+/**
  * Sort by seq (stable) and drop duplicate seqs keeping the first occurrence.
  * @param entries - input events (may be unordered or duplicated).
  */
@@ -74,7 +94,7 @@ export function applyWorkflowStreamUpdate(
 ): WorkflowStreamWindow {
   switch (update.kind) {
     case 'replace': {
-      const entries = dedupeWorkflowEvents(update.entries)
+      const entries = capWorkflowWindow(dedupeWorkflowEvents(update.entries))
       return { entries, hasMore: update.hasMore, revision: window.revision + 1 }
     }
     case 'prepend': {
@@ -84,7 +104,7 @@ export function applyWorkflowStreamUpdate(
       )
       if (incoming.length === 0 && update.hasMore === window.hasMore) return window
       return {
-        entries: [...incoming, ...window.entries],
+        entries: capWorkflowWindow([...incoming, ...window.entries]),
         hasMore: update.hasMore,
         revision: window.revision + 1,
       }
@@ -93,7 +113,7 @@ export function applyWorkflowStreamUpdate(
       const tail = window.entries.at(-1)
       if (tail !== undefined && update.entry.seq <= tail.seq) return window
       return {
-        entries: [...window.entries, update.entry],
+        entries: capWorkflowWindow([...window.entries, update.entry]),
         hasMore: window.hasMore,
         revision: window.revision + 1,
       }

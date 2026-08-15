@@ -35,6 +35,7 @@ import {
   MEMORY_DIFF_MAX_CELLS,
   normalizeMemoryLimit,
   normalizeMemoryEntryChars,
+  normalizeMemoryNoteText,
   parseMemoryNextCursor,
   rejectForget,
   requestForget,
@@ -61,6 +62,8 @@ import {
   readMemoryForgetResult,
   readMemoryListResult,
   type GrayMemoryEntryView,
+  type GrayRemoteErrorCode,
+  type GrayRemoteFailure,
 } from '../src/client/memoryManage/types.ts'
 import {
   GRAYCODE_MEMORY_MANAGE_NS,
@@ -71,8 +74,8 @@ import {
 const CODES = GRAY_REMOTE_ERROR_CODES
 const REVISION = 'sha256:test-revision'
 
-function failure(code: string, message = 'boom'): { code: string; message: string; details: Record<string, unknown> } {
-  return { code, message, details: {} }
+function failure(code: string, message = 'boom'): GrayRemoteFailure {
+  return { code: code as GrayRemoteErrorCode, message, details: {} }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +253,36 @@ describe('findMatchRanges', () => {
       { start: 2, end: 4 },
     ])
   })
+
+  it('keeps ranges aligned to the original text under length-changing case folds (4.4-L2)', () => {
+    // 'İ' (U+0130) lowercases to 'i̇' — expanding to two code units in engines
+    // that apply Unicode default case conversion — so naive indices on a
+    // whole-string-lowercased copy would shift the range. The reconstruction
+    // assertion holds regardless of the engine's expansion behavior.
+    const ranges = findMatchRanges('AİB', 'İ')
+    expect(ranges).toEqual([{ start: 1, end: 2 }])
+    expect('AİB'.slice(ranges[0]!.start, ranges[0]!.end)).toBe('İ')
+  })
+
+  it('never splits a surrogate pair when highlighting (4.4-L2)', () => {
+    const ranges = findMatchRanges('a𝒳b', '𝒳')
+    expect(ranges).toEqual([{ start: 1, end: 3 }])
+    expect('a𝒳b'.slice(ranges[0]!.start, ranges[0]!.end)).toBe('𝒳')
+  })
+})
+
+describe('normalizeMemoryNoteText (3.4-M2)', () => {
+  it('collapses CRLF/LF/CR to a single space and trims before submit', () => {
+    expect(normalizeMemoryNoteText('line one\nline two')).toEqual({ text: 'line one line two', changed: true })
+    expect(normalizeMemoryNoteText('line one\r\nline two')).toEqual({ text: 'line one line two', changed: true })
+    expect(normalizeMemoryNoteText('line one\rline two')).toEqual({ text: 'line one line two', changed: true })
+    expect(normalizeMemoryNoteText('  line one\n\nline two  ')).toEqual({ text: 'line one  line two', changed: true })
+  })
+
+  it('reports unchanged when no line break is present (plain trimming is not flagged)', () => {
+    expect(normalizeMemoryNoteText('single line')).toEqual({ text: 'single line', changed: false })
+    expect(normalizeMemoryNoteText('  padded  ')).toEqual({ text: 'padded', changed: false })
+  })
 })
 
 describe('buildMemoryEntryView / buildMemoryListViewModel', () => {
@@ -370,7 +403,7 @@ describe('diffMemoryText', () => {
 // ---------------------------------------------------------------------------
 
 describe('forget confirmation state machine', () => {
-  const target = { id: 5, scope: 'global' as const }
+  const target = { id: 5, scope: 'global' as const, revision: REVISION }
   const preview = 'the exact memory text'
 
   it('starts idle and frozen', () => {
@@ -387,7 +420,7 @@ describe('forget confirmation state machine', () => {
 
   it('request is a no-op while already armed', () => {
     const armed = requestForget(IDLE_FORGET_STATE, target, preview)
-    expect(requestForget(armed, { id: 9, scope: 'workspace' }, 'other')).toBe(armed)
+    expect(requestForget(armed, { id: 9, scope: 'workspace', revision: REVISION }, 'other')).toBe(armed)
   })
 
   it('cancel abandons from confirming and from error, no-op from idle', () => {
@@ -785,7 +818,7 @@ describe('createMockMemoryTransport', () => {
     expect(unconfirmed.ok).toBe(false)
     if (unconfirmed.ok) return
     expect(unconfirmed.error.code).toBe(CODES.APPROVAL_REQUIRED)
-    const missingConfirm = await transport.forget({ blockId: '1' })
+    const missingConfirm = await transport.forget({ blockId: '1' } as never) // 故意缺 confirm：验证 APPROVAL_REQUIRED 门闸
     expect(missingConfirm.ok).toBe(false)
     if (missingConfirm.ok) return
     expect(missingConfirm.error.code).toBe(CODES.APPROVAL_REQUIRED)
@@ -841,6 +874,53 @@ describe('createMockMemoryTransport', () => {
     expect(empty.ok).toBe(false)
     if (empty.ok) return
     expect(empty.error.code).toBe(CODES.INVALID_INPUT)
+  })
+
+  it('rejects multi-line text in add/edit like the host single-line contract (4.4-L4)', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const lf = await transport.add({ text: 'line one\nline two' })
+    expect(lf.ok).toBe(false)
+    if (lf.ok) return
+    expect(lf.error.code).toBe(CODES.INVALID_INPUT)
+
+    const crlf = await transport.add({ text: 'line one\r\nline two' })
+    expect(crlf.ok).toBe(false)
+    if (crlf.ok) return
+    expect(crlf.error.code).toBe(CODES.INVALID_INPUT)
+
+    const listed = await transport.list({})
+    if (!listed.ok) throw new Error('expected list')
+    const edit = await transport.edit({ id: 0, text: 'one\ntwo', expectedRevision: listed.value.revision })
+    expect(edit.ok).toBe(false)
+    if (edit.ok) return
+    expect(edit.error.code).toBe(CODES.INVALID_INPUT)
+  })
+
+  it('enforces the entryChars byte limit in add/edit like the host (4.4-L4)', async () => {
+    const transport = createMockMemoryTransport(seed, {
+      config: { wakeLines: 96, entryChars: 16, partChars: 20_000, partLines: 500 },
+    })
+    const ok = await transport.add({ text: 'short note' })
+    expect(ok.ok).toBe(true)
+
+    const tooLong = await transport.add({ text: 'this note is definitely longer than sixteen bytes' })
+    expect(tooLong.ok).toBe(false)
+    if (tooLong.ok) return
+    expect(tooLong.error).toMatchObject({
+      code: CODES.INVALID_INPUT,
+      details: { field: 'text', limit: 16 },
+    })
+
+    const listed = await transport.list({})
+    if (!listed.ok) throw new Error('expected list')
+    const edit = await transport.edit({
+      id: 0,
+      text: 'this edit is also way too long for the sixteen byte limit',
+      expectedRevision: listed.value.revision,
+    })
+    expect(edit.ok).toBe(false)
+    if (edit.ok) return
+    expect(edit.error.code).toBe(CODES.INVALID_INPUT)
   })
 
   it('add respects the workspace scope guard (requires a workspace root)', async () => {

@@ -113,7 +113,10 @@ export function NotificationCenter({ t, source }: NotificationCenterProps): Reac
       setEntries((current) => {
         const next = current.filter((entry) => entry.id !== intent.id)
         next.push(intent)
-        return next.slice(-NOTIFICATION_CENTER_MAX_ENTRIES)
+        // 4.7-L2：稳定排序——按时间戳 newest-first（README 语义），同一毫秒按 id
+        // 升序（确定性顺序），状态更新移动条目不改变相对展示顺序。
+        next.sort((a, b) => b.at - a.at || a.id.localeCompare(b.id))
+        return next.slice(0, NOTIFICATION_CENTER_MAX_ENTRIES)
       })
     })
   }, [source])

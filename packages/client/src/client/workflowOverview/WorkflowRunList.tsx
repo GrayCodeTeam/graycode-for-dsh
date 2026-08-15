@@ -13,7 +13,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { workflowOverviewErrorHint } from './errors.ts'
 import type { WorkflowOverviewPageState } from './paging.ts'
-import type { WorkflowRunView } from './viewModel.ts'
+import { workflowRunKey, type WorkflowRunView } from './viewModel.ts'
 import { WorkflowRunCard } from './WorkflowRunCard.tsx'
 
 /** Composed props for the overview list body. */
@@ -109,6 +109,17 @@ export function WorkflowRunList({ t, page, onLoadMore, onLocateSession, onOpenDo
   const errorHint = page.error !== null ? workflowOverviewErrorHint(page.error.code) : null
   const retryable = errorHint?.retryable ?? false
 
+  if (page.phase === 'idle') {
+    // Pre-fetch frame (the first-page effect has not committed yet): render
+    // the loading hint instead of the "0 workflow runs" total line, so the
+    // count never flashes before the first page lands (audit L2).
+    return (
+      <div data-graycode-workflow-overview="loading" role="status" style={stateStyle}>
+        {t('state.loading')}
+      </div>
+    )
+  }
+
   if (page.phase === 'loading' && page.entries.length === 0) {
     return (
       <div data-graycode-workflow-overview="loading" role="status" style={stateStyle}>
@@ -156,7 +167,7 @@ export function WorkflowRunList({ t, page, onLoadMore, onLocateSession, onOpenDo
       <div style={listStyle}>
         {page.entries.map((run) => (
           <WorkflowRunCard
-            key={run.id}
+            key={workflowRunKey(run)}
             t={t}
             run={run}
             onLocateSession={onLocateSession}

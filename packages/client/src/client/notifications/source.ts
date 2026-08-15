@@ -17,7 +17,15 @@ export interface NotificationBus {
   push(intent: NotificationIntent): void
 }
 
-/** 内存通知总线（subscribe 返回退订函数，幂等）。 */
+/**
+ * 内存通知总线（subscribe 返回退订函数，幂等）。
+ *
+ * 设计说明（4.7-M4）：本总线【不做历史回放】——subscribe 之前 push 的意图不会在
+ * 订阅时补投。该 no-replay 语义被测试锁定（`tests/notifications.spec.ts`
+ * 「subscribe 前 push 不投递（无历史回放）」），属有意设计：面板未挂载期间的
+ * 通知丢失缺口见 README Known gaps（已知限制），跨窗口关联由
+ * {@link createNotificationFoldSession}（fold.ts）在事件流侧保留。
+ */
 export function createNotificationBus(): NotificationBus {
   const listeners = new Set<(intent: NotificationIntent) => void>()
   return {
@@ -30,7 +38,15 @@ export function createNotificationBus(): NotificationBus {
       },
     },
     push(intent) {
-      for (const listener of listeners) listener(intent)
+      // 4.7-L3：逐个订阅者 try/catch——单个订阅者抛异常不得中断其余订阅者，
+      // 也不得把异常上抛给 push 调用方（影响通知展示桥的其它消费者）。
+      for (const listener of listeners) {
+        try {
+          listener(intent)
+        } catch {
+          // 忽略单个订阅者的异常，其余订阅者照常收到。
+        }
+      }
     },
   }
 }

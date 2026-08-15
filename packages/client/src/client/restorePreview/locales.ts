@@ -23,6 +23,13 @@ export type GrayCodeRestorePreviewLocaleKey =
   | 'phase.running'
   | 'phase.done'
   | 'phase.failed'
+  | 'phaseProgress.pending'
+  | 'phaseProgress.preparing'
+  | 'phaseProgress.restoring'
+  | 'phaseProgress.done'
+  | 'phaseProgress.failed'
+  | 'phaseProgress.cancelled'
+  | 'phaseProgress.unknown'
   | 'class.restore'
   | 'class.delete'
   | 'class.untracked'
@@ -45,12 +52,14 @@ export type GrayCodeRestorePreviewLocaleKey =
   | 'error.partial'
   | 'error.previewFailed'
   | 'error.malformed'
+  | 'error.timeout'
   | 'error.unknown'
   | 'title'
   | 'checkpointLabel'
   | 'previewButton'
   | 'previewing'
   | 'restoreButton'
+  | 'cancelButton'
   | 'confirmButton'
   | 'confirmCheckbox'
   | 'confirmWarning'
@@ -62,6 +71,7 @@ export type GrayCodeRestorePreviewLocaleKey =
   | 'pasteTokenButton'
   | 'pasteTokenTitle'
   | 'progressLabel'
+  | 'prunedNote'
   | 'processedLabel'
   | 'restoredCountLabel'
   | 'deletedCountLabel'
@@ -107,6 +117,13 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     'phase.running': '恢复中',
     'phase.done': '完成',
     'phase.failed': '失败',
+    'phaseProgress.pending': '等待中',
+    'phaseProgress.preparing': '准备中',
+    'phaseProgress.restoring': '恢复中',
+    'phaseProgress.done': '完成',
+    'phaseProgress.failed': '失败',
+    'phaseProgress.cancelled': '已取消',
+    'phaseProgress.unknown': '进行中',
     'class.restore': '恢复',
     'class.delete': '删除',
     'class.untracked': '未跟踪',
@@ -129,12 +146,14 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     'error.partial': '恢复完成但部分文件失败，详见下方失败清单',
     'error.previewFailed': '恢复预览失败，无法确认恢复',
     'error.malformed': '端点返回无法解析的结果',
+    'error.timeout': '恢复调用超时：host 未在限定时间内响应。请重新预览获取新 token 后重试',
     'error.unknown': '未知错误',
     title: '存档恢复',
     checkpointLabel: '存档',
     previewButton: '预览恢复',
     previewing: '正在计算恢复预览…',
     restoreButton: '执行恢复',
+    cancelButton: '取消恢复',
     confirmButton: '确认并继续',
     confirmCheckbox: '我了解此操作会覆盖或删除工作区文件，且不可撤销',
     confirmWarning: '二次确认：恢复会立即写入工作区。请核对上方文件清单',
@@ -146,6 +165,7 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     pasteTokenButton: '使用已有 token',
     pasteTokenTitle: '通过 token 确认恢复',
     progressLabel: '恢复进度',
+    prunedNote: '已自动清理的旧存档',
     processedLabel: '已处理',
     restoredCountLabel: '已恢复',
     deletedCountLabel: '已删除',
@@ -175,6 +195,13 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     'phase.running': 'Restoring',
     'phase.done': 'Done',
     'phase.failed': 'Failed',
+    'phaseProgress.pending': 'Pending',
+    'phaseProgress.preparing': 'Preparing',
+    'phaseProgress.restoring': 'Restoring',
+    'phaseProgress.done': 'Done',
+    'phaseProgress.failed': 'Failed',
+    'phaseProgress.cancelled': 'Cancelled',
+    'phaseProgress.unknown': 'In progress',
     'class.restore': 'Restore',
     'class.delete': 'Delete',
     'class.untracked': 'Untracked',
@@ -197,12 +224,14 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     'error.partial': 'Restore finished with per-file failures — see the list below',
     'error.previewFailed': 'Restore preview failed — restore cannot be confirmed',
     'error.malformed': 'Endpoint returned an unreadable result',
+    'error.timeout': 'Restore call timed out — the host did not respond in time. Re-run the preview for a fresh token and try again',
     'error.unknown': 'Unknown error',
     title: 'Checkpoint restore',
     checkpointLabel: 'Checkpoint',
     previewButton: 'Preview restore',
     previewing: 'Computing restore preview…',
     restoreButton: 'Restore now',
+    cancelButton: 'Cancel restore',
     confirmButton: 'Confirm and continue',
     confirmCheckbox: 'I understand this will overwrite or delete workspace files and cannot be undone',
     confirmWarning: 'Final confirmation: restore writes to the workspace immediately. Review the file list above',
@@ -214,6 +243,7 @@ export const graycodeRestorePreviewDictionaries: Record<LocaleId, LocaleDictOf<'
     pasteTokenButton: 'Use an existing token',
     pasteTokenTitle: 'Confirm restore with a token',
     progressLabel: 'Restore progress',
+    prunedNote: 'Old checkpoints auto-pruned',
     processedLabel: 'Processed',
     restoredCountLabel: 'Restored',
     deletedCountLabel: 'Deleted',
@@ -251,6 +281,13 @@ export const graycodeRestorePreviewJaPlaceholder: LocaleDict = {
   'phase.running': '復元中',
   'phase.done': '完了',
   'phase.failed': '失敗',
+  'phaseProgress.pending': '待機中',
+  'phaseProgress.preparing': '準備中',
+  'phaseProgress.restoring': '復元中',
+  'phaseProgress.done': '完了',
+  'phaseProgress.failed': '失敗',
+  'phaseProgress.cancelled': 'キャンセル済み',
+  'phaseProgress.unknown': '進行中',
   'class.restore': '復元',
   'class.delete': '削除',
   'class.untracked': '未追跡',
@@ -273,12 +310,14 @@ export const graycodeRestorePreviewJaPlaceholder: LocaleDict = {
   'error.partial': '復元は完了しましたが一部のファイルが失敗しました。以下のリストを確認してください',
   'error.previewFailed': '復元プレビューに失敗したため、復元を確認できません',
   'error.malformed': 'エンドポイントが解析不能な結果を返しました',
+  'error.timeout': '復元の呼び出しがタイムアウトしました。ホストが時間内に応答しませんでした。プレビューを再実行して新しいトークンを取得し、再試行してください',
   'error.unknown': '不明なエラー',
   title: 'チェックポイント復元',
   checkpointLabel: 'チェックポイント',
   previewButton: '復元をプレビュー',
   previewing: '復元プレビューを計算中…',
   restoreButton: '今すぐ復元',
+  cancelButton: '復元をキャンセル',
   confirmButton: '確認して続行',
   confirmCheckbox: 'この操作でワークスペースのファイルが上書きまたは削除され、元に戻せないことを理解しています',
   confirmWarning: '最終確認：復元はすぐにワークスペースへ書き込みます。上のファイルリストを確認してください',
@@ -290,6 +329,7 @@ export const graycodeRestorePreviewJaPlaceholder: LocaleDict = {
   pasteTokenButton: '既存のトークンを使用',
   pasteTokenTitle: 'トークンで復元を確認',
   progressLabel: '復元の進捗',
+  prunedNote: '自動整理された旧チェックポイント',
   processedLabel: '処理済み',
   restoredCountLabel: '復元済み',
   deletedCountLabel: '削除済み',

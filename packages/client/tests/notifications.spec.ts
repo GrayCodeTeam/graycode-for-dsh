@@ -10,6 +10,7 @@ import {
   NOTIFY_TOOL_NAME,
   notificationId,
   notificationsFromWindow,
+  createNotificationFoldSession,
   parseNotifyArgs,
   readNotifyToolCall,
   readNotifyToolResult,
@@ -144,6 +145,23 @@ describe('fold readers', () => {
     expect(readNotifyToolResult('nope')).toBeNull()
   })
 
+  it('缺 message.source.callId 时用 meta.callId 兜底（4.7-M2）', () => {
+    const viaMeta = readNotifyToolResult({
+      turn: 0,
+      step: 0,
+      meta: { callId: 'c9' },
+      message: { source: {}, content: [] },
+    })
+    expect(viaMeta).toEqual({ callId: 'c9', error: undefined })
+  })
+
+  it('source/meta 皆缺时用 fallbackId 兜底，不产生 undefined 键（4.7-M2）', () => {
+    const viaFallback = readNotifyToolResult({ turn: 0, step: 0, message: { source: {}, content: [] } }, 'seq:42')
+    expect(viaFallback).toEqual({ callId: 'seq:42', error: undefined })
+    // 未提供 fallbackId 时仍保持原语义：无关联键 → null
+    expect(readNotifyToolResult({ turn: 0, step: 0, message: { source: {}, content: [] } })).toBeNull()
+  })
+
   it('parseNotifyArgs 默认值 / 防御性收窄', () => {
     expect(parseNotifyArgs(JSON.stringify({ title: 'T', message: ' M ', level: 'warning', silent: true }))).toEqual({
       title: 'T',
@@ -157,8 +175,10 @@ describe('fold readers', () => {
       level: 'info',
       silent: false,
     })
-    expect(parseNotifyArgs(JSON.stringify({ title: 'T', level: 'bogus' })).level).toBe('info')
-    expect(parseNotifyArgs(JSON.stringify({ title: 'T', silent: 'yes' })).silent).toBe(false)
+    const degraded = parseNotifyArgs(JSON.stringify({ title: 'T', level: 'bogus' }))
+    expect(degraded?.level).toBe('info')
+    const silent = parseNotifyArgs(JSON.stringify({ title: 'T', silent: 'yes' }))
+    expect(silent?.silent).toBe(false)
     expect(parseNotifyArgs('not-json')).toBeNull()
     expect(parseNotifyArgs('[]')).toBeNull()
     expect(parseNotifyArgs(JSON.stringify({ message: 'no title' }))).toBeNull()
@@ -232,6 +252,65 @@ describe('notificationsFromWindow', () => {
 
   it('notificationId 稳定', () => {
     expect(notificationId('c1')).toBe('call:c1')
+  })
+})
+
+describe('createNotificationFoldSession（跨窗口关联，4.7-M1）', () => {
+  it('tool/call 与 tool/result 跨窗口仍能关联并终结（不再永停 active）', () => {
+    const session = createNotificationFoldSession()
+    const w1 = session.push(windowOf(toolCall('c1', NOTIFY_TOOL_NAME, NOTIFY_ARGS, 1000)))
+    expect(w1).toHaveLength(1)
+    expect(w1[0]!.id).toBe('call:c1')
+    expect(w1[0]!.status).toBe('active')
+
+    // result 在下一个窗口到达：仍能关联到上一个窗口的 call
+    const w2 = session.push(windowOf(toolResult('c1', undefined, 2000)))
+    expect(w2).toHaveLength(1)
+    expect(w2[0]!.id).toBe('call:c1')
+    expect(w2[0]!.status).toBe('completed')
+    expect(w2[0]!.title).toBe('Build passed')
+    expect(w2[0]!.at).toBe(1000) // 时间取自 tool/call
+  })
+
+  it('跨窗口错误结果 → failed / cancelled，同样终结 active', () => {
+    const session = createNotificationFoldSession()
+    session.push(windowOf(toolCall('c1', NOTIFY_TOOL_NAME, NOTIFY_ARGS, 1000)))
+    const out = session.push(
+      windowOf(toolResult('c1', { name: 'NotificationError', code: 'GRAY_NOTIFY_INVALID_INPUT' }, 2000)),
+    )
+    expect(out[0]!.status).toBe('failed')
+
+    const session2 = createNotificationFoldSession()
+    session2.push(windowOf(toolCall('c2', NOTIFY_TOOL_NAME, NOTIFY_ARGS, 1000)))
+    const out2 = session2.push(windowOf(toolResult('c2', { name: 'Error', code: 'GRAY_CANCELLED' }, 2000)))
+    expect(out2[0]!.status).toBe('cancelled')
+  })
+
+  it('同一窗口 call+result 只输出终结态（与 notificationsFromWindow 一致）', () => {
+    const session = createNotificationFoldSession()
+    const out = session.push(windowOf(toolCall('c1', NOTIFY_TOOL_NAME, NOTIFY_ARGS, 1000), toolResult('c1')))
+    expect(out).toHaveLength(1)
+    expect(out[0]!.id).toBe('call:c1')
+    expect(out[0]!.status).toBe('completed')
+  })
+
+  it('会话内仍不渲染 start-less result；非 notify / 非法参数忽略', () => {
+    const session = createNotificationFoldSession()
+    expect(session.push(windowOf(toolResult('c1')))).toEqual([])
+    expect(session.push(windowOf(toolCall('c1', 'get_activity_stats', '{}')))).toEqual([])
+    expect(session.push(windowOf(toolCall('c1', NOTIFY_TOOL_NAME, '{}')))).toEqual([])
+  })
+
+  it('notificationsFromWindow 遇无 callId 的 result 不产生 undefined 键（不崩溃）', () => {
+    const intents = notificationsFromWindow(
+      windowOf({
+        type: 'tool/result',
+        seq: 3,
+        time: 3000,
+        data: { turn: 0, step: 0, message: { source: {}, content: [] } },
+      }),
+    )
+    expect(intents).toEqual([])
   })
 })
 
@@ -338,6 +417,25 @@ describe('BrowserNotificationPresenter 权限生命周期', () => {
     expect(await presenter.present(intent())).toEqual({ status: 'failed', intentId: 'call:c1' })
   })
 
+  it('requestPermission 返回非标准值 → 按拒绝处理（4.7-L4）', async () => {
+    const bogusPort: NotificationApiPort = {
+      permission: () => 'default',
+      // 旧式浏览器可能返回 'prompt' 或其它非标准值
+      requestPermission: async () => 'prompt' as unknown as NotificationPermissionState,
+      show: () => true,
+    }
+    const presenter = new BrowserNotificationPresenter(bogusPort)
+    expect(await presenter.present(intent())).toEqual({ status: 'denied', intentId: 'call:c1' })
+
+    const undefinedPort: NotificationApiPort = {
+      permission: () => 'default',
+      requestPermission: async () => undefined as unknown as NotificationPermissionState,
+      show: () => true,
+    }
+    const presenter2 = new BrowserNotificationPresenter(undefinedPort)
+    expect(await presenter2.present(intent())).toEqual({ status: 'denied', intentId: 'call:c1' })
+  })
+
   it('非 completed 意图 → failed 且不触碰端口', async () => {
     const { port, calls } = portOf({ permission: 'granted' })
     const presenter = new BrowserNotificationPresenter(port)
@@ -378,6 +476,17 @@ describe('createNotificationBus', () => {
     const received: string[] = []
     bus.source.subscribe((item) => received.push(item.id))
     expect(received).toEqual([])
+  })
+
+  it('单个订阅者抛异常不中断其余订阅者，也不上抛（4.7-L3）', () => {
+    const bus = createNotificationBus()
+    const received: string[] = []
+    bus.source.subscribe(() => {
+      throw new Error('boom')
+    })
+    bus.source.subscribe((item) => received.push(item.id))
+    expect(() => bus.push(intent({ id: 'x' }))).not.toThrow()
+    expect(received).toEqual(['x'])
   })
 })
 

@@ -134,17 +134,55 @@ export interface MemoryMatchRange {
 export function findMatchRanges(text: string, query: string): readonly MemoryMatchRange[] {
   const needle = query.trim().toLowerCase()
   if (needle.length === 0) return []
-  const haystack = text.toLowerCase()
+  const { haystack, startOffsetAt, endOffsetAt } = buildLowercasedHaystack(text)
   const ranges: MemoryMatchRange[] = []
   let from = 0
   for (;;) {
     const index = haystack.indexOf(needle, from)
     if (index < 0) break
-    ranges.push({ start: index, end: index + needle.length })
+    const start = startOffsetAt(index)
+    const end = endOffsetAt(index + needle.length - 1)
+    if (end > start) ranges.push({ start, end })
     from = index + needle.length
-    if (from >= text.length) break
+    if (from >= haystack.length) break
   }
   return ranges
+}
+
+/**
+ * Lowercase `text` code-point by code-point while recording, for every output
+ * code-unit offset, the original code-unit range it came from.
+ *
+ * 4.4-L2: whole-string `text.toLowerCase()` can change the string's length
+ * (e.g. 'İ' U+0130 lowercases to 'i̇' — one code point expanding to two code
+ * units), which shifts naive match indices relative to the original text.
+ * Surrogate pairs are iterated as single code points by `for...of`, so a
+ * highlight range never splits a pair (start maps to the pair's first unit,
+ * end maps past its last unit).
+ */
+function buildLowercasedHaystack(text: string): {
+  readonly haystack: string
+  readonly startOffsetAt: (index: number) => number
+  readonly endOffsetAt: (index: number) => number
+} {
+  let haystack = ''
+  const starts: number[] = []
+  const ends: number[] = []
+  let original = 0
+  for (const char of text) {
+    const lower = char.toLowerCase()
+    haystack += lower
+    for (let i = 0; i < lower.length; i++) {
+      starts.push(original)
+      ends.push(original + char.length)
+    }
+    original += char.length
+  }
+  return {
+    haystack,
+    startOffsetAt: (index: number) => (index < starts.length ? starts[index]! : text.length),
+    endOffsetAt: (index: number) => (index < ends.length ? ends[index]! : text.length),
+  }
 }
 
 /** List context every entry is projected against. */
@@ -594,6 +632,18 @@ export function normalizeMemoryEntryChars(value: unknown): number | undefined {
     && value <= 1_000
     ? value
     : undefined
+}
+
+/**
+ * 3.4-M2: the host `memory/note` / `memory/edit` contract rejects any text
+ * containing a line break ("A memory is one line."). The add box is a
+ * textarea, so before submitting we collapse CRLF/LF/CR to a single space and
+ * trim. `changed` reports whether a line break was actually collapsed, so the
+ * panel can hint about the transformation (plain trimming is not flagged).
+ */
+export function normalizeMemoryNoteText(text: string): { readonly text: string; readonly changed: boolean } {
+  const collapsed = text.replace(/\r\n|\r|\n/g, ' ')
+  return { text: collapsed.trim(), changed: collapsed !== text }
 }
 
 /** Stable local validation failure matching the host's over-limit response. */

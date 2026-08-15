@@ -16,7 +16,15 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { readActivityThrownError } from './wire.ts'
-import { ACTIVITY_RANGES, createActivityStatsQuery, withActivityRange, type ActivityStatsQueryModel } from './query.ts'
+import {
+  ACTIVITY_RANGES,
+  buildActivityStatsRequest,
+  createActivityStatsQuery,
+  withActivityHourly,
+  withActivityMonthly,
+  withActivityRange,
+  type ActivityStatsQueryModel,
+} from './query.ts'
 import { activityStatsErrorHint } from './errors.ts'
 import type { ActivityStatsDataSource, ActivityStatsError, ActivityTokensDataSource, ActivityTokensResultLike } from './types.ts'
 import { ActivityHeatmapChart } from './ActivityHeatmapChart.tsx'
@@ -175,9 +183,15 @@ export function ActivityHeatmapPanel({
   source,
   tokensSource,
 }: ActivityHeatmapPanelProps): ReactNode {
-  const [range, setRange] = useState<ActivityStatsQueryModel>(createActivityStatsQuery)
-  const [showHourly, setShowHourly] = useState(true)
-  const [showMonthly, setShowMonthly] = useState(true)
+  // 查询模型是唯一事实来源：范围 + 两个聚合开关（query.ts 的 withActivityHourly /
+  // withActivityMonthly / buildActivityStatsRequest 由此成为活代码，而非死代码 4.1-L5）。
+  const [query, setQuery] = useState<ActivityStatsQueryModel>(() => ({
+    ...createActivityStatsQuery(),
+    includeHourly: true,
+    includeMonthly: true,
+  }))
+  // Token 区独立的轻量重试入口（4.1-L1）：nonce 递增只重跑 token effect。
+  const [tokensRetryNonce, setTokensRetryNonce] = useState(0)
   const [state, setState] = useState<PanelPhase>({ phase: 'loading' })
   const [summary, setSummary] = useState<ActivitySummaryView | null>(null)
   const [heatmap, setHeatmap] = useState<readonly ActivityHeatmapRowView[]>([])
@@ -200,14 +214,7 @@ export function ActivityHeatmapPanel({
     if (source === undefined) return
     const controller = new AbortController()
     setState({ phase: 'loading' })
-    source.stats(
-      {
-        range: range.range,
-        includeHourly: showHourly,
-        includeMonthly: showMonthly,
-      },
-      controller.signal,
-    )
+    source.stats(buildActivityStatsRequest(query), controller.signal)
       .then((result) => {
         if (disposed.current || controller.signal.aborted) return
         setSummary(buildActivitySummary(result))
@@ -221,17 +228,19 @@ export function ActivityHeatmapPanel({
         setState({ phase: 'error', error: readActivityThrownError(error) })
       })
     return () => controller.abort()
-  }, [source, range, showHourly, showMonthly])
+  }, [source, query])
 
   // Token fetch: on mount and whenever the range changes (toggles do not
   // affect the token aggregation). Latest-wins guard — the session list has
   // no abort transport, so stale responses are dropped by request id.
   useEffect(() => {
-    if (tokensSource === undefined) return
+    // 回放/未接线（source === undefined）时不发起任何请求（4.1-L2）：
+    // token 区同样受 source 门控，避免 replay 场景仍打 session.list。
+    if (source === undefined || tokensSource === undefined) return
     let latest = true
     setTokensError(null)
     setTokens(null)
-    tokensSource.tokens({ range: range.range }).then(
+    tokensSource.tokens({ range: query.range }).then(
       (result) => {
         if (!disposed.current && latest) setTokens(result)
       },
@@ -242,11 +251,16 @@ export function ActivityHeatmapPanel({
     return () => {
       latest = false
     }
-  }, [tokensSource, range])
+  }, [source, tokensSource, query, tokensRetryNonce])
 
   const retry = useCallback((): void => {
     // Re-trigger the fetch effect by toggling through a fresh query object.
-    setRange((current) => ({ ...current }))
+    setQuery((current) => ({ ...current }))
+  }, [])
+
+  const retryTokens = useCallback((): void => {
+    // Re-run only the token effect (stats stay untouched on a token failure).
+    setTokensRetryNonce((current) => current + 1)
   }, [])
 
   if (source === undefined) {
@@ -273,13 +287,13 @@ export function ActivityHeatmapPanel({
 
       <div style={controlsStyle}>
         {ACTIVITY_RANGES.map((candidate) => {
-          const active = candidate === range.range
+          const active = candidate === query.range
           return (
             <button
               key={candidate}
               type="button"
               style={active ? rangeButtonActiveStyle : rangeButtonStyle}
-              onClick={() => setRange((current) => withActivityRange(current, candidate))}
+              onClick={() => setQuery((current) => withActivityRange(current, candidate))}
             >
               {t(`range.${candidate}`)}
             </button>
@@ -291,16 +305,16 @@ export function ActivityHeatmapPanel({
         <label style={toggleStyle}>
           <input
             type="checkbox"
-            checked={showHourly}
-            onChange={(event) => setShowHourly(event.target.checked)}
+            checked={query.includeHourly === true}
+            onChange={(event) => setQuery((current) => withActivityHourly(current, event.target.checked))}
           />
           {t('toggle.hourly')}
         </label>
         <label style={toggleStyle}>
           <input
             type="checkbox"
-            checked={showMonthly}
-            onChange={(event) => setShowMonthly(event.target.checked)}
+            checked={query.includeMonthly === true}
+            onChange={(event) => setQuery((current) => withActivityMonthly(current, event.target.checked))}
           />
           {t('toggle.monthly')}
         </label>
@@ -344,9 +358,9 @@ export function ActivityHeatmapPanel({
             </div>
           </div>
 
-          {showHourly && <ActivityHeatmapChart t={t} rows={heatmap} />}
+          {query.includeHourly === true && <ActivityHeatmapChart t={t} rows={heatmap} />}
           <ActivityDailyBars t={t} bars={daily} />
-          {showMonthly && <ActivityMonthlyBars t={t} bars={monthly} />}
+          {query.includeMonthly === true && <ActivityMonthlyBars t={t} bars={monthly} />}
 
           {tokensSource !== undefined && tokens !== null && (
             <ActivityTokenStats t={t} view={buildActivityTokenStats(tokens)} />
@@ -354,6 +368,11 @@ export function ActivityHeatmapPanel({
           {tokensSource !== undefined && tokens === null && tokensError !== null && (
             <div style={hintStyle}>
               <div>{t(activityStatsErrorHint(tokensError.code)?.key ?? 'error.unknown')}</div>
+              {activityStatsErrorHint(tokensError.code).retryable && (
+                <button type="button" style={rangeButtonStyle} onClick={retryTokens}>
+                  {t('state.errorRetry')}
+                </button>
+              )}
             </div>
           )}
         </>

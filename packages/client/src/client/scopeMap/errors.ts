@@ -19,6 +19,7 @@ export type ScopeMapErrorKey =
   | 'error.endpointNotFound'
   | 'error.internal'
   | 'error.unknown'
+  | 'error.sourceDirMissing'
 
 /** A user-facing hint for one stable error code. */
 export interface ScopeMapErrorHint {
@@ -38,6 +39,9 @@ const SCOPE_MAP_ERROR_HINTS: Readonly<Record<string, ScopeMapErrorHint>> = {
   GRAY_NOT_FOUND: { key: 'error.notFound', retryable: false },
   GRAY_ENDPOINT_NOT_FOUND: { key: 'error.endpointNotFound', retryable: false },
   GRAY_INTERNAL: { key: 'error.internal', retryable: true },
+  // 4.7-L5：client 侧缺省 sourceDir（remote 未配置）→ 明确「未配置源目录」提示，
+  // 而非误导性的「内部错误」；输入无效不可重试。
+  GRAY_SOURCE_DIR_MISSING: { key: 'error.sourceDirMissing', retryable: false },
 }
 
 const SCOPE_MAP_UNKNOWN_HINT: ScopeMapErrorHint = { key: 'error.unknown', retryable: true }

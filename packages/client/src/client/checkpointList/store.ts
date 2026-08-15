@@ -85,6 +85,13 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
   let loading = false
   /** A reload requested while a load was in flight — run it once the load settles. */
   let reloadQueued = false
+  /**
+   * Completion of the currently queued reload generation (created on the first
+   * queued reload() call; repeated calls during the same in-flight load
+   * collapse onto it). Detached in {@link settleLoad} when the queued reload
+   * *starts*, so a reload requested while that reload is running creates its
+   * own promise and awaits its own refresh (M-5) — never an earlier one's.
+   */
   let queuedReloadPromise: Promise<void> | null = null
   let queuedReloadDone: (() => void) | null = null
 
@@ -178,8 +185,12 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
   async function reload(): Promise<void> {
     if (loading) {
       // A load is in flight: queue the reload instead of silently dropping it.
-      // Repeated requests collapse into one queued reload; every caller awaits
-      // the same completion.
+      // Repeated requests during the same in-flight load collapse into one
+      // queued reload and every such caller awaits that reload's completion
+      // (settings-pump coalescing). A call that arrives while a queued reload
+      // is already *running* starts a fresh generation — settleLoad detached
+      // the previous promise — so it awaits the refresh its own request
+      // produces, never an earlier one (M-5).
       reloadQueued = true
       if (queuedReloadPromise === null) {
         queuedReloadPromise = new Promise<void>(resolve => {
@@ -211,18 +222,18 @@ export function createCheckpointListStore(options: CheckpointListStoreOptions): 
     loading = false
     if (reloadQueued) {
       reloadQueued = false
+      // Detach this generation's completion *before* the reload starts: a
+      // reload requested while the queued reload is running must await its own
+      // refresh (M-5), not the one that is about to finish. The queued reload
+      // never rejects (loadFirstPage folds transport errors into a hint).
+      const done = queuedReloadDone
+      queuedReloadPromise = null
+      queuedReloadDone = null
       void doReload().then(
-        () => finishQueuedReload(),
-        () => finishQueuedReload(),
+        () => done?.(),
+        () => done?.(),
       )
     }
-  }
-
-  function finishQueuedReload(): void {
-    const done = queuedReloadDone
-    queuedReloadDone = null
-    queuedReloadPromise = null
-    done?.()
   }
 
   function toggleExpand(id: string): void {

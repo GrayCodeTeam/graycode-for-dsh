@@ -19,6 +19,7 @@ import type { WorkflowRunKind } from './types.ts'
 import {
   formatWorkflowRunSize,
   formatWorkflowRunTime,
+  workflowRunTimeIso,
   type WorkflowRunView,
 } from './viewModel.ts'
 
@@ -177,7 +178,7 @@ export function WorkflowRunCard({ t, run, onLocateSession, onOpenDocument }: Wor
         <span style={workspaceStyle} title={run.workspace}>
           {run.workspaceLabel}
         </span>
-        <time style={timeStyle} dateTime={run.updatedAt !== null ? new Date(run.updatedAt).toISOString() : undefined}>
+        <time style={timeStyle} dateTime={workflowRunTimeIso(run.updatedAt) ?? undefined}>
           {formatWorkflowRunTime(run.updatedAt)}
         </time>
       </header>

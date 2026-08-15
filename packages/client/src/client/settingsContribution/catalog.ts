@@ -144,7 +144,10 @@ export const GRAY_SETTINGS_ITEMS: readonly GraySettingsItem[] = [
     section: 'deployment',
     kind: 'select',
     managedBy: 'cordis.yml',
-    options: ['deepseek', 'anthropic', 'openai'],
+    // Route keys mirror the plugin provider matrix (docs/PROVIDER_MATRIX.md):
+    // `deepseek-official` is the registered DeepSeek provider (not `deepseek`,
+    // which is only the pi-ai catalog name) and Gemini registers as `google`.
+    options: ['deepseek-official', 'anthropic', 'openai', 'google'],
     labelKey: 'label.providers.primary',
     descriptionKey: 'desc.providers.primary',
   },

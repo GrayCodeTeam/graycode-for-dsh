@@ -16,19 +16,19 @@ import {
 
 /** Minimal client-context double covering exactly what apply() touches. */
 function makeFakeCtx(options: { sessions?: { open: (sessionId: string) => void } } = {}) {
-  const localeRegister = vi.fn(() => () => {})
+  const localeRegister = vi.fn((_namespace: string, _dictionary?: unknown) => () => {})
   const localeBind = vi.fn(() => (key: string) => key)
   const slotInject = vi.fn((_key: string, callback: () => unknown) => {
     callback()
     return () => {}
   })
-  const slotRegister = vi.fn(() => () => {})
-  const conversationEventsRegister = vi.fn(() => () => {})
+  const slotRegister = vi.fn((_options: unknown) => () => {})
+  const conversationEventsRegister = vi.fn((_definition: unknown) => () => {})
   // 'chat' view target is owned by the host's ui-conversation — apply() must
   // never touch this registry (a second 'chat' builder would collide).
-  const conversationViewsRegister = vi.fn(() => () => {})
+  const conversationViewsRegister = vi.fn((_definition: unknown) => () => {})
   const connectionCall = vi.fn(async () => ({ ok: true, value: {} }))
-  const on = vi.fn(() => () => {})
+  const on = vi.fn((_event: string, _handler: unknown) => () => {})
   const effect = vi.fn((execute: () => unknown) => {
     execute()
     return () => {}
@@ -99,14 +99,16 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister } = makeFakeCtx()
     apply(ctx)
     expect(conversationEventsRegister).toHaveBeenCalledTimes(1)
-    const definition = conversationEventsRegister.mock.calls[0]?.[0]
+    const definition = conversationEventsRegister.mock.calls[0]?.[0] as
+      | { kind: string; target: string; match: unknown; start: unknown; update: unknown; buildViewNode: unknown }
+      | undefined
     expect(definition).toBeDefined()
-    expect(definition.kind).toBe('graycode.workflow')
-    expect(definition.target).toBe('chat')
-    expect(typeof definition.match).toBe('function')
-    expect(typeof definition.start).toBe('function')
-    expect(typeof definition.update).toBe('function')
-    expect(typeof definition.buildViewNode).toBe('function')
+    expect(definition?.kind).toBe('graycode.workflow')
+    expect(definition?.target).toBe('chat')
+    expect(typeof definition?.match).toBe('function')
+    expect(typeof definition?.start).toBe('function')
+    expect(typeof definition?.update).toBe('function')
+    expect(typeof definition?.buildViewNode).toBe('function')
   })
 
   it('ties the Definition disposer to the fiber via ctx.effect', () => {
@@ -126,10 +128,10 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers the same Definition shape the factory produces', () => {
     const { ctx, conversationEventsRegister } = makeFakeCtx()
     apply(ctx)
-    const registered = conversationEventsRegister.mock.calls[0]?.[0]
+    const registered = conversationEventsRegister.mock.calls[0]?.[0] as { kind: string; target: string } | undefined
     const factory = createWorkflowNodeDefinition()
-    expect(registered.kind).toBe(factory.kind)
-    expect(registered.target).toBe(factory.target)
+    expect(registered?.kind).toBe(factory.kind)
+    expect(registered?.target).toBe(factory.target)
   })
 
   it('does NOT register a second chat view builder (ui-conversation owns the target)', () => {
@@ -161,12 +163,12 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(slotInject).toHaveBeenCalledWith('settings.section', expect.any(Function))
     const sectionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'settings.section')
     expect(sectionCall).toBeDefined()
-    const options = sectionCall?.[0] as { id?: string; order?: number; locale?: string; label?: () => string }
-    expect(options.id).toBe('graycode')
-    expect(options.order).toBe(200)
-    expect(options.locale).toBe(GRAYCODE_SETTINGS_NS)
-    expect(typeof options.label).toBe('function')
-    expect(options.label?.()).toBe('nav')
+    const options = sectionCall?.[0] as { id?: string; order?: number; locale?: string; label?: () => string } | undefined
+    expect(options?.id).toBe('graycode')
+    expect(options?.order).toBe(200)
+    expect(options?.locale).toBe(GRAYCODE_SETTINGS_NS)
+    expect(typeof options?.label).toBe('function')
+    expect(options?.label?.()).toBe('nav')
   })
 
   it('wires the config store to ctx.connection and refreshes on connection/reset', async () => {
@@ -207,19 +209,27 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(slotInject).toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
     const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.session.header.actions')
     expect(actionCall).toBeDefined()
-    const options = actionCall?.[0] as { id?: string; order?: number; locale?: string; inject?: () => { open: (id: string) => void } }
-    expect(options.id).toBe('graycode.back-to-main')
-    expect(options.order).toBe(20)
-    expect(options.locale).toBe('graycode.subagentBack')
+    const options = actionCall?.[0] as { id?: string; order?: number; locale?: string; inject?: () => { open: (id: string) => void } } | undefined
+    expect(options?.id).toBe('graycode.back-to-main')
+    expect(options?.order).toBe(20)
+    expect(options?.locale).toBe('graycode.subagentBack')
     // The injected seat forwards to the sessions service.
-    options.inject?.().open('session-parent')
+    options?.inject?.().open('session-parent')
     expect(open).toHaveBeenCalledWith('session-parent')
   })
 
-  it('skips the back-to-main registration when the sessions service is absent', () => {
-    const { ctx, slotInject } = makeFakeCtx()
+  it('registers the back-to-main action unconditionally and no-ops when the sessions service is absent', () => {
+    const { ctx, slotInject, slotRegister } = makeFakeCtx()
     apply(ctx)
-    expect(slotInject).not.toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
+    // 4.3-L5: the seat is always registered; the sessions service is resolved
+    // at action time, so a late-started host service is honored — and a
+    // missing one simply no-ops on click instead of throwing.
+    expect(slotInject).toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
+    const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.session.header.actions')
+    expect(actionCall).toBeDefined()
+    const options = actionCall?.[0] as { id?: string; inject?: () => { open: (id: string) => void } } | undefined
+    expect(options?.id).toBe('graycode.back-to-main')
+    expect(() => options?.inject?.().open('session-parent')).not.toThrow()
   })
 })
 

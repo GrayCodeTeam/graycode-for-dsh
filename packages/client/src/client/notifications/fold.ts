@@ -6,6 +6,10 @@
  * `ctx.conversationEvents.register` 分发给已注册 Definition）。本模块把一段
  * 会话事件窗口折叠为 {@link NotificationIntent} 列表——纯函数、零 I/O、
  * 防御性收窄（不信任事件载荷），供测试与任何「把事件流接进通知展示」的接线方使用。
+ *
+ * 跨窗口关联（4.7-M1）：会话事件流按窗口喂给 {@link createNotificationFoldSession}
+ * 时，在途 `tool/call` 的状态跨窗口保留，晚到的 `tool/result` 仍能终结对应意图
+ * （`notificationsFromWindow` 本身仍是单窗口纯函数，行为不变）。
  */
 
 import {
@@ -67,18 +71,31 @@ function readResultCallId(record: Record<string, unknown>): string | null {
       if (typeof callId === 'string' && callId.length > 0) return callId
     }
   }
+  // 4.7-M2 兜底：message.source.callId 缺失时读 meta.callId（workflowNode 已验证
+  // 宿主会在 meta 上挂 callId），避免结果因缺少关联键而无法终结对应通知。
+  const meta = record.meta
+  if (typeof meta === 'object' && meta !== null) {
+    const callId = (meta as Record<string, unknown>).callId
+    if (typeof callId === 'string' && callId.length > 0) return callId
+  }
   return null
 }
 
 /**
  * 从 `tool/result` 事件载荷读结果关联（无 callId / 结构非法 → null）。
+ *
+ * 4.7-M2：`message.source.callId` 与 `meta.callId` 都缺失时用事件层兜底键
+ * `fallbackId`（如事件 seq），绝不产生 `undefined` 关联键。
  * @param data - 原始事件 data。
+ * @param fallbackId - 可选兜底关联键（调用方传事件 `seq` 派生的稳定键）。
  */
-export function readNotifyToolResult(data: unknown): NotifyResultLike | null {
+export function readNotifyToolResult(data: unknown, fallbackId?: string): NotifyResultLike | null {
   if (typeof data !== 'object' || data === null) return null
   const record = data as Record<string, unknown>
   const callId = readResultCallId(record)
-  if (callId === null) return null
+  const resolvedCallId =
+    callId ?? (fallbackId !== undefined && fallbackId.length > 0 ? fallbackId : null)
+  if (resolvedCallId === null) return null
   const errorValue = record.error
   let error: { readonly name: string; readonly code: string } | undefined
   if (typeof errorValue === 'object' && errorValue !== null) {
@@ -87,7 +104,7 @@ export function readNotifyToolResult(data: unknown): NotifyResultLike | null {
       error = { name: err.name, code: err.code }
     }
   }
-  return { callId, error }
+  return { callId: resolvedCallId, error }
 }
 
 /** 通知意图稳定 id（`call:<callId>`，与窗口外 result 的无 start 语义解耦）。 */
@@ -155,7 +172,8 @@ export function notificationsFromWindow(window: NotificationStreamWindow): Notif
       if (args === null) continue
       calls.set(call.callId, { args, time: event.time })
     } else if (event.type === 'tool/result') {
-      const result = readNotifyToolResult(event.data)
+      // 4.7-M2：callId 缺失时用事件 seq 兜底，保证 results 绝不出现 undefined 键。
+      const result = readNotifyToolResult(event.data, `seq:${event.seq}`)
       if (result === null) continue
       results.set(result.callId, result.error ?? null)
     }
@@ -183,4 +201,78 @@ export function notificationsFromWindow(window: NotificationStreamWindow): Notif
     })
   }
   return intents
+}
+
+/**
+ * 跨窗口折叠会话（4.7-M1 修复）。
+ *
+ * `notificationsFromWindow` 只折叠单个窗口：tool/call 与 tool/result 跨窗口时
+ * 关联丢失，通知会永久停在 active、系统 toast 永不弹。本会话在窗口之间保留在途
+ * `tool/call` 的关联状态（按 callId 关联——同一会话事件流内 callId 唯一），使
+ * 晚到的 `tool/result` 仍能终结对应意图；start-less result（会话内无对应 call）
+ * 依旧不渲染。
+ *
+ * 用法（主会话接线）：
+ * ```ts
+ * const fold = createNotificationFoldSession()
+ * // on each session window: for (const i of fold.push(window)) bus.push(i)
+ * ```
+ */
+export interface NotificationFoldSession {
+  /** 处理一段事件窗口；返回本窗口内新增/更新的意图（同一 id 只返回最终状态）。 */
+  push(window: NotificationStreamWindow): NotificationIntent[]
+}
+
+/** 创建一个跨窗口折叠会话（把整个会话事件流按窗口喂入）。 */
+export function createNotificationFoldSession(): NotificationFoldSession {
+  // 在途 notify 调用（callId → 参数 + 时间）；跨窗口保留 → result 晚到也能关联。
+  const inflight = new Map<string, { args: ParsedNotifyArgs; time: number }>()
+
+  return {
+    push(window) {
+      // 按 callId 去重：同一 id 在窗口内最后状态胜出（call + result 同窗口只发终结态）。
+      const emitted = new Map<string, NotificationIntent>()
+      for (const event of window.entries) {
+        if (event.type === 'tool/call') {
+          const call = readNotifyToolCall(event.data)
+          if (call === null) continue
+          const args = parseNotifyArgs(call.arguments)
+          if (args === null) continue
+          inflight.set(call.callId, { args, time: event.time })
+          emitted.set(notificationId(call.callId), {
+            id: notificationId(call.callId),
+            title: args.title,
+            body: args.body,
+            level: args.level,
+            silent: args.silent,
+            at: event.time,
+            status: 'active',
+          })
+        } else if (event.type === 'tool/result') {
+          // 4.7-M2：callId 缺失时用事件 seq 兜底，绝不产生 undefined 关联键。
+          const result = readNotifyToolResult(event.data, `seq:${event.seq}`)
+          if (result === null) continue
+          const call = inflight.get(result.callId)
+          if (call === undefined) continue // start-less：会话内无对应 call → 不渲染
+          inflight.delete(result.callId)
+          const status: NotificationIntentStatus =
+            result.error === undefined || result.error === null
+              ? 'completed'
+              : result.error.code === 'GRAY_CANCELLED'
+                ? 'cancelled'
+                : 'failed'
+          emitted.set(notificationId(result.callId), {
+            id: notificationId(result.callId),
+            title: call.args.title,
+            body: call.args.body,
+            level: call.args.level,
+            silent: call.args.silent,
+            at: call.time,
+            status,
+          })
+        }
+      }
+      return [...emitted.values()]
+    },
+  }
 }

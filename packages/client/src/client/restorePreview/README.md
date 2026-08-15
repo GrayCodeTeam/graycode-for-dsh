@@ -39,8 +39,8 @@ successful restore only — a failed restore may retry with the same token.
 | `errors.ts` | Stable code → user hint (severity / retryable / rePreviewRequired / locale key) |
 | `locales.ts` | `graycode.restorePreview` namespace (zh/en balanced + ja placeholder) |
 | `labels.ts` | Failure reason → locale key helper |
-| `gateway.ts` | Contract-driven consumption point (`createRestoreGateway`) + scripted mock (`createMockRestoreGateway`) |
-| `RestorePreviewPanel.tsx` | Panel orchestrator: approval area, token paste, retry/re-preview/reset entries |
+| `gateway.ts` | Contract-driven consumption point (`createRestoreGateway`, per-call invoke timeout 60s → `GRAY_RESTORE_TIMEOUT`) + scripted mock (`createMockRestoreGateway`) |
+| `RestorePreviewPanel.tsx` | Panel orchestrator: approval area, token paste, running cancel, armed back, retry/re-preview/reset entries |
 | `RestorePreviewList.tsx` | Grouped classification list with conflict highlight + safety notes |
 | `RestoreProgressView.tsx` | Progress bar, counters, per-file failure list |
 
@@ -65,14 +65,17 @@ successful restore only — a failed restore may retry with the same token.
   - Every rejected transition is an immutable no-op; `canPreview` /
     `canConfirm` / `canRestoreWith` / `confirmRequiresUntrackedAck` expose the
     guards to the UI.
-- **Progress** (`progress.ts`): cumulative max-merge of host patches; final
-  result is authoritative; failures dedupe by path; percent clamps 0..100.
+- **Progress** (`progress.ts`): cumulative max-merge of host patches
+  (including `failedItems`, deduped by path); final result is authoritative;
+  percent clamps 0..100; the host progress `phase` string is localized
+  through `labels.ts` (`phaseProgress.*`).
 - **Errors** (`errors.ts`): `GRAY_APPROVAL_REQUIRED` /
   `GRAY_CONFLICT` → warning, re-preview required (stale token);
   `GRAY_CANCELLED` → info, retryable; `GRAY_NOT_FOUND` /
   `GRAY_STORAGE_CORRUPT` → error, re-preview; `GRAY_ENDPOINT_NOT_FOUND` →
   host not wired (mock hint); client-local `GRAY_PREVIEW_FAILED` /
-  `GRAY_RESTORE_PARTIAL` / `GRAY_MALFORMED_RESPONSE` cover defensive paths.
+  `GRAY_RESTORE_PARTIAL` / `GRAY_MALFORMED_RESPONSE` /
+  `GRAY_RESTORE_TIMEOUT` cover defensive paths.
 
 ## Client boundary rules (enforced)
 
@@ -135,5 +138,8 @@ semantics as the host, and the panel shows a mock-mode banner when
   `restore` group renders a count only.
 - Legacy archives (`legacy: true`) cannot give exact lists — the UI notes
   that the restore result is authoritative.
-- Cancellation of an in-flight restore is not surfaced (the wire has no
-  client cancel endpoint; `GRAY_CANCELLED` from the host is mapped and shown).
+- Cancellation of an in-flight restore is local-only: the running phase
+  exposes a cancel/reset exit (RESET back to idle) because the wire has no
+  client cancel endpoint. A hung host additionally exits `running` via the
+  gateway invoke timeout (`GRAY_RESTORE_TIMEOUT` → failed state, re-preview
+  required); `GRAY_CANCELLED` from the host is mapped and shown.

@@ -24,6 +24,7 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'add.button'
   | 'add.busy'
   | 'add.success'
+  | 'add.newlineHint'
   | 'list.empty'
   | 'list.emptyHint'
   | 'list.total'
@@ -44,6 +45,9 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'edit.cancel'
   | 'edit.saveHint'
   | 'edit.unchanged'
+  | 'edit.discardPrompt'
+  | 'edit.discard'
+  | 'edit.keepEditing'
   | 'edit.diff.added'
   | 'edit.diff.removed'
   | 'forget.title'
@@ -88,6 +92,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'add.button': '新增',
     'add.busy': '写入中…',
     'add.success': '记忆已写入',
+    'add.newlineHint': '换行将在提交时合并为空格',
     'list.empty': '没有匹配的记忆',
     'list.emptyHint': '换个关键词，或切换作用域后再试',
     'list.total': '共',
@@ -108,6 +113,9 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'edit.cancel': '取消',
     'edit.saveHint': '保存将覆盖原始记忆（保留 id 与日期）',
     'edit.unchanged': '没有更改',
+    'edit.discardPrompt': '有未保存的修改，确定要放弃吗？',
+    'edit.discard': '放弃修改',
+    'edit.keepEditing': '继续编辑',
     'edit.diff.added': '新增',
     'edit.diff.removed': '删除',
     'forget.title': '删除记忆',
@@ -136,6 +144,7 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'add.button': 'Add',
     'add.busy': 'Saving…',
     'add.success': 'Memory saved',
+    'add.newlineHint': 'Line breaks are collapsed to spaces on submit',
     'list.empty': 'No matching memories',
     'list.emptyHint': 'Try a different keyword or switch scope',
     'list.total': 'Total',
@@ -156,6 +165,9 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'edit.cancel': 'Cancel',
     'edit.saveHint': 'Saving overwrites the original memory (keeps id and date)',
     'edit.unchanged': 'No changes',
+    'edit.discardPrompt': 'Discard unsaved changes?',
+    'edit.discard': 'Discard',
+    'edit.keepEditing': 'Keep editing',
     'edit.diff.added': 'added',
     'edit.diff.removed': 'removed',
     'forget.title': 'Forget memory',
@@ -192,6 +204,7 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'add.button': '追加',
   'add.busy': '保存中…',
   'add.success': 'メモリを保存しました',
+  'add.newlineHint': '送信時に改行はスペースに置き換えられます',
   'list.empty': '一致するメモリがありません',
   'list.emptyHint': '別のキーワードまたはスコープをお試しください',
   'list.total': '合計',
@@ -212,6 +225,9 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'edit.cancel': 'キャンセル',
   'edit.saveHint': '保存すると元のメモリを上書きします（id と日付は保持）',
   'edit.unchanged': '変更なし',
+  'edit.discardPrompt': '未保存の変更があります。破棄しますか？',
+  'edit.discard': '破棄',
+  'edit.keepEditing': '編集を続ける',
   'edit.diff.added': '追加',
   'edit.diff.removed': '削除',
   'forget.title': 'メモリを削除',

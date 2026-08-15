@@ -153,6 +153,14 @@ describe('scope map error hints', () => {
     expect(scopeMapErrorKey(undefined)).toBe('error.unknown')
     expect(isScopeMapErrorRetryable('GRAY_WAT')).toBe(true)
   })
+
+  it('client-side missing-sourceDir code maps to a clear non-retryable hint (4.7-L5)', () => {
+    expect(scopeMapErrorKey('GRAY_SOURCE_DIR_MISSING')).toBe('error.sourceDirMissing')
+    expect(scopeMapErrorHint('GRAY_SOURCE_DIR_MISSING').retryable).toBe(false)
+    expect(isScopeMapErrorRetryable('GRAY_SOURCE_DIR_MISSING')).toBe(false)
+    expect(graycodeScopeMapDictionaries.zh['error.sourceDirMissing']).toBeDefined()
+    expect(graycodeScopeMapDictionaries.en['error.sourceDirMissing']).toBeDefined()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -250,6 +258,14 @@ describe('scope map overrides generation', () => {
     expect(isScopeMapAbsolutePath('C:\\a')).toBe(true)
     expect(isScopeMapAbsolutePath('rel')).toBe(false)
     expect(isScopeMapAbsolutePath('')).toBe(false)
+  })
+
+  it('accepts UNC absolute paths (\\server\share) like the host (4.7-M3)', () => {
+    expect(isScopeMapAbsolutePath('\\\\server\\share\\scope')).toBe(true)
+    expect(normalizeScopeMapCustomPath('\\\\server\\share\\scope')).toBe('\\\\server\\share\\scope')
+    expect(isScopeMapAbsolutePath('//server/share/scope')).toBe(true)
+    expect(isScopeMapAbsolutePath('server\\share')).toBe(false)
+    expect(isScopeMapAbsolutePath('\\share-only')).toBe(false)
   })
 
   it('missing selections default to the host suggestion (omitted)', () => {
@@ -379,7 +395,7 @@ describe('graycode.scopeMap locale dictionaries', () => {
   it('covers every error key used by the logic', () => {
     const en = graycodeScopeMapDictionaries.en
     for (const code of ['invalidInput', 'conflict', 'approvalRequired', 'cancelled', 'storageCorrupt', 'notFound', 'endpointNotFound', 'internal', 'unknown']) {
-      expect(en[`error.${code}`], code).toBeDefined()
+      expect((en as Record<string, string>)[`error.${code}`], code).toBeDefined()
     }
   })
 })

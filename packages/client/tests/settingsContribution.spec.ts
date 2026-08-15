@@ -158,7 +158,14 @@ describe('validateGrayValue', () => {
   it('enforces option membership for select items', () => {
     const item = graySettingsItem('providers.primary')
     const check = (value: unknown) => validateGrayValue(item as NonNullable<typeof item>, value)
-    expect(check('deepseek')).toEqual({ ok: true })
+    // Options mirror the plugin provider matrix (docs/PROVIDER_MATRIX.md):
+    // `deepseek-official` and `google` are the real route keys; `deepseek`
+    // (pi-ai catalog name) and `gemini` are not valid host values.
+    expect(check('deepseek-official')).toEqual({ ok: true })
+    expect(check('anthropic')).toEqual({ ok: true })
+    expect(check('openai')).toEqual({ ok: true })
+    expect(check('google')).toEqual({ ok: true })
+    expect(check('deepseek')).toEqual({ ok: false, error: 'error.enum' })
     expect(check('gemini')).toEqual({ ok: false, error: 'error.enum' })
     expect(check(42)).toEqual({ ok: false, error: 'error.type.string' })
   })

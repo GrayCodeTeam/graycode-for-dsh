@@ -84,4 +84,10 @@ describe('isWorkflowChatNode', () => {
     expect(isWorkflowChatNode('graycode.workflow')).toBe(false)
     expect(isWorkflowChatNode(42)).toBe(false)
   })
+
+  it('rejects arrays even when kind-tagged (audit L3)', () => {
+    expect(isWorkflowChatNode([])).toBe(false)
+    const kindTaggedArray = Object.assign([], { kind: 'graycode.workflow', data: sampleNode })
+    expect(isWorkflowChatNode(kindTaggedArray)).toBe(false)
+  })
 })

@@ -10,9 +10,11 @@
  * State mapping:
  * - error + no entries        → error panel (hint text + retry);
  * - loading + no entries      → loading panel;
+ * - idle                      → placeholder (never renders as "empty");
  * - ready + no entries        → empty panel;
  * - otherwise                 → item list (+ inline error banner while
- *   entries exist, load-more / loading-more footer).
+ *   entries exist; the footer shows exactly one control: retry on error,
+ *   loading-more while loading, load-more otherwise when a page remains).
  */
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
@@ -142,6 +144,16 @@ export function CheckpointList({
     )
   }
 
+  if (state.loadState === 'idle') {
+    // Never loaded yet: a placeholder, not the "no checkpoints" empty list
+    // (the first frame must not claim the archive is empty — L-1).
+    return (
+      <div data-graycode-checkpoint-list="idle" style={panelStyle}>
+        {t('list.idle')}
+      </div>
+    )
+  }
+
   if (entries.length === 0) {
     return (
       <div data-graycode-checkpoint-list="empty" style={panelStyle}>
@@ -182,15 +194,17 @@ export function CheckpointList({
       </div>
 
       <div style={footerStyle}>
-        {state.loadState === 'error' && (
+        {state.loadState === 'error' ? (
+          // Error + entries: a single error state (retry for the failed page).
+          // The load-more button is suppressed so the user never sees two
+          // competing affordances (L-2).
           <div data-graycode-checkpoint-list="errorBanner" style={errorRowStyle}>
             <span>{state.error !== null ? t(state.error.messageKey) : t('error.unknown')}</span>
             <button type="button" data-graycode-checkpoint-list="retry" style={buttonStyle} onClick={onRetry}>
               {t('list.retry')}
             </button>
           </div>
-        )}
-        {state.loadState === 'loading' ? (
+        ) : state.loadState === 'loading' ? (
           <span style={labelStyle}>{t('list.loadingMore')}</span>
         ) : (
           state.hasMore && (

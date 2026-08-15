@@ -30,8 +30,16 @@ import type {
   ActivityTokensResultLike,
   ActivityTokensWireParams,
 } from './types.ts'
-import { readActivityEnvelope, readActivityStatsResult, readActivityTokenListItems, readActivityTokenSessionSummary, readActivityThrownError } from './wire.ts'
+import { readActivityEnvelope, readActivityNextCursor, readActivityStatsResult, readActivityTokenListItems, readActivityTokenSessionSummary, readActivityThrownError } from './wire.ts'
 import { aggregateActivityTokens } from './tokens.ts'
+
+/**
+ * Hard cap on `session.list` pages fetched per `tokens()` call. Defensive
+ * bound: a broken host must not loop forever on a repeating cursor (3.1-M2);
+ * hitting the cap raises a stable `GRAY_INTERNAL` instead of returning a
+ * silently truncated total.
+ */
+export const ACTIVITY_SESSION_LIST_MAX_PAGES = 100
 
 /** Host endpoint consumed by this surface (contract key). */
 export type ActivityRemoteEndpoint = 'activity/stats'
@@ -81,26 +89,41 @@ export class RemoteActivityStatsDataSource implements ActivityStatsDataSource {
  * The host exposes token usage per session through the `session.list`
  * projection baseline (`projections.values.tokenUsage`, token-meter), covering
  * both attached and cold sessions via the durable projection cache — no plugin
- * endpoint needed. This source narrows the unary response defensively, raises a
- * stable {@link ActivityStatsError} on malformed envelopes, and delegates the
- * range filter / day grouping / sorting to the pure aggregator in `tokens.ts`.
+ * endpoint needed. This source narrows each page defensively, pages through the
+ * cursor until exhausted (3.1-M2), raises a stable {@link ActivityStatsError}
+ * on malformed envelopes, and delegates the range filter / day grouping /
+ * sorting to the pure aggregator in `tokens.ts`.
  */
 export class ConnectionActivityTokensDataSource implements ActivityTokensDataSource {
   constructor(private readonly api: ActivitySessionListApi) {}
 
   async tokens(params: ActivityTokensWireParams): Promise<ActivityTokensResultLike> {
-    let response: { readonly result: { readonly ok: boolean; readonly value?: unknown; readonly error?: unknown } }
-    try {
-      response = await this.api.sessions.list({})
-    } catch (error: unknown) {
-      throw readActivityThrownError(error)
+    // `session.list` 是分页接口（items + nextCursor/total）：必须用 cursor 循环
+    // 拉全，否则会话数超过单页大小时 token 汇总被低估（3.1-M2）。带硬性页数
+    // 上限，主机游标异常（重复/恒真）时抛稳定错误而不是死循环。
+    const rawItems: unknown[] = []
+    let cursor: string | undefined
+    for (let page = 0; ; page++) {
+      if (page >= ACTIVITY_SESSION_LIST_MAX_PAGES) {
+        throw toActivityError('GRAY_INTERNAL', `session.list pagination cap (${ACTIVITY_SESSION_LIST_MAX_PAGES} pages) exceeded`)
+      }
+      let response: { readonly result: { readonly ok: boolean; readonly value?: unknown; readonly error?: unknown } }
+      try {
+        response = await this.api.sessions.list(cursor === undefined ? {} : { cursor })
+      } catch (error: unknown) {
+        throw readActivityThrownError(error)
+      }
+      const { result } = response
+      if (!result.ok) {
+        throw readActivityThrownError(result.error ?? new Error('session.list failed'))
+      }
+      const items = readActivityTokenListItems(result.value)
+      if (items === null) throw toActivityError('GRAY_INTERNAL', 'malformed session.list result')
+      rawItems.push(...items)
+      const nextCursor = readActivityNextCursor(result.value)
+      if (nextCursor === undefined) break
+      cursor = nextCursor
     }
-    const { result } = response
-    if (!result.ok) {
-      throw readActivityThrownError(result.error ?? new Error('session.list failed'))
-    }
-    const rawItems = readActivityTokenListItems(result.value)
-    if (rawItems === null) throw toActivityError('GRAY_INTERNAL', 'malformed session.list result')
     const sessions = rawItems
       .map(readActivityTokenSessionSummary)
       .filter((item): item is NonNullable<typeof item> => item !== null)
@@ -134,8 +157,8 @@ function hourStartOf(ts: number, hour: number): number {
  * Pure in-memory data — no file system, no workspace access.
  */
 export function createMockActivityStats(now: number): ActivityStatsResultLike {
-  const day: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 60, 45, 0, 0, 30, 60, 60, 30, 0, 0, 0, 0, 0, 0]
-  const lightDay: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  const dayHours: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 60, 45, 0, 0, 30, 60, 60, 30, 0, 0, 0, 0, 0, 0]
+  const lightHours: readonly number[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
   const daily: Array<{
     date: string
     totalMinutes: number
@@ -152,39 +175,46 @@ export function createMockActivityStats(now: number): ActivityStatsResultLike {
     dayStart.setDate(dayStart.getDate() - offset)
     dayStart.setHours(0, 0, 0, 0)
     const date = dateStr(dayStart.getTime())
-    const hours = offset === 3 ? [...lightDay] : [...day]
+    const light = offset === 3
+    const hours = light ? [...lightHours] : [...dayHours]
     const total = hours.reduce((sum, minutes) => sum + minutes, 0)
-    const sessionCount = offset === 3 ? 1 : 2
+    // 会话列表与会话数、小时分布自洽（4.1-L3）：常规日 9-12（165 分钟）+
+    // 14-18（180 分钟）；轻量日 9-9:45（45 分钟），分钟数之和等于 hourly 总和。
+    const sessions = light
+      ? [{ start: hourStartOf(dayStart.getTime(), 9), end: hourStartOf(dayStart.getTime(), 9) + 45 * 60 * 1000, minutes: 45 }]
+      : [
+          { start: hourStartOf(dayStart.getTime(), 9), end: hourStartOf(dayStart.getTime(), 12), minutes: 60 + 60 + 45 },
+          { start: hourStartOf(dayStart.getTime(), 14), end: hourStartOf(dayStart.getTime(), 18), minutes: 30 + 60 + 60 + 30 },
+        ]
     daily.push({
       date,
       totalMinutes: total,
-      sessionCount,
-      sessions: [
-        { start: hourStartOf(dayStart.getTime(), 9), end: hourStartOf(dayStart.getTime(), 12), minutes: 60 + 60 + 45 },
-      ],
+      sessionCount: sessions.length,
+      sessions,
       firstActiveAt: hourStartOf(dayStart.getTime(), 9),
-      lastActiveAt: hourStartOf(dayStart.getTime(), 17),
+      lastActiveAt: light ? hourStartOf(dayStart.getTime(), 10) : hourStartOf(dayStart.getTime(), 17),
       hourly: hours,
     })
     hourlyHeatmap.push({ date, hours })
   }
 
+  // 月度行只汇总落在当前月的 daily（跨月天数不属于本月），保证 monthly 与 daily 自洽。
+  const month = dateStr(now).slice(0, 7)
+  const monthDays = daily.filter(day => day.date.startsWith(month))
+
   return {
     generatedAt: now,
-    today: {
-      date: daily[daily.length - 1]!.date,
-      totalMinutes: daily[daily.length - 1]!.totalMinutes,
-      sessionCount: daily[daily.length - 1]!.sessionCount,
-      sessions: daily[daily.length - 1]!.sessions,
-      firstActiveAt: daily[daily.length - 1]!.firstActiveAt,
-      lastActiveAt: daily[daily.length - 1]!.lastActiveAt,
-      hourly: daily[daily.length - 1]!.hourly,
-    },
+    today: { ...daily[daily.length - 1]! },
     currentSession: { active: true, startedAt: hourStartOf(now, 14), minutes: 42 },
     daily,
     hourlyHeatmap,
     monthly: [
-      { month: `${dateStr(now).slice(0, 7)}`, totalMinutes: daily.reduce((sum, d) => sum + d.totalMinutes, 0), activeDays: 6, sessionCount: 11 },
+      {
+        month,
+        totalMinutes: monthDays.reduce((sum, day) => sum + day.totalMinutes, 0),
+        activeDays: monthDays.filter(day => day.totalMinutes > 0).length,
+        sessionCount: monthDays.reduce((sum, day) => sum + day.sessionCount, 0),
+      },
     ],
   }
 }

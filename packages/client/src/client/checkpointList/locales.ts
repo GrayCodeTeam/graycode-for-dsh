@@ -20,6 +20,7 @@ export type GrayCodeCheckpointListLocaleKey =
   | 'list.workspace'
   | 'list.empty'
   | 'list.loading'
+  | 'list.idle'
   | 'list.loadingMore'
   | 'list.loadMore'
   | 'list.total'
@@ -82,6 +83,7 @@ export const graycodeCheckpointListDictionaries: Record<LocaleId, LocaleDictOf<'
     'list.workspace': '工作区',
     'list.empty': '暂无存档点',
     'list.loading': '加载中…',
+    'list.idle': '尚未加载',
     'list.loadingMore': '加载更多中…',
     'list.loadMore': '加载更多',
     'list.total': '总数',
@@ -128,6 +130,7 @@ export const graycodeCheckpointListDictionaries: Record<LocaleId, LocaleDictOf<'
     'list.workspace': 'Workspace',
     'list.empty': 'No checkpoints yet',
     'list.loading': 'Loading…',
+    'list.idle': 'Not loaded yet',
     'list.loadingMore': 'Loading more…',
     'list.loadMore': 'Load more',
     'list.total': 'Total',
@@ -182,6 +185,7 @@ export const graycodeCheckpointListJaPlaceholder: LocaleDict = {
   'list.workspace': 'ワークスペース',
   'list.empty': 'チェックポイントはありません',
   'list.loading': '読み込み中…',
+  'list.idle': '未読込',
   'list.loadingMore': 'さらに読み込み中…',
   'list.loadMore': 'さらに読み込む',
   'list.total': '合計',

@@ -23,6 +23,7 @@ export type GrayCodeStagedDiffCardLocaleKey =
   | `summary.${StagedDiffKind}`
   | 'action.accept'
   | 'action.reject'
+  | 'action.retry'
   | 'reapplyHint'
   | 'replayOnly'
   | 'empty.title'
@@ -61,6 +62,7 @@ export const graycodeStagedDiffCardDictionaries: Record<LocaleId, LocaleDictOf<'
     'summary.modify': '修改文件',
     'action.accept': '接受',
     'action.reject': '拒绝',
+    'action.retry': '重试',
     reapplyHint: '该条目在崩溃前已被接受但未落盘，请确认后重新接受或拒绝',
     replayOnly: '回放视图，不可操作',
     'empty.title': '暂无待审文件',
@@ -73,11 +75,13 @@ export const graycodeStagedDiffCardDictionaries: Record<LocaleId, LocaleDictOf<'
     'error.rejectConflict': '目标文件在暂存后被其他流程修改，请先解决冲突',
     'error.applyFailed': '落盘失败，条目保持已接受状态，可直接重试',
     'error.illegalTransition': '条目状态不允许该操作，请刷新列表',
+    'error.workspaceConflict': '条目属于其他工作区，无法在此操作',
     'error.conflict': '操作冲突，请刷新后重试',
     'error.notFound': '条目不存在（可能已被移除），请刷新列表',
     'error.endpointNotFound': 'stagedDiff 端点未接入，请检查插件装配',
     'error.approvalRequired': '该操作需要审批',
     'error.cancelled': '操作已取消',
+    'error.timeout': '操作超时，请重试',
     'error.storageCorrupt': '插件存储不可用',
     'error.invalidInput': '操作参数无效',
     'error.internal': '未预期的错误',
@@ -94,6 +98,7 @@ export const graycodeStagedDiffCardDictionaries: Record<LocaleId, LocaleDictOf<'
     'summary.modify': 'Modified',
     'action.accept': 'Accept',
     'action.reject': 'Reject',
+    'action.retry': 'Retry',
     reapplyHint: 'This entry was accepted before a crash but never written; confirm before re-applying or rejecting',
     replayOnly: 'Not available in replay view',
     'empty.title': 'No staged files',
@@ -106,11 +111,13 @@ export const graycodeStagedDiffCardDictionaries: Record<LocaleId, LocaleDictOf<'
     'error.rejectConflict': 'Target file was modified after staging; resolve the conflict first',
     'error.applyFailed': 'Write failed; the entry stays accepted and can be retried',
     'error.illegalTransition': 'The entry state does not allow this action; refresh the list',
+    'error.workspaceConflict': 'Entry belongs to another workspace; it cannot be operated on here',
     'error.conflict': 'Operation conflict; refresh and retry',
     'error.notFound': 'Entry not found (may have been removed); refresh the list',
     'error.endpointNotFound': 'stagedDiff endpoint is not connected; check the plugin assembly',
     'error.approvalRequired': 'This operation requires approval',
     'error.cancelled': 'Operation cancelled',
+    'error.timeout': 'Operation timed out; please retry',
     'error.storageCorrupt': 'Plugin storage is unavailable',
     'error.invalidInput': 'Invalid operation parameters',
     'error.internal': 'Unexpected error',
@@ -135,6 +142,7 @@ export const graycodeStagedDiffCardJaPlaceholder: LocaleDict = {
   'summary.modify': '変更',
   'action.accept': '承認',
   'action.reject': '却下',
+  'action.retry': '再試行',
   reapplyHint: 'このエントリはクラッシュ前に承認済みですが未書き込みです。再適用または却下を確認してください',
   replayOnly: 'リプレイ表示のため操作できません',
   'empty.title': '未審査のファイルはありません',
@@ -147,11 +155,13 @@ export const graycodeStagedDiffCardJaPlaceholder: LocaleDict = {
   'error.rejectConflict': 'ステージング後にターゲットファイルが変更されました。先に競合を解決してください',
   'error.applyFailed': '書き込みに失敗しました。エントリは承認済みのままなので再試行できます',
   'error.illegalTransition': 'エントリの状態ではこの操作はできません。リストを更新してください',
+  'error.workspaceConflict': 'エントリは別のワークスペースに属しているため、ここでは操作できません',
   'error.conflict': '操作が競合しました。更新して再試行してください',
   'error.notFound': 'エントリが見つかりません（削除された可能性があります）。リストを更新してください',
   'error.endpointNotFound': 'stagedDiff エンドポイントが接続されていません。プラグインの構成を確認してください',
   'error.approvalRequired': 'この操作には承認が必要です',
   'error.cancelled': '操作がキャンセルされました',
+  'error.timeout': '操作がタイムアウトしました。再試行してください',
   'error.storageCorrupt': 'プラグインのストレージを利用できません',
   'error.invalidInput': '操作パラメータが無効です',
   'error.internal': '予期しないエラーが発生しました',

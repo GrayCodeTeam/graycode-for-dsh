@@ -54,6 +54,20 @@ export interface RestoreGateway {
   restore(params: RestoreRestoreParams): Promise<RestoreRemoteEnvelope<RestoreResultWire>>
 }
 
+/** Per-call invoke timeout (3.6-M2 / 4.6-L6): default 60s, configurable for tests. */
+export const DEFAULT_INVOKE_TIMEOUT_MS = 60_000
+
+/** Options for the remote gateway. */
+export interface RestoreGatewayOptions {
+  /**
+   * Per-call timeout for the invoke bridge. On expiry the call resolves with a
+   * client-local `GRAY_RESTORE_TIMEOUT` failure so a hung host can never leave
+   * the surface permanently stuck in `running`.
+   * @default DEFAULT_INVOKE_TIMEOUT_MS (60s)
+   */
+  readonly timeoutMs?: number
+}
+
 /** `checkpoints/previewRestore` args. */
 export interface RestorePreviewParams extends Readonly<Record<string, unknown>> {
   readonly workspace?: string
@@ -71,27 +85,71 @@ export interface RestoreRestoreParams extends Readonly<Record<string, unknown>> 
 
 /**
  * Wrap a host invoke bridge into the typed restore gateway.
+ * Each invoke is raced against {@link RestoreGatewayOptions.timeoutMs} (default
+ * 60s) — a hung host resolves with a client-local `GRAY_RESTORE_TIMEOUT` failure
+ * instead of leaving the surface stuck in `running` (3.6-M2 / 4.6-L6).
  * Responses are validated against the wire contract; an unreadable payload
  * maps to the client-local `GRAY_MALFORMED_RESPONSE` failure.
  */
-export function createRestoreGateway(invoke: RestoreRemoteInvoke): RestoreGateway {
+export function createRestoreGateway(invoke: RestoreRemoteInvoke, options: RestoreGatewayOptions = {}): RestoreGateway {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS
   return {
     kind: 'remote',
     async preview(params) {
-      const envelope = await invoke(RESTORE_REMOTE_NS, RESTORE_PREVIEW_METHOD, params)
+      const envelope = await withInvokeTimeout(invoke(RESTORE_REMOTE_NS, RESTORE_PREVIEW_METHOD, params), timeoutMs)
       if (!envelope.ok) return envelope
       const outcome = readPreviewOutcome(envelope.value)
       if (outcome === null) return malformed('previewRestore')
       return { ok: true, value: outcome }
     },
     async restore(params) {
-      const envelope = await invoke(RESTORE_REMOTE_NS, RESTORE_METHOD, params)
+      const envelope = await withInvokeTimeout(invoke(RESTORE_REMOTE_NS, RESTORE_METHOD, params), timeoutMs)
       if (!envelope.ok) return envelope
       const result = readRestoreResult(envelope.value)
       if (result === null) return malformed('restore')
       return { ok: true, value: result }
     },
   }
+}
+
+/**
+ * Race an invoke call against a per-call timeout. A slower-than-timeout host
+ * resolves with a `GRAY_RESTORE_TIMEOUT` failure envelope (an error state the
+ * state machine can transition out of); a fast host resolves normally.
+ */
+function withInvokeTimeout<T>(
+  promise: Promise<RestoreRemoteEnvelope<T>>,
+  timeoutMs: number,
+): Promise<RestoreRemoteEnvelope<T>> {
+  return new Promise<RestoreRemoteEnvelope<T>>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve({
+        ok: false,
+        error: {
+          code: RESTORE_CLIENT_ERROR_CODES.TIMEOUT,
+          message: `${RESTORE_REMOTE_NS} invoke did not settle within ${timeoutMs}ms`,
+          details: { timeoutMs },
+        },
+      })
+    }, timeoutMs)
+    promise.then(
+      value => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 function malformed(method: string): RestoreRemoteEnvelope<never> {

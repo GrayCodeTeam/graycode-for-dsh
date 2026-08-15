@@ -110,6 +110,10 @@ export function WorkflowOverviewPanel({
     createWorkflowOverviewQuery({ workspace: initialWorkspace ?? null }),
   )
   const [page, setPage] = useState<WorkflowOverviewPageState>(createWorkflowOverviewPageState)
+  // Mirrors `page` for event handlers that must read the latest state outside
+  // a setState updater (loadMore below): reducers stay pure, I/O stays in
+  // event handlers (StrictMode never double-invokes handlers — audit M1).
+  const pageRef = useRef<WorkflowOverviewPageState>(page)
   const disposed = useRef(false)
 
   useEffect(() => {
@@ -119,15 +123,24 @@ export function WorkflowOverviewPanel({
     }
   }, [])
 
+  // Keep the handler-side mirror in sync with every committed page state.
+  useEffect(() => {
+    pageRef.current = page
+  }, [page])
+
   // First page: on mount and whenever the applied filter changes (replace
   // mode, cursor null). Aborting the controller drops stale responses.
   useEffect(() => {
     if (source === undefined) return
     const controller = new AbortController()
-    setPage(applyWorkflowPageLoading(createWorkflowOverviewPageState()))
+    const initial = applyWorkflowPageLoading(createWorkflowOverviewPageState())
+    setPage(initial)
+    pageRef.current = initial
     const request = buildWorkflowListRequest(query)
     if (request === null) {
-      setPage(applyWorkflowPageError(createWorkflowOverviewPageState(), WORKSPACE_REQUIRED_ERROR))
+      const errorState = applyWorkflowPageError(createWorkflowOverviewPageState(), WORKSPACE_REQUIRED_ERROR)
+      setPage(errorState)
+      pageRef.current = errorState
       return () => controller.abort()
     }
     source.list(request, controller.signal)
@@ -149,32 +162,42 @@ export function WorkflowOverviewPanel({
   // in-flight append is dropped instead of mixing into the newer list.
   const loadMore = useCallback((): void => {
     if (source === undefined) return
-    setPage((current) => {
-      const request = nextWorkflowPageRequest(current)
-      if (request === null) return current
-      const wireRequest = buildWorkflowListRequest(query, request.cursor)
-      if (wireRequest === null) return applyWorkflowPageError(current, WORKSPACE_REQUIRED_ERROR)
-      const loading = applyWorkflowPageLoading(current)
-      const issuedRevision = loading.revision
-      source.list(wireRequest)
-        .then((result) => {
-          if (disposed.current) return
-          setPage((latest) =>
-            isWorkflowAppendCurrent(latest, issuedRevision)
-              ? applyWorkflowPageLoaded(latest, result, 'append')
-              : latest,
-          )
-        })
-        .catch((error: unknown) => {
-          if (disposed.current) return
-          setPage((latest) =>
-            isWorkflowAppendCurrent(latest, issuedRevision)
-              ? applyWorkflowPageError(latest, readWorkflowThrownError(error))
-              : latest,
-          )
-        })
-      return loading
-    })
+    const current = pageRef.current
+    const request = nextWorkflowPageRequest(current)
+    if (request === null) return
+    const wireRequest = buildWorkflowListRequest(query, request.cursor)
+    if (wireRequest === null) {
+      const errorState = applyWorkflowPageError(current, WORKSPACE_REQUIRED_ERROR)
+      pageRef.current = errorState
+      setPage(errorState)
+      return
+    }
+    // The page transition is computed here (pure reducer), then the network
+    // request is issued from this event handler — never inside a setState
+    // updater: StrictMode double-invokes updaters and would double-fetch
+    // (audit M1). The in-flight state is written to the mirror synchronously
+    // so a rapid second click is refused by the loading guard.
+    const loading = applyWorkflowPageLoading(current)
+    const issuedRevision = loading.revision
+    pageRef.current = loading
+    setPage(loading)
+    source.list(wireRequest)
+      .then((result) => {
+        if (disposed.current) return
+        setPage((latest) =>
+          isWorkflowAppendCurrent(latest, issuedRevision)
+            ? applyWorkflowPageLoaded(latest, result, 'append')
+            : latest,
+        )
+      })
+      .catch((error: unknown) => {
+        if (disposed.current) return
+        setPage((latest) =>
+          isWorkflowAppendCurrent(latest, issuedRevision)
+            ? applyWorkflowPageError(latest, readWorkflowThrownError(error))
+            : latest,
+        )
+      })
   }, [source, query])
 
   const applyFilters = (): void => {

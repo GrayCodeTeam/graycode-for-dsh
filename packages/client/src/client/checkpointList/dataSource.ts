@@ -83,7 +83,9 @@ function buildMockItems(total: number, baseTimestamp: number, rng: () => number)
 /**
  * Deterministic, I/O-free mock of the `checkpoints/list` / `checkpoints/verify`
  * contract. Cursor semantics mirror the host: `cursor` = last listed item id,
- * `nextCursor` = last item of the returned page (absent at the end).
+ * `nextCursor` = last item of the returned page (absent at the end); a cursor
+ * that matches no item returns an empty terminal page — never a reset to page
+ * 1 (M-2).
  */
 export function createMockCheckpointListDataSource(
   options: MockCheckpointListOptions = {},
@@ -97,9 +99,15 @@ export function createMockCheckpointListDataSource(
 
   function pageFor(cursor: string | undefined, limit: number): CheckpointListPageWire {
     let start = 0
-    if (cursor !== undefined) {
+    if (cursor !== undefined && cursor.length > 0) {
       const index = items.findIndex(item => item.id === cursor)
-      if (index >= 0) start = index + 1
+      if (index < 0) {
+        // Cursor miss mirrors the host: an empty *terminal* page, never a
+        // reset to page 1 (a restart would hand back the first page's cursor,
+        // so a caller re-requesting a stale cursor could loop — M-2).
+        return { items: [], total: items.length, nextCursor: undefined }
+      }
+      start = index + 1
     }
     const page = items.slice(start, start + limit)
     const nextCursor = start + limit < items.length && page.length > 0 ? page[page.length - 1]!.id : undefined

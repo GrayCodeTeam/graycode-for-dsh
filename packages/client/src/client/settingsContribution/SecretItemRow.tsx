@@ -120,7 +120,10 @@ export function SecretItemRow({ t, item, view, onOpenCredentials }: SecretItemRo
           style={jumpDisabled ? buttonDisabledStyle : buttonStyle}
           disabled={jumpDisabled}
           data-graycode-settings="open-credentials"
-          title={jumpDisabled ? t('secret.unconfigured') : undefined}
+          // 4.3-L1: reflect the REAL display state in the disabled title. The
+          // jump is also disabled for configured / shadowed / unavailable rows,
+          // where "unconfigured" would mislead the user.
+          title={jumpDisabled ? t(display.copyKey) : undefined}
           onClick={() => {
             if (!jumpDisabled) onOpenCredentials(item.credentialRef)
           }}

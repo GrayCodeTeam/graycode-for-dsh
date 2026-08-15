@@ -64,7 +64,7 @@ import {
   graycodeRestorePreviewDictionaries,
   graycodeRestorePreviewJaPlaceholder,
 } from '../src/client/restorePreview/locales.ts'
-import { restoreFailureLocaleKey } from '../src/client/restorePreview/labels.ts'
+import { progressPhaseLocaleKey, restoreFailureLocaleKey } from '../src/client/restorePreview/labels.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -138,6 +138,20 @@ describe('defensive wire readers', () => {
     expect(readPreviewOutcome({ preview: 'bad' })).toBeNull()
   })
 
+  it('trims previewToken and treats whitespace-only tokens as absent (4.6-L1)', () => {
+    const padded = readPreviewOutcome(outcome({ previewToken: '  tok-1  ' }))
+    expect(padded!.previewToken).toBe('tok-1')
+    const blank = readPreviewOutcome(outcome({ previewToken: '   ' }))
+    expect(blank!.previewToken).toBeUndefined()
+  })
+
+  it('preserves an explicit zero autoPrunedCheckpointCount (4.6-L5)', () => {
+    expect(readPreviewWire(previewWire({ autoPrunedCheckpointCount: 0 }))!.autoPrunedCheckpointCount).toBe(0)
+    expect(readPreviewWire(previewWire())?.autoPrunedCheckpointCount).toBeUndefined()
+    expect(readRestoreResult(resultWire({ autoPrunedCheckpointCount: 0 }))!.autoPrunedCheckpointCount).toBe(0)
+    expect(readRestoreResult(resultWire())?.autoPrunedCheckpointCount).toBeUndefined()
+  })
+
   it('readRestoreResult rejects payloads without success and keeps failures', () => {
     const ok = readRestoreResult(resultWire())
     expect(ok!.success).toBe(true)
@@ -193,6 +207,16 @@ describe('preview classification', () => {
     expect(on.groups.find(group => group.cls === 'delete')!.count).toBe(1)
     expect(on.groups.find(group => group.cls === 'delete')!.items.map(item => item.path)).toEqual(['src/a.ts', 'src/b.ts'])
     expect(on.operationCount).toBe(3)
+  })
+
+  it('totalAffected dedupes untracked files when deletion is confirmed (4.6-L3)', () => {
+    const on = classifyPreviewFiles(previewWire(), { deleteUntrackedFiles: true })
+    // `deleted` (confirmed) already includes the created-after-snapshot path;
+    // the untracked group stays visible but must not inflate the total.
+    expect(on.groups.find(group => group.cls === 'delete')!.count).toBe(1)
+    expect(on.groups.find(group => group.cls === 'untracked')!.count).toBe(1)
+    expect(on.totalAffected).toBe(4) // 2 restored + 1 deleted (incl. untracked) + 1 unbacked
+    expect(classifyPreviewFiles(previewWire(), { deleteUntrackedFiles: false }).totalAffected).toBe(4)
   })
 
   it('surfaces preflight failures and missing backup dirs as blocking conflicts', () => {
@@ -502,6 +526,29 @@ describe('restore confirmation state machine', () => {
     expect(step.phase).toBe('idle')
     expect(step.result).toBeNull()
   })
+
+  it('exits confirm via re-preview and running via reset (3.6-M3/M2)', () => {
+    let step = createRestoreMachine()
+    step = restoreMachineStep(step, { type: 'PREVIEW_STARTED', checkpointId: 'cp_1', deleteUntrackedFiles: false, at: 1 })
+    step = restoreMachineStep(step, { type: 'PREVIEW_OK', outcome: outcome(), at: 2 })
+    step = restoreMachineStep(step, { type: 'CONFIRM', acknowledgeUntracked: false, at: 3 })
+    expect(step.phase).toBe('confirm')
+    // M3: the armed phase can go back (RE_PREVIEW) instead of being a dead end.
+    step = restoreMachineStep(step, { type: 'RE_PREVIEW', at: 4 })
+    expect(step.phase).toBe('idle')
+    expect(step.session).toBeNull()
+    // Re-arm and start the restore.
+    step = restoreMachineStep(step, { type: 'PREVIEW_STARTED', checkpointId: 'cp_1', deleteUntrackedFiles: false, at: 5 })
+    step = restoreMachineStep(step, { type: 'PREVIEW_OK', outcome: outcome(), at: 6 })
+    step = restoreMachineStep(step, { type: 'CONFIRM', acknowledgeUntracked: false, at: 7 })
+    step = restoreMachineStep(step, { type: 'RESTORE_STARTED', previewId: 'tok-1', at: 8 })
+    expect(step.phase).toBe('running')
+    // M2: running is never a dead end — RESET exits to idle.
+    step = restoreMachineStep(step, { type: 'RESET', at: 9 })
+    expect(step.phase).toBe('idle')
+    expect(step.progress).toBeNull()
+    expect(step.session).toBeNull()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -535,6 +582,20 @@ describe('restore progress merging', () => {
     progress = mergeFailureItem(progress, { path: 'a.txt', reason: 'copy_failed' }, 3)
     progress = mergeFailureItem(progress, { path: 'b.txt', reason: 'delete_failed' }, 4)
     expect(progress.failedItems).toHaveLength(2)
+    expect(progress.failed).toBe(2)
+  })
+
+  it('merges streaming failedItems into the progress (4.6-L2)', () => {
+    let progress = createRestoreProgress({ total: 3, at: 1 })
+    progress = mergeRestoreProgress(progress, { failedItems: [{ path: 'a.txt', reason: 'copy_failed' }], at: 2 })
+    expect(progress.failedItems).toHaveLength(1)
+    expect(progress.failed).toBe(1)
+    // Duplicate path plus a new path in one patch: dedupe by path, counter follows.
+    progress = mergeRestoreProgress(progress, {
+      failedItems: [{ path: 'a.txt', reason: 'copy_failed' }, { path: 'b.txt', reason: 'delete_failed' }],
+      at: 3,
+    })
+    expect(progress.failedItems.map(item => item.path)).toEqual(['a.txt', 'b.txt'])
     expect(progress.failed).toBe(2)
   })
 
@@ -607,6 +668,9 @@ describe('error-code → hint mapping', () => {
     })
     expect(restoreErrorHint(failure(RESTORE_CLIENT_ERROR_CODES.MALFORMED_RESPONSE))).toMatchObject({
       severity: 'error', key: 'error.malformed',
+    })
+    expect(restoreErrorHint(failure(RESTORE_CLIENT_ERROR_CODES.TIMEOUT))).toMatchObject({
+      severity: 'error', retryable: false, rePreviewRequired: true, key: 'error.timeout',
     })
   })
 
@@ -731,6 +795,23 @@ describe('restore gateway', () => {
     expect(preview.ok).toBe(false)
     if (!preview.ok) expect(preview.error.code).toBe(GRAY_RESTORE_REMOTE_CODES.NOT_FOUND)
   })
+
+  it('resolves a hung invoke with GRAY_RESTORE_TIMEOUT (3.6-M2 / 4.6-L6)', async () => {
+    const invoke: RestoreRemoteInvoke = async () => new Promise<RestoreRemoteEnvelope<unknown>>(() => { /* never settles */ })
+    const gateway = createRestoreGateway(invoke, { timeoutMs: 20 })
+    const result = await gateway.restore({ checkpointId: 'cp_1', previewToken: 'tok-1' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe(RESTORE_CLIENT_ERROR_CODES.TIMEOUT)
+  })
+
+  it('fast invokes resolve normally inside the timeout window', async () => {
+    const invoke: RestoreRemoteInvoke = async (_ns, method) =>
+      method === 'previewRestore' ? { ok: true, value: outcome() } : { ok: true, value: resultWire() }
+    const gateway = createRestoreGateway(invoke, { timeoutMs: 5_000 })
+    const preview = await gateway.preview({ checkpointId: 'cp_1' })
+    expect(preview.ok).toBe(true)
+    if (preview.ok) expect(preview.value.previewToken).toBe('tok-1')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -767,6 +848,15 @@ describe('graycode.restorePreview locale dictionaries', () => {
     for (const reason of ['missing_in_chain', 'hash_mismatch', 'copy_failed', 'delete_failed', 'missing_backup_dir', 'unbacked'] as const) {
       expect(keys).toContain(restoreFailureLocaleKey(reason))
     }
+  })
+
+  it('localizes every host progress phase through an existing key (4.6-L4)', () => {
+    const keys = Object.keys(graycodeRestorePreviewDictionaries.en)
+    for (const phase of ['pending', 'preparing', 'restoring', 'done', 'failed', 'cancelled']) {
+      expect(keys).toContain(progressPhaseLocaleKey(phase))
+    }
+    expect(progressPhaseLocaleKey('mystery-phase')).toBe('phaseProgress.unknown')
+    expect(keys).toContain('phaseProgress.unknown')
   })
 })
 

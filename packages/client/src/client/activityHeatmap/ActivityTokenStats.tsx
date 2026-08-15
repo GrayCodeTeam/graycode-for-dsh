@@ -81,9 +81,11 @@ const barTrackStyle: CSSProperties = {
 }
 
 function barFillStyle(ratio: number): CSSProperties {
+  // 零值渲染为空填充（4.1-L4）：ratio<=0 不画 2% 的“假活动”条，仅 >0 时给最小可见宽度。
+  const width = ratio > 0 ? Math.max(2, Math.min(100, Math.round(ratio * 100))) : 0
   return {
     height: '100%',
-    width: `${Math.max(2, Math.min(100, Math.round(ratio * 100)))}%`,
+    width: `${width}%`,
     background: 'var(--dsh-accent-color, #4a9eff)',
     borderRadius: '2px',
   }

@@ -42,9 +42,10 @@ export type GrayCodeSettingsContributionLocaleKey =
   | 'desc.graycode.enabled'
   | 'label.providers.primary'
   | 'desc.providers.primary'
-  | 'option.providers.primary.deepseek'
+  | 'option.providers.primary.deepseek-official'
   | 'option.providers.primary.anthropic'
   | 'option.providers.primary.openai'
+  | 'option.providers.primary.google'
   | 'label.credentials.deepseekApiKey'
   | 'desc.credentials.deepseekApiKey'
   | 'label.credentials.privateServiceToken'
@@ -52,7 +53,6 @@ export type GrayCodeSettingsContributionLocaleKey =
   | 'secret.openCredentials'
   | 'deployment.managedBy'
   | 'common.default'
-  | 'common.unset'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -92,9 +92,10 @@ export const graycodeSettingsContributionDictionaries: Record<
     'desc.graycode.enabled': 'Gray Code 插件总开关',
     'label.providers.primary': '默认模型提供商',
     'desc.providers.primary': 'Gray 任务使用的默认提供商；禁用状态见上方提示',
-    'option.providers.primary.deepseek': 'DeepSeek',
+    'option.providers.primary.deepseek-official': 'DeepSeek（官方直连）',
     'option.providers.primary.anthropic': 'Anthropic',
     'option.providers.primary.openai': 'OpenAI',
+    'option.providers.primary.google': 'Gemini',
     'label.credentials.deepseekApiKey': 'DeepSeek API Key',
     'desc.credentials.deepseekApiKey': '引用 DSH credentials 中的 deepseek.apiKey',
     'label.credentials.privateServiceToken': '私有服务 Token',
@@ -120,7 +121,6 @@ export const graycodeSettingsContributionDictionaries: Record<
     'banner.readonly': '设置文档为只读，此处仅作展示',
     'deployment.managedBy': '由 cordis.yml 管理',
     'common.default': '默认',
-    'common.unset': '未设置',
   },
   en: {
     'section.preferences': 'Preferences',
@@ -141,9 +141,10 @@ export const graycodeSettingsContributionDictionaries: Record<
     'desc.graycode.enabled': 'Master switch for the Gray Code plugin',
     'label.providers.primary': 'Default model provider',
     'desc.providers.primary': 'Default provider for Gray tasks; disabled state is shown in the banner above',
-    'option.providers.primary.deepseek': 'DeepSeek',
+    'option.providers.primary.deepseek-official': 'DeepSeek (official)',
     'option.providers.primary.anthropic': 'Anthropic',
     'option.providers.primary.openai': 'OpenAI',
+    'option.providers.primary.google': 'Gemini',
     'label.credentials.deepseekApiKey': 'DeepSeek API key',
     'desc.credentials.deepseekApiKey': 'References deepseek.apiKey in DSH credentials',
     'label.credentials.privateServiceToken': 'Private service token',
@@ -169,7 +170,6 @@ export const graycodeSettingsContributionDictionaries: Record<
     'banner.readonly': 'The settings document is read-only; showing values only',
     'deployment.managedBy': 'Managed by cordis.yml',
     'common.default': 'Default',
-    'common.unset': 'Unset',
   },
 }
 
@@ -198,9 +198,10 @@ export const graycodeSettingsContributionJaPlaceholder: LocaleDict = {
   'desc.graycode.enabled': 'Gray Code プラグインのマスタースイッチ',
   'label.providers.primary': '既定のモデルプロバイダー',
   'desc.providers.primary': 'Gray タスクで使用する既定プロバイダー。無効状態は上部のバナーに表示',
-  'option.providers.primary.deepseek': 'DeepSeek',
+  'option.providers.primary.deepseek-official': 'DeepSeek（公式）',
   'option.providers.primary.anthropic': 'Anthropic',
   'option.providers.primary.openai': 'OpenAI',
+  'option.providers.primary.google': 'Gemini',
   'label.credentials.deepseekApiKey': 'DeepSeek API キー',
   'desc.credentials.deepseekApiKey': 'DSH credentials の deepseek.apiKey を参照',
   'label.credentials.privateServiceToken': 'プライベートサービス トークン',
@@ -226,5 +227,4 @@ export const graycodeSettingsContributionJaPlaceholder: LocaleDict = {
   'banner.readonly': '設定ドキュメントは読み取り専用のため、表示のみです',
   'deployment.managedBy': 'cordis.yml が管理',
   'common.default': '既定',
-  'common.unset': '未設定',
 }

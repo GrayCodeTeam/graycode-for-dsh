@@ -55,12 +55,17 @@ export const GRAY_RESTORE_REMOTE_CODES = {
  * - `GRAY_RESTORE_PARTIAL` — restore returned `success:false` with a
  *   per-file `failures` list (host adapter maps it to a single envelope code
  *   and drops the list, so the client keeps the result for per-item display);
- * - `GRAY_MALFORMED_RESPONSE` — endpoint payload did not match the contract.
+ * - `GRAY_MALFORMED_RESPONSE` — endpoint payload did not match the contract;
+ * - `GRAY_RESTORE_TIMEOUT` — the gateway invoke bridge did not settle within
+ *   the per-call timeout (3.6-M2 / 4.6-L6). The host may still be mid-flight,
+ *   so a blind retry could double-apply a destructive restore — the error
+ *   hint demands a fresh preview instead.
  */
 export const RESTORE_CLIENT_ERROR_CODES = {
   PREVIEW_FAILED: 'GRAY_PREVIEW_FAILED',
   RESTORE_PARTIAL: 'GRAY_RESTORE_PARTIAL',
   MALFORMED_RESPONSE: 'GRAY_MALFORMED_RESPONSE',
+  TIMEOUT: 'GRAY_RESTORE_TIMEOUT',
 } as const
 
 /** A remote call failure (structural copy of `GrayRemoteFailure`). */
@@ -164,6 +169,16 @@ function readCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
 }
 
+/**
+ * Optional count that PRESERVES an explicitly-present zero (4.6-L5): the host
+ * reporting `autoPrunedCheckpointCount: 0` must stay distinguishable from the
+ * field being absent, so the UI can fold the hint only when the value is 0.
+ * Absent / non-numeric / negative values collapse to `undefined`.
+ */
+function readOptionalCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined
+}
+
 function readStringArray(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
@@ -205,7 +220,7 @@ export function readPreviewWire(value: unknown): RestorePreviewWire | null {
     error: typeof value.error === 'string' && value.error.length > 0 ? value.error : undefined,
     failures: readRestoreFailures(value.failures),
     missingBackupDirs: readStringArray(value.missingBackupDirs),
-    autoPrunedCheckpointCount: readCount(value.autoPrunedCheckpointCount) || undefined,
+    autoPrunedCheckpointCount: readOptionalCount(value.autoPrunedCheckpointCount),
   }
 }
 
@@ -214,9 +229,11 @@ export function readPreviewOutcome(value: unknown): RestorePreviewOutcomeWire | 
   if (!isRecord(value)) return null
   const preview = readPreviewWire(value.preview)
   if (preview === null) return null
-  const token = typeof value.previewToken === 'string' && value.previewToken.length > 0
-    ? value.previewToken
-    : undefined
+  // Defensive trim (4.6-L1): a whitespace-only token is treated as absent,
+  // and accidental padding around a pasted/host-issued token is normalised
+  // before it becomes the binding previewId.
+  const rawToken = typeof value.previewToken === 'string' ? value.previewToken.trim() : ''
+  const token = rawToken.length > 0 ? rawToken : undefined
   const digest = typeof value.baselineDigest === 'string' && value.baselineDigest.length > 0
     ? value.baselineDigest
     : undefined
@@ -235,7 +252,7 @@ export function readRestoreResult(value: unknown): RestoreResultWire | null {
     error: typeof value.error === 'string' && value.error.length > 0 ? value.error : undefined,
     failures: readRestoreFailures(value.failures),
     unbackedPaths: readStringArray(value.unbackedPaths),
-    autoPrunedCheckpointCount: readCount(value.autoPrunedCheckpointCount) || undefined,
+    autoPrunedCheckpointCount: readOptionalCount(value.autoPrunedCheckpointCount),
   }
 }
 

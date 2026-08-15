@@ -52,10 +52,21 @@ export function formatCheckpointBytes(bytes: number | null | undefined): string 
   return `${text} ${unitLabel}`
 }
 
-/** Locale-agnostic short time (browser Intl; safe during replay). */
+/**
+ * Locale-agnostic absolute time in UTC (`YYYY-MM-DD HH:mm:ss`). Deterministic
+ * across locales and time zones — the previous browser-default
+ * `Intl.DateTimeFormat` drifted with the host environment and rendered
+ * `1970/1/1` for a zero timestamp (L-3). Test-friendly: a fixed input maps to
+ * the same string on every machine.
+ */
 export function formatCheckpointTime(time: number): string {
   if (!Number.isFinite(time)) return '—'
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(time))
+  const date = new Date(time)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return (
+    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ` +
+    `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`
+  )
 }
 
 /** Index the loaded pages by id. */

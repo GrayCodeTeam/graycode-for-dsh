@@ -121,7 +121,7 @@ export { NotificationCenter } from './notifications/NotificationCenter.tsx'
 export type { NotificationCenterProps } from './notifications/NotificationCenter.tsx'
 export { BrowserNotificationPresenter } from './notifications/presenter.ts'
 export { createNotificationBus, createFixtureNotificationSource } from './notifications/source.ts'
-export { notificationsFromWindow } from './notifications/fold.ts'
+export { notificationsFromWindow, createNotificationFoldSession } from './notifications/fold.ts'
 
 /** Required client services (cordis fiber inject). */
 export const inject = ['slots', 'locale', 'conversationEvents', 'connection']
@@ -238,22 +238,38 @@ export function apply(ctx: ClientContext): void {
   // `conversation.session.header.actions` list slot is session-scoped and
   // additive (the host's subagent-catalog button sits in the same row); the
   // action renders only for subagent sessions and opens the parent session via
-  // the sessions service — the same route the host breadcrumb uses. Absent
-  // sessions service (unwired host) degrades to skipping the registration.
-  const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
-  if (sessions !== undefined) {
-    ctx.slots.inject('conversation.session.header.actions', () =>
-      ctx.slots.register(
-        {
-          name: 'conversation.session.header.actions',
-          id: 'graycode.back-to-main',
-          order: 20,
-          locale: GRAYCODE_SUBAGENT_BACK_NS,
-          inject: (): SubagentBackInjected => ({ open: (sessionId) => sessions.open(sessionId) }),
-        },
-        SubagentBackButton,
-      ))
-  }
+  // the sessions service — the same route the host breadcrumb uses. The seat
+  // is ALWAYS registered (the SubagentBackButton selector already renders
+  // nothing without a live session snapshot); the sessions SERVICE is resolved
+  // at action time (4.3-L5) so a late-started service is honored instead of
+  // being permanently skipped by an apply-time snapshot, and an unwired host
+  // simply no-ops on click (3.3-M4).
+  ctx.slots.inject('conversation.session.header.actions', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.session.header.actions',
+        id: 'graycode.back-to-main',
+        order: 20,
+        locale: GRAYCODE_SUBAGENT_BACK_NS,
+        inject: (): SubagentBackInjected => ({
+          open: (sessionId) => {
+            const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
+            if (sessions === undefined) return
+            // 3.3-M4: the parent session may have been deleted between render
+            // and click; degrade silently — no unhandled rejection, no throw.
+            try {
+              const result = sessions.open(sessionId) as unknown
+              if (result !== null && typeof result === 'object' && 'catch' in result) {
+                ;(result as { catch(onRejected: () => void): unknown }).catch(() => {})
+              }
+            } catch {
+              /* silent degradation */
+            }
+          },
+        }),
+      },
+      SubagentBackButton,
+    ))
 
   // Gray Code settings panel: native settings section (slot `settings.section`,
   // id `graycode`). The panel's data does NOT ride ctx.settingsScope — the
