@@ -272,6 +272,34 @@
 - **Remote 契约测试补全**：契约端点 19 → 32（补齐 prompt 9 + branches 2 + activity 1 +
   migration 1），含无文档外端点断言；新增 lateRegistration 回归测试（grayRemote 晚到
   自动补注册）。
+- **重新生成 AI 消息**：客户端 `conversation.chat.assistant-actions` 槽注册「重新生成」
+  按钮（`graycode.regenerate`，order 20），经 `branches/reroll` Remote 端点 fork 重发；
+  插件新增 `branches/reroll` / `branches/editRetry` Remote 端点（自动归组、错误码透传
+  NO_PREVIOUS_TURN 等）。
+- **编辑用户消息**：`conversation.chat.turnTail` 槽注册「编辑」按钮
+  （`graycode.edit-turn`）——弹层改写该轮用户消息后经 `branches/editRetry` 重试。
+- **自动存档点（autoCheckpoints 域）**：配置 `autoCheckpoints.{enabled,beforeUserMessage,
+  beforeMajorChange,majorChangeTools}`（默认全关 + 8 个文件修改类工具）；用户消息经
+  `session/event user/message`（source.kind === 'user'）触发，大改动经 `tools/pre-execute`
+  工具名命中触发；同 turn 同类型去重；复用 CheckpointService.createCheckpoint（标题
+  `auto: user message before` / `auto: tool <name> before`）；checkpoints 域暴露
+  CHECKPOINTS_SERVICE_KEY 跨域缝；设置页 checkpoints 分类新增「自动存档」区块
+  （3 开关 + 工具清单 textarea，parseToolList 支持换行/逗号分隔）。
+- **图像生成/编辑（images 域）**：`generate_image` 工具（生成+编辑共用，reference_images
+  裸 base64，prompt+output_path 必填，aspect_ratio/image_size 仅设置启用时暴露）；
+  Gemini Image API（`POST {url}/models/{model}:generateContent`，120s 超时、双源中止、
+  扩展名魔法字节嗅探、路径防穿越、落盘 `<cwd>/generated_images/`、maxImagesPerTask
+  截断）；配置 `images.{enabled,agentScope,url,apiKey,model,enableAspectRatio,
+  defaultAspectRatio,enableImageSize,defaultImageSize,maxBatchTasks,maxImagesPerTask}`，
+  apiKey 经 schema role('secret') 只在写路径可见；客户端设置新增独立 `image` 分类
+  （第 9 分类）与 ImagePage（含 secret 字段）；media 域移除 generate_image 占位
+  （channel 收窄 removeBackground）。
+- **总结功能（summary 域）**：`summary/generate` Remote 端点；SummaryService 经
+  `ctx.llm.stream`（provider/model 取 session.requestContext 或消息 provenance）；
+  policy 纯逻辑（token 估算字符数/4、轮次分组、预算解析数字/百分比、保留最近 N 轮 +
+  超预算从旧轮裁、6 段 system prompt + {history} 模板、MIN_SUMMARY_LENGTH=50 质量
+  校验）；客户端 `graycode.summarize` 命名空间 + `conversation.session.header.actions`
+  槽「总结」按钮（order 30）+ 结果弹层（复制/关闭）；installSummarize 独立安装函数。
 
 ### Changed（变更）
 
@@ -305,6 +333,11 @@
   代理作用范围→工具注册范围、启用提示词域→启用提示词功能、思考请求层→思考注入、
   子代理最大消息跳数→子代理最大消息往返次数、条条目→条、主机服务→DSH 服务等；
   zh/en/ja 三语同步。
+- **术语改名（对齐原插件）**：「根代理」→「主代理」设置文案 zh/en 同步
+  （options.scope.roots 与 fields.agentScope.description）。
+- **上游同步（rebase 5cefeb4）**：吸收官方 P9-P18（checkpoints 锁/GC 归一化、memory
+  tail-delete、branches 3.15-M2 送达回退、media P15 加固、M1 remote 白名单、
+  subagents P9 等）；本地新增端点并入白名单。
 
 ### Fixed（修复，来自审计批次）
 
