@@ -15,6 +15,29 @@ export interface CustomAgentConfig {
   enabled: boolean
 }
 
+/** F3 automatic checkpoint policy (mirror of the plugin's auto-checkpoints entry). */
+export interface AutoCheckpointsConfig {
+  enabled: boolean
+  beforeUserMessage: boolean
+  beforeMajorChange: boolean
+  majorChangeTools: string[]
+}
+
+/** Image generation (mirror of the plugin's images entry). */
+export interface ImagesConfig {
+  enabled: boolean
+  agentScope: AgentScope
+  url: string
+  apiKey: string
+  model: string
+  enableAspectRatio: boolean
+  defaultAspectRatio?: string
+  enableImageSize: boolean
+  defaultImageSize?: string
+  maxBatchTasks: number
+  maxImagesPerTask: number
+}
+
 export interface GrayCodeConfig {
   workflows: DataRootConfig & ScopedConfig & { documentRoot: string }
   memory: DataRootConfig & ScopedConfig & {
@@ -33,6 +56,8 @@ export interface GrayCodeConfig {
     blobGracePeriodDays: number
     restoreProtectionPoint: boolean
   }
+  autoCheckpoints: AutoCheckpointsConfig
+  images: ImagesConfig
   branches: DataRootConfig & ScopedConfig
   persona: ToggleScopedConfig & { template?: string }
   prompt: DataRootConfig & ToggleScopedConfig & {
@@ -133,6 +158,6 @@ export interface CheckpointGcResult {
   removedBlobs: string[]
   removedBytes: number
   pendingBlobs: Array<{ hash: string; orphanedSince: number; ageMs: number }>
-  refsVerified: number
+  blobsScanned: number
   issue?: string
 }

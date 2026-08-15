@@ -32,6 +32,7 @@ import {
   tabStyle,
   tokens,
 } from '../src/client/settings/styles.ts'
+import { parseToolList } from '../src/client/settings/toolList.ts'
 import type { GrayCodeConfig } from '../src/client/settings/types.ts'
 
 function makeConnection(call: ReturnType<typeof vi.fn>): ConnectionHandle {
@@ -252,18 +253,95 @@ describe('Gray Remote bridge client', () => {
 describe('real settings surface', () => {
   it('contains only real host modules', () => {
     expect(Object.keys(DEFAULTS).sort()).toEqual([
-      'activity', 'branches', 'checkpoints', 'file', 'media', 'memory', 'migration',
+      'activity', 'autoCheckpoints', 'branches', 'checkpoints', 'file', 'images', 'media', 'memory', 'migration',
       'notifications', 'persona', 'prompt', 'stagedDiff', 'subagents', 'thoughts', 'todo', 'workflows',
     ].sort())
-    expect(JSON.stringify(DEFAULTS)).not.toContain('apiKey')
+    // 唯一凭据字段是 images.apiKey（镜像插件域；空默认值）
+    const imagesOnly: Record<string, unknown> = { ...DEFAULTS }
+    delete imagesOnly.images
+    expect(JSON.stringify(imagesOnly)).not.toContain('apiKey')
+    expect(DEFAULTS.images.apiKey).toBe('')
   })
 
-  it('uses eight focused native-settings categories', () => {
+  it('uses nine focused native-settings categories', () => {
     expect(CATEGORIES.map(category => category.id)).toEqual([
-      'checkpoints', 'memory', 'workflows', 'activity', 'subagents', 'prompt', 'tools', 'advanced',
+      'checkpoints', 'memory', 'workflows', 'activity', 'image', 'subagents', 'prompt', 'tools', 'advanced',
     ])
     expect(new Set(CATEGORIES.map(category => category.id)).size).toBe(CATEGORIES.length)
     for (const category of CATEGORIES) expect(zh).toHaveProperty(category.labelKey)
+  })
+})
+
+describe('images defaults', () => {
+  it('mirrors the plugin images domain (disabled, roots scope, reference endpoint/model)', () => {
+    expect(DEFAULTS.images).toEqual({
+      enabled: false,
+      agentScope: 'roots',
+      url: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: '',
+      model: 'gemini-3-pro-image-preview',
+      enableAspectRatio: false,
+      defaultAspectRatio: undefined,
+      enableImageSize: false,
+      defaultImageSize: undefined,
+      maxBatchTasks: 5,
+      maxImagesPerTask: 1,
+    })
+  })
+
+  it('keeps the images block out of other module snapshots', () => {
+    const config = structuredClone(DEFAULTS)
+    const { patch } = setAtPath(config, ['checkpoints', 'maxCheckpoints'], 3)
+    expect(patch.images).toBeUndefined()
+  })
+
+  it('turns the aspect-ratio select back into undefined for "auto"', () => {
+    const config = structuredClone(DEFAULTS)
+    const { patch } = setAtPath(config, ['images', 'defaultAspectRatio'], '16:9')
+    expect(patch.images?.defaultAspectRatio).toBe('16:9')
+  })
+})
+
+describe('autoCheckpoints defaults', () => {
+  it('ships the documented default policy (disabled, no triggers, stock major tools)', () => {
+    expect(DEFAULTS.autoCheckpoints).toEqual({
+      enabled: false,
+      beforeUserMessage: false,
+      beforeMajorChange: false,
+      majorChangeTools: [
+        'apply_diff',
+        'write_file',
+        'insert_code',
+        'delete_file',
+        'delete_code',
+        'create_directory',
+        'execute_command',
+        'edit_file',
+      ],
+    })
+  })
+
+  it('keeps the autoCheckpoints block out of other module snapshots', () => {
+    const config = structuredClone(DEFAULTS)
+    const { patch } = setAtPath(config, ['checkpoints', 'maxCheckpoints'], 3)
+    expect(patch.autoCheckpoints).toBeUndefined()
+  })
+})
+
+describe('parseToolList', () => {
+  it('splits on newlines and commas, trims, and drops empty entries', () => {
+    expect(parseToolList('apply_diff, write_file\ninsert_code\n,delete_file,')).toEqual([
+      'apply_diff', 'write_file', 'insert_code', 'delete_file',
+    ])
+  })
+
+  it('collapses duplicates preserving first occurrence', () => {
+    expect(parseToolList('apply_diff\napply_diff, write_file\nwrite_file')).toEqual(['apply_diff', 'write_file'])
+  })
+
+  it('returns an empty list for blank input', () => {
+    expect(parseToolList('')).toEqual([])
+    expect(parseToolList('  \n , ')).toEqual([])
   })
 })
 

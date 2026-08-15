@@ -1,10 +1,17 @@
 # Gray Code native settings section
 
 The client contributes `id: graycode` to DSH's native `settings.section` slot.
-It exposes six focused pages backed by the actual host child-plugin configs:
-checkpoints, memory, workflows, prompts, tools/agents, and advanced data paths.
-DSH-owned provider credentials, MCP configuration, theme, language, and model
-channels are intentionally not duplicated here.
+It exposes nine focused pages backed by the actual host child-plugin configs:
+checkpoints, memory, workflows, activity statistics, image generation, subagents,
+prompts, tools/agents, and advanced data paths. DSH-owned provider credentials,
+MCP configuration, theme, language, and model channels are intentionally not
+duplicated here.
+
+The only GrayCode-owned credential is the image-generation API key
+(`images.apiKey`), declared with schemastery `role('secret')`: the host strips
+it from the `/graycode` channel document (write-only secret input), and the
+settings scope's deep merge keeps an already-stored value intact when other
+image fields change.
 
 ## Transport
 
@@ -21,8 +28,8 @@ the browser boundary:
 | `remote.invoke` | `{ namespace, method, args }` | Invoke a registered Gray Remote endpoint |
 
 There is deliberately no whole-document import/replace UI or endpoint. The
-panel edits one known module at a time, and no credential values are part of
-the GrayCode schema or browser document.
+panel edits one known module at a time, and the only credential in the GrayCode
+schema (`images.apiKey`) never crosses the wire in plaintext.
 
 Checkpoint management uses the same bridge for list/create/verify,
 preview-before-restore, token-bound restore, confirmed delete, and dry-run-first
@@ -40,7 +47,7 @@ adapter.
 | `remote.ts` | Nested DSH RPC → Gray Remote envelope adapter |
 | `CheckpointManager.tsx` | Complete checkpoint management workflow |
 | `fields.tsx` | Native-looking form primitives |
-| `pages.tsx` | Six focused page definitions |
+| `pages.tsx` | Nine focused page definitions |
 | `GrayCodeSettingsSection.tsx` | Native settings slot root |
 
 All styling is inline because the browser package has no CSS asset pipeline.
