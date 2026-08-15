@@ -584,7 +584,7 @@
 - ✅ **P1–P8**（client 域）：activityHeatmap / settings / subagentBack / memory / notifications / stagedDiffCard / scopeMap / workflowNode+Overview——已修复验证（见 10.2/10.3）。
 - ✅ **P9–P17**（plugin 侧 9 域）：3.10 subagents（M1 临界区占用计数 + L1-L6）、3.11 checkpoints domain（M1 owner token 原子接管 + M2/M3/M5）、3.12 checkpoints service/remote/tools（M6 错误归一化 + M7 confirm 门闸 + M8 驱逐后置 + 4.12-L1 + 4.19-L1）、3.13 memory（M1-M6 + L1-L11 全项）、3.14 migration（M1/M2/M4/M5 + L1-L8 + 4.20 全项）、3.15 branches/activity/todo/thoughts/notifications（M2-M5 + L1/L3/L4/L6，L2/L5 评估保持）、3.16 media/file/prompt/remote/settings/shared（M1 白名单 + M2/M3/M4 + L1-L12 全项）、3.17 stagedDiff+workflows（M1-M7 + 4.17-L2-L7，L1 保守保持）、3.19/3.20 plugin tests（M3/M4 + L2 + 各测试隔离项）。
 - ✅ **P18**（工程配置）：3.21-M1（ci.yml bundle 探针精确匹配 `graycode-dsh-[0-9]*`）、M2（client tests 纳入类型检查：新建 `packages/client/tsconfig.test.json`，typecheck 脚本串联）、M3（verify-pack 跨平台：node 启动器 `scripts/verify-pack.mjs`，pwsh→powershell 探测）；4.21-L1（RELEASE.md §3.2 依赖清单按实际修正：plugin peers 8、client peers 7、inject 5）、L2（.gitattributes 加 `* text=auto` 兜底）、L3（verify-pack.ps1 traversal 检测移至 TrimStart 前）；L5（checkout@v7/setup-node@v7 无法在线核实，保持现状待核实）、L6（allowBuilds 白名单需全新容器核对，保持现状）。
-- ⏳ **H-9a**：staged-diff 默认关闭，后置。
+- ✅ **H-9a**：staged-diff 默认关闭已闭环——schema 层 `enabled` 默认 false（含根装配缺省 stagedDiff 键、`Config(undefined)` 两种场景，新增 `tests/stagedDiff/config.defaults.test.ts` 锁定）；运行时三层门控：工具注册（`if (config.enabled)`）、钩子接管（`handle.enabled` → `writeTargetText` 双重检查）均默认不生效；`stagedWrite.test.ts` 默认关闭组验证直接落盘与现状一致。ENOENT/连续 milestone 互盖为 deferred-write 设计语义（用户需先 accept 再 record），默认关闭下不暴露，启用场景属 ADR-0003 后续工作包演进；accept before 冲突检测已由 3.17-M3 落地。
 
 ### 10.6 第二批执行过程记录
 
