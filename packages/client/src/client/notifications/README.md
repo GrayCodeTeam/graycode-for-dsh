@@ -44,9 +44,12 @@ ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, 'ja', graycodeNotificationsJaPlac
 // 2. Provide a notification event source where the presenter/center is mounted.
 //    Live host: bridge the conversation-event stream into a bus. The exact
 //    client runtime seam (a registered Definition whose fold feeds the bus, or
-//    a future push channel) is a main-session decision; the pure fold is here:
+//    a future push channel) is a main-session decision; the session fold keeps
+//    cross-window association (4.7-M1), so a tool/result arriving in a later
+//    window still resolves the earlier tool/call:
 //    const bus = createNotificationBus()
-//    // on each session window: for (const i of notificationsFromWindow(window)) bus.push(i)
+//    const fold = createNotificationFoldSession()
+//    // on each session window: for (const i of fold.push(window)) bus.push(i)
 //    Unwired host / development:
 //    const source = createFixtureNotificationSource([...fixture intents])
 
@@ -83,8 +86,15 @@ list) / `unsupported` (non-browser) / `failed`. Only `completed` intents present
 - Browser Notification permission is per-origin; `silent` maps to the
   Notification init flag only (the API has no per-notification urgency/level
   field — `level` drives the in-app badge copy).
-- The in-app center is capped at `NOTIFICATION_CENTER_MAX_ENTRIES` (newest
-  first).
+- The in-app center is capped at `NOTIFICATION_CENTER_MAX_ENTRIES` and shows
+  newest-first (stable sort by `at`, ties by id).
+- 4.7-M4 known limitation: the bus intentionally does **no history replay**
+  (design locked by `tests/notifications.spec.ts`), so intents pushed while the
+  in-app center is unmounted are not buffered and are lost. Mitigation: the main
+  session keeps the fold session alive from session start and subscribes the
+  presenter/center permanently. No unread counter is implemented — while the
+  center is mounted and subscribed, nothing is missed (replay is the only way to
+  cover the unmounted window, which the locked no-replay contract forbids).
 
 ## Testing
 

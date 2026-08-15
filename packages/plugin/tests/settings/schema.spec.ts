@@ -36,10 +36,14 @@ describe('GrayCode native settings schema', () => {
     expect(() => resolve({ checkpoints: { agentScope: 'somewhere' } as unknown as GrayCodeConfig['checkpoints'] })).toThrow()
   })
 
-  it('contains no provider credentials or duplicate DSH-owned appearance fields', () => {
-    const keys = JSON.stringify(GrayCodeSchema.toJSON())
-    expect(keys).not.toContain('apiKey')
-    expect(keys).not.toContain('appearance')
-    expect(keys).not.toContain('channels')
+  it('keeps provider credentials scoped to the images module only', () => {
+    const resolved = GrayCodeSchema()
+    const rest: Record<string, unknown> = { ...resolved }
+    delete rest.images
+    expect(JSON.stringify(GrayCodeSchema.toJSON())).not.toContain('appearance')
+    expect(JSON.stringify(GrayCodeSchema.toJSON())).not.toContain('channels')
+    // generate_image 的 write-only apiKey 字段只允许存在于 images 模块
+    expect(JSON.stringify(resolved.images)).toContain('apiKey')
+    expect(JSON.stringify(rest)).not.toContain('apiKey')
   })
 })

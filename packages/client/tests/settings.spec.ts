@@ -335,18 +335,52 @@ describe('Gray Remote bridge client', () => {
 describe('real settings surface', () => {
   it('contains only real host modules', () => {
     expect(Object.keys(DEFAULTS).sort()).toEqual([
-      'activity', 'branches', 'checkpoints', 'file', 'media', 'memory', 'migration',
+      'activity', 'branches', 'checkpoints', 'file', 'images', 'media', 'memory', 'migration',
       'notifications', 'persona', 'prompt', 'stagedDiff', 'subagents', 'thoughts', 'todo', 'workflows',
     ].sort())
-    expect(JSON.stringify(DEFAULTS)).not.toContain('apiKey')
+    // 唯一凭据字段是 images.apiKey（镜像插件域；空默认值）
+    const imagesOnly: Record<string, unknown> = { ...DEFAULTS }
+    delete imagesOnly.images
+    expect(JSON.stringify(imagesOnly)).not.toContain('apiKey')
+    expect(DEFAULTS.images.apiKey).toBe('')
   })
 
-  it('uses eight focused native-settings categories', () => {
+  it('uses nine focused native-settings categories', () => {
     expect(CATEGORIES.map(category => category.id)).toEqual([
-      'checkpoints', 'memory', 'workflows', 'activity', 'subagents', 'prompt', 'tools', 'advanced',
+      'checkpoints', 'memory', 'workflows', 'activity', 'image', 'subagents', 'prompt', 'tools', 'advanced',
     ])
     expect(new Set(CATEGORIES.map(category => category.id)).size).toBe(CATEGORIES.length)
     for (const category of CATEGORIES) expect(zh).toHaveProperty(category.labelKey)
+  })
+})
+
+describe('images defaults', () => {
+  it('mirrors the plugin images domain (disabled, roots scope, reference endpoint/model)', () => {
+    expect(DEFAULTS.images).toEqual({
+      enabled: false,
+      agentScope: 'roots',
+      url: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: '',
+      model: 'gemini-3-pro-image-preview',
+      enableAspectRatio: false,
+      defaultAspectRatio: undefined,
+      enableImageSize: false,
+      defaultImageSize: undefined,
+      maxBatchTasks: 5,
+      maxImagesPerTask: 1,
+    })
+  })
+
+  it('keeps the images block out of other module snapshots', () => {
+    const config = structuredClone(DEFAULTS)
+    const { patch } = setAtPath(config, ['checkpoints', 'maxCheckpoints'], 3)
+    expect(patch.images).toBeUndefined()
+  })
+
+  it('turns the aspect-ratio select back into undefined for "auto"', () => {
+    const config = structuredClone(DEFAULTS)
+    const { patch } = setAtPath(config, ['images', 'defaultAspectRatio'], '16:9')
+    expect(patch.images?.defaultAspectRatio).toBe('16:9')
   })
 })
 

@@ -254,7 +254,7 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The thirteen locale namespaces the entry registers (dict + ja placeholder each). */
+/** The fifteen locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
@@ -268,6 +268,8 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.notifications',
   'graycode.scopeMap',
   'graycode.subagentBack',
+  'graycode.rerollEdit',
+  'graycode.summarize',
   'settings.graycode',
 ]
 
@@ -476,15 +478,17 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
     await flushMicrotasks()
-    // Three injections: the shell.overlay marker, the settings.section entry
-    // and the subagent back-to-main header action.
-    expect(harness.overlayEntries).toHaveLength(3)
+    // Six injections: the shell.overlay marker, the settings.section entry,
+    // the subagent back-to-main header action, the F1/F2 regenerate/edit-turn
+    // seats (conversation.chat.assistant-actions + conversation.chat.turnTail)
+    // and the summarize header action (conversation.session.header.actions).
+    expect(harness.overlayEntries).toHaveLength(6)
     // Declaration teardown calls the inject disposer (apply() leaves it to the
     // declaration lifetime by design — see the index.ts comment).
     const injectDisposer = harness.slotInject.mock.results[0]?.value as () => void
     expect(typeof injectDisposer).toBe('function')
     injectDisposer()
-    expect(harness.overlayEntries).toHaveLength(2)
+    expect(harness.overlayEntries).toHaveLength(5)
 
     // Fiber unload alone does NOT remove the injection while the declaration
     // lives — documented declaration-lifetime semantics.
@@ -493,6 +497,6 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     await flushMicrotasks()
     other.unload()
     expect(other.definitions).toHaveLength(0)
-    expect(other.overlayEntries).toHaveLength(3)
+    expect(other.overlayEntries).toHaveLength(6)
   })
 })

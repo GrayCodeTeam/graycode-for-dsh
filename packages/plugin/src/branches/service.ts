@@ -15,6 +15,8 @@
  * D-2（旧版 updateTail:true 语义）：reroll / editRetry 在 sidecar 提交时自动把
  * activeSessionId 切到新候选（同一原子写）；手动 createBranch 不切换。切换只改
  * 会话指针，不重写任何会话日志（“切换不隐式改文件”不变量）。
+ * 3.15-M2：若重发的用户消息未送达（无 live agent / 投递失败，messageSent=false），
+ * 自动激活会回退——activeSessionId 退回原候选（新候选保留在组内，仅不切换指针）。
  *
  * 变更操作在同一进程内串行（promise 链互斥），跨实例仍靠 revision CAS 防护。
  */
@@ -112,7 +114,8 @@ export interface RetryBranchResult {
     agentAttached: boolean;
     orphan: boolean;
     revision: number;
-    /** sidecar 提交后的激活候选（reroll/edit_retry 自动激活新候选；孤儿路径保持原激活） */
+    /** sidecar 提交后的激活候选（reroll/edit_retry 自动激活新候选；孤儿路径保持原激活；
+     *  3.15-M2：重发消息未送达时回退为原激活） */
     activeSessionId: string;
 }
 
@@ -350,6 +353,7 @@ export class BranchCoordinatorService {
                 );
             }
             const content = (userEvent as unknown as { data: { content: readonly unknown[] } }).data.content;
+            const previousActive = group.activeSessionId;
             const created = await this.forkAndRecord({
                 group,
                 parent: source,
@@ -360,11 +364,15 @@ export class BranchCoordinatorService {
                 activate: true,
             });
             const messageSent = await this.sendAfterFork(created.sessionId, content);
+            // 3.15-M2：消息未送达时不自动激活——把激活指针退回原候选（新候选保留在组内）
+            const reverted = messageSent ? undefined : await this.revertActivation(input.groupId, previousActive);
             return {
                 ...created,
                 boundary,
                 targetTurn: input.turn,
                 messageSent,
+                revision: reverted?.revision ?? created.revision,
+                activeSessionId: reverted?.activeSessionId ?? created.activeSessionId,
             };
         });
     }
@@ -394,6 +402,7 @@ export class BranchCoordinatorService {
                     BranchErrorCode.NO_PREVIOUS_TURN
                 );
             }
+            const previousActive = group.activeSessionId;
             const created = await this.forkAndRecord({
                 group,
                 parent: source,
@@ -406,11 +415,15 @@ export class BranchCoordinatorService {
             const messageSent = await this.sendAfterFork(created.sessionId, [
                 { type: 'text', text: input.text },
             ]);
+            // 3.15-M2：消息未送达时不自动激活——把激活指针退回原候选（新候选保留在组内）
+            const reverted = messageSent ? undefined : await this.revertActivation(input.groupId, previousActive);
             return {
                 ...created,
                 boundary,
                 targetTurn: input.turn,
                 messageSent,
+                revision: reverted?.revision ?? created.revision,
+                activeSessionId: reverted?.activeSessionId ?? created.activeSessionId,
             };
         });
     }
@@ -623,6 +636,23 @@ export class BranchCoordinatorService {
         } catch {
             return false;
         }
+    }
+
+    /**
+     * 3.15-M2：reroll/edit_retry 重发消息未送达时，把 activeSessionId 从刚自动激活的
+     * 新候选退回原候选。新候选保留在组内（fork 会话有效），只撤销指针切换（「切换不
+     * 隐式改文件」不变量不受影响）。返回回退后的组；已在原候选时返回 undefined。
+     */
+    private async revertActivation(
+        groupId: string,
+        previousActive: string
+    ): Promise<GrayBranchGroup | undefined> {
+        const current = this.requireGroup(groupId);
+        if (current.activeSessionId === previousActive) return undefined;
+        const reverted = activateCandidate(current, previousActive);
+        await this.persistGroup(reverted);
+        this.replaceGroup(reverted);
+        return reverted;
     }
 
     private replaceGroup(next: GrayBranchGroup): void {

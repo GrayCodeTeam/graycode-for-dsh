@@ -1153,7 +1153,14 @@ export function extractInitialReviewScope(content: string): string {
 }
 
 function detectSectionOrder(content: string, sectionTitles: string[]): boolean {
-  const indices = sectionTitles.map((title) => content.indexOf(title));
+  const normalized = normalizeLineEndings(content);
+  // 行首锚定：正文 scope 中被转义的字面标题（`\## Review Snapshot`）行首是反斜杠，
+  // 不再被误认为 section 标题（3.17-M4 转义后的顺序校验）。
+  const indices = sectionTitles.map((title) => {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = new RegExp(`(?:^|\\n)${escaped}(?:\\n|$)`).exec(normalized);
+    return match ? match.index : -1;
+  });
   if (indices.some((index) => index < 0)) return false;
   for (let i = 1; i < indices.length; i += 1) {
     if ((indices[i] ?? -1) <= (indices[i - 1] ?? -1)) return false;
@@ -1403,7 +1410,10 @@ function parseLegacyMilestoneBlock(block: string): ParsedLegacyMilestone | null 
       const summaryLines: string[] = [];
       while (index < lines.length) {
         const nextLine = lines[index]!;
-        if (/^- (Conclusion|Evidence Files|Recommended Next Action|Findings):/i.test(nextLine.trim())) {
+        // 4.17-L5：Summary 收集遇到任何后续字段标题都要停止——旧实现只识别
+        // Conclusion/Evidence/Recommended/Findings，手写旧格式里排在 Summary 后的
+        // `- Reviewed Modules:` 行会被吞进摘要，导致模块清单丢失。
+        if (/^- (Status|Recorded At|Reviewed Modules|Conclusion|Evidence Files|Recommended Next Action|Findings):/i.test(nextLine.trim())) {
           break;
         }
         summaryLines.push(nextLine);
@@ -2197,6 +2207,32 @@ function escapeUnpairedScopeFences(markdown: string): string {
     .join('\n');
 }
 
+/**
+ * 渲染 scope 前的综合转义：未配对围栏 + 与快照节标题同名的字面 H2 行。
+ * 3.17-M4：用户 scope 里出现 `## Review Snapshot` 字面标题会让
+ * validateReviewDocument 的 snapshot_section_count 报错（正文 + 真正的快照节 =
+ * 2 个同名 H2），create_review/record/finalize 直接失败。行首加反斜杠转义后渲染
+ * 为普通文本，不再被当作 H2 heading 计数（isSnapshotHeading 对任意 locale 的
+ * 快照节标题生效）。
+ */
+function escapeReviewScopeForRendering(markdown: string): string {
+  const source = (markdown || '').split('\n');
+  // 仅转义围栏外的字面 H2：围栏内的 ``` 行与围栏内容（代码块）原样保留
+  let inFence = false;
+  const escaped = source
+    .map((line) => {
+      if (/^```/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      const match = /^##\s+(\S.*)$/.exec(line);
+      return match && isSnapshotHeading(match[1]!) ? `\\${line}` : line;
+    })
+    .join('\n');
+  return escapeUnpairedScopeFences(escaped);
+}
+
 function renderReviewDocumentBody(snapshot: ReviewSnapshotV4): string {
   const normalizedSnapshot = reconcileReviewSnapshot(snapshot);
   const locale = resolveReviewDocumentLocale(normalizedSnapshot.render.locale, 'en');
@@ -2211,7 +2247,7 @@ function renderReviewDocumentBody(snapshot: ReviewSnapshotV4): string {
     '',
     headings.scope,
     '',
-    escapeUnpairedScopeFences(normalizedSnapshot.scope.markdown) || getLocalizedDefaultReviewScope(locale),
+    escapeReviewScopeForRendering(normalizedSnapshot.scope.markdown) || getLocalizedDefaultReviewScope(locale),
     '',
     headings.summary,
     '',

@@ -29,10 +29,12 @@ export function createDefaultScopeMapSelection(): ScopeMapTargetSelection {
   return { kind: 'default', customPath: '' }
 }
 
-/** Whether a path looks absolute (POSIX `/…` or Windows `C:\…`). */
+/** Whether a path looks absolute (POSIX `/…`, Windows `C:\…`, or UNC `\\server\share`). */
 export function isScopeMapAbsolutePath(value: string): boolean {
   if (value.length === 0) return false
-  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value)
+  // 4.7-M3：放行 UNC（\\server\share）——宿主接受 UNC 绝对路径，客户端若拒绝则
+  // 覆盖被静默丢弃；仅拒绝相对路径与明显非法的绝对路径。
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')
 }
 
 /**

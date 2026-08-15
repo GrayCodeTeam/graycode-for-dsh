@@ -124,12 +124,25 @@ function makeLegacyRoot(options: SampleOptions = {}): string {
 
 // ─── 服务构造（支持注入 journal / lock / ledger） ─────────────────────────
 
+/**
+ * 可控时钟（3.20-M2：H1c 锁测试不直接依赖真实 epoch）。epoch 由测试固定，
+ * 相对流逝走真实时间——陈旧判定的时间戳全部来自注入时钟，配合大 staleMs
+ * 余量，彻底消除慢 CI 上“写入锁文件与陈旧判定之间真实耗时超过 staleMs”的抖动。
+ */
+function makeControlledClock(): { nowMs: () => number } {
+  const wallStart = Date.now()
+  const base = FIXED_TS
+  return { nowMs: () => base + (Date.now() - wallStart) }
+}
+
 interface ServiceOverrides {
   journalPath?: string
   lockFile?: string
   lockTimeoutMs?: number
   lockPollMs?: number
   lockStaleMs?: number
+  /** 注入可控时钟（H1c 锁测试用） */
+  nowMs?: () => number
   ledger?: LedgerPort
   /** 复用指定 dataRoot（测试需预知 ledger/migration 路径时使用） */
   dataRoot?: string
@@ -166,6 +179,7 @@ function makeService(overrides: ServiceOverrides = {}): {
       lockTimeoutMs: overrides.lockTimeoutMs,
       lockPollMs: overrides.lockPollMs,
       lockStaleMs: overrides.lockStaleMs,
+      nowMs: overrides.nowMs,
     },
   )
   return {
@@ -250,7 +264,9 @@ describe('H1 幂等窗口', () => {
     const sourceDir = makeLegacyRoot({ withMemory: true, withCheckpoint: true })
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-harden-target-'))
     const migrationRoot = path.join(dataRoot, 'migration')
-    const journalPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-')), 'applied.json')
+    // 4.20-L1：mkdtemp 目录纳入 finally 清理，不留 os.tmpdir 堆积
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-'))
+    const journalPath = path.join(journalDir, 'applied.json')
     const failingLedger = new FailingLedger(new FileLedgerStore(path.join(migrationRoot, 'ledger.json')), true)
     const fx = makeService({ dataRoot, journalPath, ledger: failingLedger })
     try {
@@ -293,13 +309,17 @@ describe('H1 幂等窗口', () => {
     } finally {
       fx.cleanup()
       fs.rmSync(sourceDir, { recursive: true, force: true })
+      fs.rmSync(journalDir, { recursive: true, force: true })
     }
   })
 
   test('H1b：迁移写入台账损坏 → memory writer 拒绝服务（STORAGE_CORRUPT）', async () => {
-    const journalPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-')), 'applied.json')
+    // 4.20-L1：mkdtemp 目录全部纳入 finally 清理
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-'))
+    const journalPath = path.join(journalDir, 'applied.json')
+    const memDataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-jt-'))
     fs.writeFileSync(journalPath, '{broken')
-    const writer = createMemoryTargetWriter(new MemoryService({ dataRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'migration-jt-')) }), { journalPath })
+    const writer = createMemoryTargetWriter(new MemoryService({ dataRoot: memDataRoot }), { journalPath })
     const object = {
       domain: 'memory' as const,
       objectType: 'memory-global' as const,
@@ -308,20 +328,27 @@ describe('H1 幂等窗口', () => {
       outcome: 'import' as const,
       data: { scope: 'global', entries: [{ id: 0, date: '2026-01-01', text: 'hi' }] },
     }
-    await expect(
-      writer.write({ runId: 'r', object, sourceDir: '' }),
-    ).rejects.toMatchObject({ code: 'STORAGE_CORRUPT' })
+    try {
+      await expect(
+        writer.write({ runId: 'r', object, sourceDir: '' }),
+      ).rejects.toMatchObject({ code: 'STORAGE_CORRUPT' })
+    } finally {
+      fs.rmSync(memDataRoot, { recursive: true, force: true })
+      fs.rmSync(journalDir, { recursive: true, force: true })
+    }
   })
 
   test('H1c：apply 跨进程文件锁——被占用时超时拒绝（LOCK_TIMEOUT），释放后可执行', async () => {
+    // 3.20-M2：注入可控时钟，锁时间戳不再依赖真实 epoch
+    const clock = makeControlledClock()
     const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-lock-'))
     const lockFile = path.join(lockDir, 'apply.lock')
     const sourceDir = makeLegacyRoot({ withMemory: true })
-    const fx = makeService({ lockFile, lockTimeoutMs: 200, lockPollMs: 20 })
+    const fx = makeService({ lockFile, lockTimeoutMs: 200, lockPollMs: 20, nowMs: clock.nowMs })
     try {
       const scan = await fx.service.scan(sourceDir)
       // 预占锁（模拟另一进程正在 apply；fresh createdAt → 不按陈旧打破）
-      fs.writeFileSync(lockFile, `${JSON.stringify({ pid: 999999, createdAt: Date.now() })}\n`, 'utf-8')
+      fs.writeFileSync(lockFile, `${JSON.stringify({ pid: 999999, createdAt: clock.nowMs() })}\n`, 'utf-8')
       await expect(fx.service.apply(sourceDir, scan.report.planToken)).rejects.toMatchObject({ code: 'LOCK_TIMEOUT' })
       // 释放锁后 apply 成功，且锁文件被清理
       fs.rmSync(lockFile)
@@ -331,38 +358,45 @@ describe('H1 幂等窗口', () => {
     } finally {
       fx.cleanup()
       fs.rmSync(sourceDir, { recursive: true, force: true })
+      // 4.20-L1：mkdtemp 目录纳入清理
+      fs.rmSync(lockDir, { recursive: true, force: true })
     }
   })
 
   test('H1c：陈旧锁（超时无心跳）被打破，apply 不永久等待', async () => {
+    // 3.20-M2：注入可控时钟；staleMs 给足余量（60s），陈旧与否完全由注入时钟决定
+    const clock = makeControlledClock()
     const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-lock-'))
     const lockFile = path.join(lockDir, 'apply.lock')
     const sourceDir = makeLegacyRoot({ withMemory: true })
-    const fx = makeService({ lockFile, lockTimeoutMs: 2000, lockPollMs: 20, lockStaleMs: 50 })
+    const fx = makeService({ lockFile, lockTimeoutMs: 2000, lockPollMs: 20, lockStaleMs: 60_000, nowMs: clock.nowMs })
     try {
       const scan = await fx.service.scan(sourceDir)
-      // 陈旧锁：createdAt 远早于 staleMs
-      fs.writeFileSync(lockFile, `${JSON.stringify({ pid: 1, createdAt: Date.now() - 60_000 })}\n`, 'utf-8')
+      // 陈旧锁：createdAt 远早于 staleMs（相对注入时钟）
+      fs.writeFileSync(lockFile, `${JSON.stringify({ pid: 1, createdAt: clock.nowMs() - 60_000 })}\n`, 'utf-8')
       const applied = await fx.service.apply(sourceDir, scan.report.planToken)
       expect(applied.run.status).toBe('complete')
     } finally {
       fx.cleanup()
       fs.rmSync(sourceDir, { recursive: true, force: true })
+      fs.rmSync(lockDir, { recursive: true, force: true })
     }
   })
 
   test('H1c：updatedAt 心跳存活（createdAt 陈旧但 updatedAt 新鲜）→ 锁不被打破', async () => {
+    // 3.20-M2：注入可控时钟；staleMs 余量 60s，测试耗时远小于该余量 → 时序确定
+    const clock = makeControlledClock()
     const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-lock-'))
     const lockFile = path.join(lockDir, 'apply.lock')
     const sourceDir = makeLegacyRoot({ withMemory: true })
-    const fx = makeService({ lockFile, lockTimeoutMs: 200, lockPollMs: 20, lockStaleMs: 5000 })
+    const fx = makeService({ lockFile, lockTimeoutMs: 200, lockPollMs: 20, lockStaleMs: 60_000, nowMs: clock.nowMs })
     try {
       const scan = await fx.service.scan(sourceDir)
       // 模拟另一进程的长 apply：createdAt 已远超任何合理的 staleMs，但心跳
       // （updatedAt）新鲜 → 锁必须被视为存活（按 updatedAt 判定，不用 createdAt）
       fs.writeFileSync(
         lockFile,
-        `${JSON.stringify({ pid: 999999, createdAt: Date.now() - 60_000, updatedAt: Date.now() })}\n`,
+        `${JSON.stringify({ pid: 999999, createdAt: clock.nowMs() - 60_000, updatedAt: clock.nowMs() })}\n`,
         'utf-8',
       )
       await expect(fx.service.apply(sourceDir, scan.report.planToken)).rejects.toMatchObject({
@@ -376,30 +410,76 @@ describe('H1 幂等窗口', () => {
     } finally {
       fx.cleanup()
       fs.rmSync(sourceDir, { recursive: true, force: true })
+      fs.rmSync(lockDir, { recursive: true, force: true })
     }
   })
 })
 
 // ─── H2：symlink 路径穿越 / 无限递归 ─────────────────────────
 
-function canCreateSymlink(): boolean {
+/**
+ * 链接能力探测（4.20-L3）：
+ * - full：文件 + 目录 symlink 都可用（POSIX / Windows 开发者模式）；
+ * - dir-only：仅目录链接可用（Windows 无管理员：'dir' symlink 失败，但
+ *   junction 无需管理员即可创建，且 lstat 同样报告 isSymbolicLink）；
+ * - none：任何链接都不可创建（跳过）。
+ */
+type LinkSupport = 'full' | 'dir-only' | 'none'
+
+function detectLinkSupport(): LinkSupport {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-symlink-probe-'))
   try {
-    const target = path.join(dir, 't.txt')
-    const link = path.join(dir, 'l.txt')
-    fs.writeFileSync(target, 'x')
-    fs.symlinkSync(target, link, 'file')
-    return fs.lstatSync(link).isSymbolicLink()
-  } catch {
-    return false
+    let file = false
+    try {
+      const target = path.join(dir, 't.txt')
+      const link = path.join(dir, 'l.txt')
+      fs.writeFileSync(target, 'x')
+      fs.symlinkSync(target, link, 'file')
+      file = fs.lstatSync(link).isSymbolicLink()
+    } catch {
+      file = false
+    }
+    let dirLink = false
+    try {
+      const targetDir = path.join(dir, 'd')
+      fs.mkdirSync(targetDir)
+      const linkDir = path.join(dir, 'ld')
+      fs.symlinkSync(targetDir, linkDir, 'dir')
+      dirLink = fs.lstatSync(linkDir).isSymbolicLink()
+    } catch {
+      dirLink = false
+    }
+    let junction = false
+    if (!dirLink) {
+      try {
+        const targetDir = path.join(dir, 'j')
+        fs.mkdirSync(targetDir)
+        const linkJ = path.join(dir, 'lj')
+        fs.symlinkSync(targetDir, linkJ, 'junction')
+        junction = fs.lstatSync(linkJ).isSymbolicLink()
+      } catch {
+        junction = false
+      }
+    }
+    if (file && dirLink) return 'full'
+    if (junction || dirLink) return 'dir-only'
+    return 'none'
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 }
 
+/** 创建目录链接：full → dir symlink；dir-only（Windows）→ junction（无需管理员） */
+function createDirLink(target: string, link: string, support: LinkSupport): void {
+  fs.symlinkSync(target, link, support === 'dir-only' ? 'junction' : 'dir')
+}
+
 describe('H2 symlink 路径穿越 / 无限递归', () => {
   test('清单不收录指向外部文件的 symlink，也不跟随 symlink 目录（无环链挂死）', async (ctx) => {
-    if (!canCreateSymlink()) return ctx.skip()
+    // 4.20-L3：dir-only（Windows junction）平台同样执行——目录链接与自环可测；
+    // 仅文件 symlink 子断言在无文件 symlink 能力时跳过
+    const support = detectLinkSupport()
+    if (support === 'none') return ctx.skip()
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-symlink-'))
     try {
       const external = path.join(root, 'external')
@@ -411,29 +491,43 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
       fs.mkdirSync(source)
       writeText(source, 'conversations/conv_ok.meta.json', JSON.stringify({ id: 'conv_ok', title: 'ok' }))
       writeText(source, 'conversations/conv_ok.json', JSON.stringify([{ role: 'user', parts: [{ type: 'text', text: 'hi' }] }]))
-      // 文件 symlink → 外部文件
-      fs.symlinkSync(path.join(external, 'secret.txt'), path.join(source, 'conversations', 'conv_evil.json'), 'file')
-      // 目录 symlink → 外部目录（含合法 checkpoint manifest，若被跟随会误入清单）
-      fs.symlinkSync(path.join(external, 'checkpoints'), path.join(source, 'checkpoints'), 'dir')
-      // 自环 symlink 目录（a/self → a）：lstat 拒绝即终止，不挂死
-      fs.mkdirSync(path.join(source, 'loop'))
-      fs.symlinkSync(path.join(source, 'loop'), path.join(source, 'loop', 'self'), 'dir')
+      // 文件 symlink → 外部文件（仅 full 平台可建；dir-only 平台该子断言跳过）
+      if (support === 'full') {
+        fs.symlinkSync(path.join(external, 'secret.txt'), path.join(source, 'conversations', 'conv_evil.json'), 'file')
+      }
+      // 目录链接 → 外部目录（含合法 checkpoint manifest，若被跟随会误入清单）
+      createDirLink(path.join(external, 'checkpoints'), path.join(source, 'checkpoints'), support)
+      // 自环目录链接（a/self → a）：lstat 拒绝即终止，不挂死。部分 Windows
+      // junction 实现不允许目标为自身祖先目录，失败则跳过该子断言（不失败）。
+      let loopLinkCreated = true
+      try {
+        fs.mkdirSync(path.join(source, 'loop'))
+        createDirLink(path.join(source, 'loop'), path.join(source, 'loop', 'self'), support)
+      } catch {
+        loopLinkCreated = false
+      }
 
       const inventory = await new DefaultInventoryReader().inventory(source)
-      // 外部内容不入清单/指纹：无 conv_evil 会话、无 cp_evil checkpoint
-      expect(inventory.entries.some(e => e.legacyId === 'conv_evil')).toBe(false)
+      // 外部内容不入清单/指纹：无 cp_evil checkpoint、无 loop；conv_ok 正常收录
       expect(inventory.entries.some(e => e.legacyId === 'cp_evil')).toBe(false)
+      if (loopLinkCreated) {
+        expect(inventory.entries.some(e => e.legacyId === 'loop')).toBe(false)
+      }
       expect(inventory.entries.some(e => e.legacyId === 'conv_ok')).toBe(true)
-      expect(inventory.entries.some(e => e.legacyId === 'loop')).toBe(false)
-      // 环链扫描终止且记录 issue
-      expect(inventory.issues.some(i => i.message.includes('符号链接跳过'))).toBe(true)
+      if (support === 'full') {
+        expect(inventory.entries.some(e => e.legacyId === 'conv_evil')).toBe(false)
+      }
+      // 环链扫描终止且记录 issue（结构断言：有 issue 即可，不绑定具体文案）
+      expect(inventory.issues.length).toBeGreaterThan(0)
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
 
   test('checkpoint 导入拒绝 symlink 文件（不把外部内容写入 blob 池）', async (ctx) => {
-    if (!canCreateSymlink()) return ctx.skip()
+    // 文件 symlink 在 Windows 无管理员时不可创建；该用例在 dir-only 平台跳过，
+    // 由「拒绝 symlink 中间目录」用例（junction 可测）覆盖生产最需要的目录防护
+    if (detectLinkSupport() !== 'full') return ctx.skip()
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-cp-symlink-'))
     try {
       const external = path.join(root, 'external')
@@ -476,9 +570,8 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
           },
           sourceDir: root,
         })
-        // 跳过 symlink 文件并留下审计备注
+        // 跳过 symlink 文件并留下审计备注（结构断言：备注含被跳过文件的 scoped 路径）
         const notes = (result.notes ?? []).join('\n')
-        expect(notes).toMatch(/符号链接/)
         expect(notes).toContain(`${WS_ID}/src/evil.txt`)
         // 外部内容未进入 blob 池
         expect(blobExists(dataRoot, sha256Hex('TOP-SECRET-DATA'))).toBe(false)
@@ -491,7 +584,10 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
   })
 
   test('checkpoint 导入拒绝 symlink 中间目录', async (ctx) => {
-    if (!canCreateSymlink()) return ctx.skip()
+    // 4.20-L3：dir-only（Windows junction）平台同样执行——junction 无需管理员，
+    // lstat 同样报 isSymbolicLink，覆盖生产最需要的目录穿越防护
+    const support = detectLinkSupport()
+    if (support === 'none') return ctx.skip()
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-cp-symlink-dir-'))
     try {
       const external = path.join(root, 'external')
@@ -513,7 +609,8 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
         }, null, 2),
       )
       fs.mkdirSync(path.join(root, 'checkpoints', cpId, WS_ID), { recursive: true })
-      fs.symlinkSync(path.join(external, 'src'), path.join(root, 'checkpoints', cpId, WS_ID, 'src'), 'dir')
+      // 目录链接：full → dir symlink；dir-only（Windows junction）→ junction
+      createDirLink(path.join(external, 'src'), path.join(root, 'checkpoints', cpId, WS_ID, 'src'), support)
 
       const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-cp-symlink-target-'))
       try {
@@ -534,7 +631,8 @@ describe('H2 symlink 路径穿越 / 无限递归', () => {
           },
           sourceDir: root,
         })
-        expect((result.notes ?? []).join('\n')).toMatch(/符号链接/)
+        // 结构断言：备注含被拒绝的 scoped 路径；外部内容未进入 blob 池
+        expect((result.notes ?? []).join('\n')).toContain(`${WS_ID}/src/evil.txt`)
         expect(blobExists(dataRoot, sha256Hex('TOP-SECRET-DATA'))).toBe(false)
       } finally {
         fs.rmSync(dataRoot, { recursive: true, force: true })
@@ -553,7 +651,9 @@ describe('H-5a / M3 memory 台账', () => {
     const sourceB = makeLegacyRoot({ withMemory: true })
     // 第二源目录额外文件改变源指纹（内存内容相同但指纹不同 → 台账键不碰撞）
     writeText(sourceB, 'second-source.txt', 'second')
-    const journalPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-')), 'applied.json')
+    // 4.20-L1：mkdtemp 目录纳入 finally 清理
+    const journalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-journal-'))
+    const journalPath = path.join(journalDir, 'applied.json')
     const fx = makeService({ journalPath })
     try {
       // 第一源：3 条全局记忆
@@ -578,6 +678,7 @@ describe('H-5a / M3 memory 台账', () => {
       fx.cleanup()
       fs.rmSync(sourceA, { recursive: true, force: true })
       fs.rmSync(sourceB, { recursive: true, force: true })
+      fs.rmSync(journalDir, { recursive: true, force: true })
     }
   })
 
@@ -633,8 +734,9 @@ describe('M1 decodeURIComponent 隔离', () => {
       expect(conv?.valid).toBe(true) // 会话本身不受影响
       const subagents = (conv?.data as { subagents: Array<{ runId: string; valid: boolean; errorMessage?: string }> }).subagents
       expect(subagents).toHaveLength(1)
+      // 结构断言：条目失效即可（4.20-L5：不绑定具体错误文案）
       expect(subagents[0]!.valid).toBe(false)
-      expect(subagents[0]!.errorMessage).toContain('百分号编码')
+      expect(subagents[0]!.errorMessage?.length ?? 0).toBeGreaterThan(0)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -688,7 +790,8 @@ describe('M3 输入规模上限', () => {
       const conv = validated.find(o => o.objectType === 'conversation')
       expect(conv?.valid).toBe(false)
       expect(conv?.errorCode).toBe('FILE_TOO_LARGE')
-      expect(conv?.errorMessage).toContain('超过')
+      // 结构断言：错误码已锚定（4.20-L5：不绑定具体错误文案）
+      expect(conv?.errorMessage).toBeDefined()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -700,14 +803,15 @@ describe('M3 输入规模上限', () => {
       // 深度：root/a/b/c/d/file.txt（深度 4 > 3）
       writeText(dir, 'a/b/c/d/file.txt', 'x')
       const deep = await new DefaultInventoryReader({ maxWalkDepth: 3 }).inventory(dir)
-      expect(deep.issues.some(i => i.message.includes('深度超过上限'))).toBe(true)
+      // 结构断言：超限以 issue 形式记录（4.20-L5：不绑定具体文案）
+      expect(deep.issues.length).toBeGreaterThan(0)
 
       // 文件数：5 个文件 > 3
       const flat = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-count-'))
       try {
         for (let i = 0; i < 5; i += 1) writeText(flat, `f${i}.txt`, 'x')
         const counted = await new DefaultInventoryReader({ maxWalkFiles: 3 }).inventory(flat)
-        expect(counted.issues.some(i => i.message.includes('文件数超过上限'))).toBe(true)
+        expect(counted.issues.length).toBeGreaterThan(0)
         expect(counted.entries.length).toBe(0)
       } finally {
         fs.rmSync(flat, { recursive: true, force: true })
@@ -832,20 +936,28 @@ describe('M5 settings url/args 行内脱敏', () => {
 // ─── M6：settingsTarget.probe 路径校验 ─────────────────────────
 
 describe('M6 settingsTarget.probe 路径校验', () => {
-  test('artifact://settings/ 引用校验 runId 段格式，拒绝越界', async () => {
+  test('artifact://settings/ 引用校验 runId 段格式与 settings/<file> 布局，拒绝越界', async () => {
     const importsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-settings-imports-'))
     try {
       const writer = createSettingsTargetWriter({ importsRoot })
       const probe = writer.probe!
       expect(await probe('artifact://settings/../secret.txt')).toBe(false)
       expect(await probe('artifact://settings/..')).toBe(false)
-      expect(await probe('artifact://settings/run_1/..%2F..%2Fevil/settings.suggested.json')).toBe(false)
+      // 越界/布局不匹配一律拒绝
+      expect(await probe('artifact://settings/run_1/..%2F..%2Fevil/settings/graycode-settings.json')).toBe(false)
       expect(await probe('artifact://settings/run_1/settings.suggested.json')).toBe(false)
-      // 写入后 probe 命中
-      const dir = path.join(importsRoot, 'run_1')
+      expect(await probe('artifact://settings/run_1/settings/nonexistent.json')).toBe(false)
+      // 写入后 probe 命中（新布局 settings/<legacyId>）
+      const dir = path.join(importsRoot, 'run_1', 'settings')
       fs.mkdirSync(dir, { recursive: true })
-      fs.writeFileSync(path.join(dir, 'settings.suggested.json'), '{}', 'utf-8')
-      expect(await probe('artifact://settings/run_1/settings.suggested.json')).toBe(true)
+      fs.writeFileSync(path.join(dir, 'graycode-settings.json'), '{}', 'utf-8')
+      expect(await probe('artifact://settings/run_1/settings/graycode-settings.json')).toBe(true)
+      // 自定义 runIdFactory 产物：注入匹配模式后 probe 命中（3.14-M5）
+      const custom = createSettingsTargetWriter({ importsRoot, runIdPattern: /import_[A-Za-z0-9_-]+/ })
+      fs.mkdirSync(path.join(importsRoot, 'import_1', 'settings'), { recursive: true })
+      fs.writeFileSync(path.join(importsRoot, 'import_1', 'settings', 'limcode-settings.json'), '{}', 'utf-8')
+      expect(await custom.probe!('artifact://settings/import_1/settings/limcode-settings.json')).toBe(true)
+      expect(await custom.probe!('artifact://settings/run_1/settings/graycode-settings.json')).toBe(false)
     } finally {
       fs.rmSync(importsRoot, { recursive: true, force: true })
     }

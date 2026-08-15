@@ -9,16 +9,25 @@
  *          后一个写操作总是等前一个完成后，重新读取当前盘面再合并写回。
  * 修改目的：同一 progress 文件的写操作按调用顺序排队执行，互不覆盖；不同文件
  *          （多工作区）之间互不阻塞。
+ *
+ * 多工作区区分（3.17-M6）：互斥 key 由「工作区 cwd + 相对路径」构成（调用方传入
+ * 各自会话的 cwd），两个工作区即使有相同的相对路径（如 `.graycode/progress.md`）
+ * 也落到不同队列，不再互相串行。cwd 缺省时回退 process.cwd()（与 file/tools 等
+ * 不感知工作区的调用保持一致，同一工作区内 key 仍相同）。
  */
+
+import * as path from 'node:path';
 
 const queues = new Map<string, Promise<unknown>>();
 
 /**
- * 归一化互斥 key：与 fileWriteLockManager 的路径归一化保持同一语义
- * （反斜杠转斜杠、去尾部斜杠、小写），保证各调用点传入的不同写法落到同一队列。
+ * 归一化互斥 key：cwd + 相对路径拼成绝对形态后归一化
+ * （反斜杠转斜杠、去尾部斜杠、小写），保证同一工作区同一文件的不同写法
+ * （含带/不带 workspace 前缀）落到同一队列，不同工作区落到不同队列。
  */
-function normalizeProgressPathKey(progressPath: string): string {
-  return String(progressPath || '')
+function normalizeProgressPathKey(progressPath: string, cwd?: string): string {
+  const raw = cwd ? path.join(cwd, progressPath) : progressPath;
+  return String(raw || '')
     .replace(/\\/g, '/')
     .replace(/\/+$/g, '')
     .toLowerCase();
@@ -28,10 +37,12 @@ function normalizeProgressPathKey(progressPath: string): string {
  * 在 per-path 写锁内执行 `fn`。
  *
  * `fn` 内必须包含完整的「读 → 改 → 写」，否则读改写仍会交叉。
+ * `cwd` 为工作区绝对路径（多工作区场景必须传入，否则不同工作区同相对路径会
+ * 错误地共用同一队列）。
  * 返回 `fn` 的结果；`fn` 抛错时该 Promise 以同样错误拒绝（调用方自行处理）。
  */
-export function withProgressWriteLock<T>(progressPath: string, fn: () => Promise<T>): Promise<T> {
-  const key = normalizeProgressPathKey(progressPath);
+export function withProgressWriteLock<T>(progressPath: string, fn: () => Promise<T>, cwd?: string): Promise<T> {
+  const key = normalizeProgressPathKey(progressPath, cwd);
   const previous = queues.get(key) || Promise.resolve();
   const next = previous
     .catch(() => undefined)
@@ -52,4 +63,13 @@ export function withProgressWriteLock<T>(progressPath: string, fn: () => Promise
 /** 测试与诊断用：当前仍有排队/在途写操作的文件数。 */
 export function getProgressWriteQueueSize(): number {
   return queues.size;
+}
+
+/**
+ * 测试隔离专用：清空模块级写锁队列（3.19-M5）。
+ * 队列条目在各自写操作排空后会自动清理；本函数用于测试文件在 beforeEach 中重置
+ * 模块级状态，避免前序用例失败留下未排空条目、污染后续用例的队列计数断言。
+ */
+export function resetProgressWriteLocksForTest(): void {
+  queues.clear();
 }

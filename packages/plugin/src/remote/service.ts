@@ -126,11 +126,15 @@ export class GrayRemoteService extends Service {
     }
     try {
       const value = await handler(args, signal)
-      await this.recordProjection(`query:${endpoint}`, { ok: true, value })
+      // L7：投影落盘不阻塞调用返回——JSONL 追加/轮转是尽力通道，同步 await 会让
+      // 每个 Remote 调用都等一次文件 IO（journalPath 配置时），拖慢浏览器面板。
+      // 改为 fire-and-forget：recordProjection 内部吞掉一切异常，且投影记录按调用顺序
+      // 入列（同微任务队列 + writeChain 串行化），replay 仍能看到完整事件流。
+      void this.recordProjection(`query:${endpoint}`, { ok: true, value })
       return { ok: true, value }
     } catch (err) {
       const failure = toGrayRemoteFailure(err, signal)
-      await this.recordProjection(`query:${endpoint}`, { ok: false, error: failure })
+      void this.recordProjection(`query:${endpoint}`, { ok: false, error: failure })
       return { ok: false, error: failure }
     }
   }

@@ -141,6 +141,16 @@ describe('staged_diff 工具闭环（真实 ctx.fs 落盘）', () => {
     expect(second.entry!.status).toBe('pending')
   })
 
+  it('headless stage（无 agent 会话）以 \'unknown\' 会话归组（3.17-M7）', async () => {
+    // 与 stagedWriteHook 的 'unknown' 兜底一致：无 agent 会话的 exec 不得产生空串
+    // sessionId（空串会被 createEntry 以 GRAY_INVALID_INPUT 拒绝），工具照常成功
+    const stage = tools.get('staged_diff_stage')!
+    const headlessExec = { signal: new AbortController().signal } as unknown as ToolRunContext
+    const staged = (await stage.execute({ path: 'headless.md', content: 'x' }, headlessExec)) as ToolOutput
+    expect(staged.success).toBe(true)
+    expect(staged.entry!.sessionId).toBe('unknown')
+  })
+
   it('路径穿越 → GRAY_STAGED_INVALID_PATH（工具层拒绝）', async () => {
     const result = await run('staged_diff_stage', { path: '../evil.md', content: 'x' })
     expect(result.success).toBe(false)

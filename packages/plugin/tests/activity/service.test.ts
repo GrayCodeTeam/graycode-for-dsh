@@ -71,6 +71,42 @@ describe('ActivityService', () => {
     }
   })
 
+  test('range=today：currentSession 跨午夜归集起点，daily 只报今天（4.15-L1）', async () => {
+    const { service, dataRoot } = makeService()
+    try {
+      const store = service.getStore()
+      // 昨晚 23:50 开始、今晨 00:05/00:08 继续的连续会话
+      const yesterdayLate = new Date()
+      yesterdayLate.setDate(yesterdayLate.getDate() - 1)
+      yesterdayLate.setHours(23, 50, 0, 0)
+      const now = new Date()
+      now.setHours(0, 10, 0, 0)
+      const todayEarly = new Date(now.getTime())
+      todayEarly.setHours(0, 5, 0, 0)
+      const todayLater = new Date(now.getTime())
+      todayLater.setHours(0, 8, 0, 0)
+      const today = toDateStr(now.getTime())
+      const yesterday = toDateStr(yesterdayLate.getTime())
+
+      await store.appendSample(yesterdayLate.getTime())
+      await store.appendSample(todayEarly.getTime())
+      await store.appendSample(todayLater.getTime())
+
+      const result = await service.getStats({ range: 'today' }, now.getTime())
+      // daily 按日历日只报今天
+      expect(result.daily.map(d => d.date)).toEqual([today])
+      expect(result.daily.map(d => d.date)).not.toContain(yesterday)
+      // currentSession 归集跨午夜起点（昨晚 23:50）
+      expect(result.currentSession.active).toBe(true)
+      expect(result.currentSession.startedAt).toBe(yesterdayLate.getTime())
+      expect(result.currentSession.minutes).toBe(
+        Math.max(1, Math.ceil((now.getTime() - yesterdayLate.getTime()) / 60_000)),
+      )
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
+
   test('dispose 落盘且幂等', async () => {
     const { service, dataRoot } = makeService()
     try {

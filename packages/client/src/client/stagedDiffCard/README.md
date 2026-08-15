@@ -76,12 +76,22 @@ const batch = await loadReviewBatch(dataSource, { workspaceId, sessionId })
 - **Review batch**: same workspace+session's `pending`/`reviewing` entries
   form a batch (derived view, `batch.ts`), sorted createdAt asc then id asc —
   identical to the host `buildReviewBatch` so the rendered list matches the
-  host projection.
+  host projection. The client additionally surfaces the crash-recovery
+  `needs-reapply` residue in the batch (4.8-L7) so its decision path is
+  reachable.
 - **Status → actions** (`status.ts`): `pending`/`reviewing`/`needs-reapply`
   are decidable (accept + reject); `accepted` is mid-flight (no actions until
   the host projects `done`); `rejected`/`done` are terminal.
 - **needs-reapply**: crash-recovery residue (accepted but never written) —
-  the card shows the recovery hint and offers the decision again.
+  the card shows the recovery hint and offers the decision again; included in
+  the batch list via `REVIEW_BATCH_STATUSES`.
+- **Decision timeout** (`actions.ts`, 3.8-M1): a decision that does not
+  settle within 30s resolves as a retryable `timeout` error and releases the
+  busy state, so a hanging remote can never freeze the card. A synchronous
+  data-source throw is trapped the same way (4.8-L3).
+- **Failed-decision retry** (`StagedDiffCard.tsx`, 3.8-M2): a retryable
+  applyFailed keeps the `accepted` entry visible with a Retry button that
+  re-runs accept with the authoritative snapshot's fresh revision.
 - **Diff summary** (`summary.ts`): `before === null` → new file; `after === ''`
   → deleted; otherwise modified with +N −M line counts (common prefix/suffix
   stripped). Display-only, no diff engine, no workspace access.
@@ -89,12 +99,14 @@ const batch = await loadReviewBatch(dataSource, { workspaceId, sessionId })
   `details.causeCode` — `GRAY_STAGED_REVISION_CONFLICT` (refresh),
   `GRAY_STAGED_REJECT_CONFLICT` (resolve file conflict),
   `GRAY_STAGED_APPLY_FAILED` (entry stays accepted, retry as-is),
-  `GRAY_STAGED_ILLEGAL_TRANSITION` (refresh). The UI reads machine codes
-  only, never message text (PLAN_V2 §5.6).
+  `GRAY_STAGED_WORKSPACE_CONFLICT` (refuse — entry belongs to another
+  workspace), `GRAY_STAGED_ILLEGAL_TRANSITION` (refresh). The UI reads
+  machine codes only, never message text (PLAN_V2 §5.6).
 - **Idempotency** (`idempotency.ts`): every decision carries an operation id
   (explicit, or derived `<kind>:<entryId>`); repeating an id returns the
   recorded outcome instead of re-invoking the data source. The host's
-  `revision` CAS remains the authoritative guard.
+  `revision` CAS remains the authoritative guard. The registry is capped at
+  1000 records with oldest-first eviction (4.8-L1).
 
 ## Client boundary rules (PLAN_V2 §5.6)
 
@@ -115,7 +127,7 @@ const batch = await loadReviewBatch(dataSource, { workspaceId, sessionId })
 
 | File | Role |
 | --- | --- |
-| `contract.ts` | Host wire-contract mirror (entries, statuses, envelope, `GRAY_*`/`GRAY_STAGED_*` codes, transition table) |
+| `contract.ts` | Host wire-contract mirror (entries, statuses, envelope, `GRAY_*`/`GRAY_STAGED_*` codes incl. `WORKSPACE_CONFLICT`, transition table) |
 | `dataSource.ts` | `StagedDiffDataSource` port (contract-driven consumption point) |
 | `batch.ts` | Review-batch aggregation + `loadReviewBatch` paged loader |
 | `status.ts` | Status → badge/action mapping, tones, needs-reapply hint |

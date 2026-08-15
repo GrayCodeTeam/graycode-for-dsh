@@ -12,12 +12,14 @@
  *   （安装引用计数，HMR 双 apply 不互相拆台，见 H-4b）。
  * - G1：hop 计数器包在 followup/reportFrom 外层，threadId 由 subagent_id（childId /
  *   child.id）派生，同线程超 maxHopDepth（默认 5，老 Gray MAX_HOP_DEPTH）拒绝投递并抛
- *   HopDepthExceededError；subagent/start 重置线程预算、subagent/end 清理。
+ *   HopDepthExceededError；subagent/start 仅在无活跃预算时重置线程预算（L4，resume 不
+ *   绕开熔断）、subagent/end 清理。
  * - G2：reportFrom 不支持任意寻址（能力边界），sendToAgent 仅当 target 解析为调用方
  *   持久化直接父（含 'main' 且父为 root）时走 reportFrom，否则抛 UnsupportedAddressingError
  *   （fail-closed，不硬写 hack）。
- * - G3：start/startContinuable 委派前经 listChildren 统计父会话运行中子代理数，超
- *   subagents.maxConcurrent（默认 2）拒绝新委派并抛 MaxConcurrentSubagentsError；计数
+ * - G3：start/startContinuable 委派前在临界区同步占用/释放并发名额（listChildren 快照
+ *   与本地占用计数取大，见 reserve/release），超 subagents.maxConcurrent（默认 2）拒绝
+ *   新委派并抛 MaxConcurrentSubagentsError，消除 check-then-act 并发窗口（M1）；计数
  *   本身失败时抛 ConcurrencyCheckError（fail-closed）。
  */
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -92,6 +94,28 @@ interface GuardInstallState {
   detachEvents: Array<() => void>
 }
 const installState = new WeakMap<object, GuardInstallState>()
+
+/**
+ * L3：reportFrom 的 threadId 解析——优先取真实线程 id（子代理会话 id，与 followup 的
+ * childId、subagent 生命周期事件 id 同源），缺失时按对象实例分配唯一匿名线程（无 id
+ * 子代理不再共用 '' 预算桶：一个子代理耗尽 hop 预算不会误伤其他无 id 子代理）。
+ */
+const anonymousReportThreads = new WeakMap<object, string>()
+let anonymousReportThreadSeq = 0
+
+function reportThreadIdOf(child: Agent): string {
+  const sessionId = child?.session?.id
+  if (sessionId !== undefined && String(sessionId).length > 0) return String(sessionId)
+  const agentId = child?.id
+  if (agentId !== undefined && String(agentId).length > 0) return String(agentId)
+  if (child == null) return ''
+  const key = child as object
+  const existing = anonymousReportThreads.get(key)
+  if (existing !== undefined) return existing
+  const fresh = `anonymous-report:${(anonymousReportThreadSeq += 1)}`
+  anonymousReportThreads.set(key, fresh)
+  return fresh
+}
 
 /** 归零拆除：恢复原方法、注销事件、清除安装状态（幂等）。 */
 function teardown(key: object): void {
@@ -181,10 +205,21 @@ export function installSubagentsGuards(
   const maxConcurrent = options.maxConcurrent
   // M3：countRunning 缺省 fail-closed——未配置计数端口且 maxConcurrent>0 时拒绝
   // 委派（显式报错），绝不静默放行（旧默认 async () => 0 会让 G3 永久失效）。
-  // 抛普通 Error：assertUnderLimit 的 try/catch 统一包成 ConcurrencyCheckError。
+  // 抛普通 Error：reserve 的 try/catch 统一包成 ConcurrencyCheckError。
   const countRunning = options.countRunning ?? (async () => {
     throw new Error('no countRunning port configured — refusing delegation (fail-closed)')
   })
+
+  /**
+   * M1：G3 并发占用计数（临界区）。listChildren 投影有激活滞后（新起的子代理不会立即
+   * 出现在 activity='running' 里），纯 check-then-act（先查 listChildren 再放行）会让
+   * 连续快速委派都读到旧快照而超限。这里以「同步占用/释放」为临界区：reserve 在一次
+   * 同步 tick 内完成「检查 + 占用」（countRunning 的 await 之后到占用之间无 await），
+   * 超上限拒绝新请求，消除并发窗口；run 结算（result 落定 / subagent/end）时释放。
+   */
+  const occupied = new Map<string, number>()
+  /** continuable 子代理占用：childId → 已占用的父会话（随 subagent/end 释放）。 */
+  const continuableParents = new Map<string, string>()
 
   /** G1：同线程 hop 检查（check-then-increment；被拒不消耗预算）。 */
   const assertHop = (threadId: string): void => {
@@ -195,9 +230,15 @@ export function installSubagentsGuards(
     }
   }
 
-  /** G3：委派前并发上限检查（fail-closed）。 */
-  const assertUnderLimit = async (parent: Agent): Promise<void> => {
-    if (maxConcurrent <= 0) return
+  /**
+   * G3：委派前占用一个并发名额（fail-closed）。返回归一化父会话 id（调用方据此在
+   * 结算/失败时 release）；maxConcurrent<=0 时返回 ''（不限，不占用）。有效数取
+   * max(running, occupied)：running 是 listChildren 的 ground truth（含本 guard 已可见
+   * 的子代理），occupied 覆盖其激活滞后窗口——取大既消除 check-then-act 窗口，又不会
+   * 在快照追上后与 running 双重计数（过度拒绝）。
+   */
+  const reserve = async (parent: Agent): Promise<string> => {
+    if (maxConcurrent <= 0) return ''
     const rawParentSessionId = parent?.id ?? parent?.session?.id
     if (!rawParentSessionId) {
       throw new ConcurrencyCheckError(new Error('delegating parent has no session id'))
@@ -210,8 +251,23 @@ export function installSubagentsGuards(
     } catch (error) {
       throw new ConcurrencyCheckError(error)
     }
-    if (!shouldAllowDelegation(running, maxConcurrent)) {
-      throw new MaxConcurrentSubagentsError(String(parentSessionId), running, maxConcurrent)
+    const reserved = occupied.get(parentSessionId) ?? 0
+    const effective = Math.max(running, reserved)
+    if (!shouldAllowDelegation(effective, maxConcurrent)) {
+      throw new MaxConcurrentSubagentsError(String(parentSessionId), effective, maxConcurrent)
+    }
+    occupied.set(parentSessionId, reserved + 1)
+    return parentSessionId
+  }
+
+  /** G3：释放一个并发名额（幂等，释放超出占用时静默归零）。 */
+  const release = (parentSessionId: string): void => {
+    if (parentSessionId === '') return
+    const current = occupied.get(parentSessionId)
+    if (current === undefined || current <= 1) {
+      occupied.delete(parentSessionId)
+    } else {
+      occupied.set(parentSessionId, current - 1)
     }
   }
 
@@ -223,24 +279,61 @@ export function installSubagentsGuards(
     return originals.followup.apply(seam, [parent, childId, content, opts])
   }
   seam.reportFrom = async (child, content, opts) => {
-    assertHop(String(child?.id ?? child?.session?.id ?? ''))
+    // L3：优先取真实 threadId（子代理会话 id），缺失才退化到对象实例唯一匿名线程。
+    assertHop(reportThreadIdOf(child))
     return originals.reportFrom.apply(seam, [child, content, opts])
   }
-  // G3：两个委派入口（one-shot start / continuable startContinuable）都限并发。
+  // G3：两个委派入口（one-shot start / continuable startContinuable）都限并发，
+  // 且都在同一临界区占用名额（M1）。
   seam.start = async (name, request) => {
-    await assertUnderLimit(request.parent)
-    return originals.start.apply(seam, [name, request])
+    const reserved = await reserve(request.parent)
+    try {
+      const run = await originals.start.apply(seam, [name, request])
+      if (reserved !== '') {
+        if (run?.result?.then !== undefined) {
+          // 结算（成功或失败）即释放占用；release 幂等，双路径安全。
+          void run.result.then(() => release(reserved), () => release(reserved))
+        } else {
+          // 防御：无 result 承诺的 run 不存在可观测结算点，立即释放占用。
+          release(reserved)
+        }
+      }
+      return run
+    } catch (error) {
+      if (reserved !== '') release(reserved)
+      throw error
+    }
   }
   seam.startContinuable = async (spec) => {
-    await assertUnderLimit(spec.request.parent)
-    return originals.startContinuable.apply(seam, [spec])
+    const reserved = await reserve(spec.request.parent)
+    try {
+      const started = await originals.startContinuable.apply(seam, [spec])
+      // continuable 无 run 句柄：占用随 subagent/end 事件释放（生产 events 恒在场）。
+      if (reserved !== '') continuableParents.set(String(started.childId), reserved)
+      return started
+    } catch (error) {
+      if (reserved !== '') release(reserved)
+      throw error
+    }
   }
 
-  // G1：新子代理激活（subagent/start）→ 线程预算重置；结算（subagent/end）→ 清理。
+  // G1：新子代理激活（subagent/start）→ 预算重置仅在确实需要时进行（L4：活跃线程的
+  // 再次 start 是 resume，重置会清零累计 hop，让 resume+ping-pong 无限绕开熔断）；
+  // 结算（subagent/end）→ 清理 hop 预算并释放 continuable 并发占用。
   const detachEvents: Array<() => void> = []
   if (events) {
-    detachEvents.push(events.on('subagent/start', (info) => hopCounter.reset(String(info.id))))
-    detachEvents.push(events.on('subagent/end', (info) => hopCounter.clear(String(info.id))))
+    detachEvents.push(events.on('subagent/start', (info) => {
+      const threadId = String(info.id)
+      if (!hopCounter.has(threadId)) hopCounter.reset(threadId)
+    }))
+    detachEvents.push(events.on('subagent/end', (info) => {
+      const parentSessionId = continuableParents.get(String(info.id))
+      if (parentSessionId !== undefined) {
+        continuableParents.delete(String(info.id))
+        release(parentSessionId)
+      }
+      hopCounter.clear(String(info.id))
+    }))
   }
 
   // 记录拆除所需状态（原方法 + 事件注销），供「最后一个持有者」的 dispose 使用

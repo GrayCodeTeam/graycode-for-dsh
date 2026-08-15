@@ -243,7 +243,9 @@ describe('F11 + scopeOverrides（D-1 覆盖写）', () => {
     expect(fs.existsSync(path.join(sourceDir, 'memory-workspaces/158ee4e93a4e1c71/scope.json'))).toBe(true)
 
     const fx = makeService()
-    const customOther = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'migration-override-dst-')), 'other-project')
+    // 4.20-L1：mkdtemp 目录纳入 finally 清理，不留 os.tmpdir 堆积
+    const overrideDstDir = fs.mkdtempSync(path.join(os.tmpdir(), 'migration-override-dst-'))
+    const customOther = path.join(overrideDstDir, 'other-project')
     try {
       const scan = await fx.service.scan(sourceDir)
       expect(scan.report.counts.import).toBe(2)
@@ -283,6 +285,7 @@ describe('F11 + scopeOverrides（D-1 覆盖写）', () => {
       expect(await otherMgr!.totalEntries()).toBe(1)
     } finally {
       fx.cleanup()
+      fs.rmSync(overrideDstDir, { recursive: true, force: true })
     }
   })
 

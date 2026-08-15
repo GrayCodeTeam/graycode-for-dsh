@@ -9,7 +9,9 @@
  * - isSafeCheckpointDirName 校验（CP-DEL-1）、引用计数闸门（deleteCheckpointsByNodeIds）、
  *   级联/「写回成功后才删盘」语义与旧实现完全一致；
  * - 锁（CheckpointOperationLock）获取位置随方法体平移（batch/byNodeIds 原方法内获取），
- *   无锁 Internal 版仍由调用方保证已持有工作区级存档锁。
+ *   无锁 Internal 版仍由调用方保证已持有工作区级存档锁；
+ * - M5：batch/byNodeIds 持锁键 = 壳层锁键 ∪ 对话工作区键（deletionLockIds），与单删/
+ *   创建/恢复的工作区根键互斥；壳层应注入与创建/恢复同一 lockDir 的 lockManager。
  *
  * 依赖经 deps 注入（conversationManager / getStorage（每工作区 manifest 仓库 + blob 池）/
  * 删除锁 ID / 操作进度注册表 / 取消错误判定），避免反向引用 CheckpointManager
@@ -27,7 +29,7 @@ import type {
 import { isSafeCheckpointDirName } from './CheckpointManifestRepository.ts';
 import type { CheckpointManifestRepository } from './CheckpointManifestRepository.ts';
 import type { BlobStore } from './BlobStore.ts';
-import { checkpointOperationLockManager } from './CheckpointOperationLock.ts';
+import { checkpointOperationLockManager, type CheckpointOperationLockManager } from './CheckpointOperationLock.ts';
 import { throwIfAborted } from './checkpointConcurrency.ts';
 
 /** 单个工作区的内容寻址存储（manifest 仓库 + blob 池；删除路径的磁盘清理入口） */
@@ -72,8 +74,20 @@ export interface CheckpointDeletionServiceDeps {
     conversationManager: CheckpointRecordMetadataStore;
     /** 工作区内容寻址存储入口（删除/驱逐时清理 manifest + 减 blob 引用） */
     getStorage: (conversationId: string) => CheckpointWorkspaceStorage;
-    /** 工作区级删除锁 ID（有工作区时沿用工作区锁，无工作区时退回全局存储虚拟键；由壳层计算） */
+    /**
+     * 删除族额外锁键（由壳层计算）。M5 约定：批删/按节点删除实际持锁键 =
+     * 本方法返回值 ∪ 被删除对话的工作区级键（deletionLockIds）——单删/创建/恢复持
+     * 工作区根键，若只持全局虚拟键会互斥失效（删除与创建/恢复并发 → blob 引用竞态
+     * 提前回收）。壳层可返回全局虚拟键（跨工作区兜底），工作区级互斥由本服务补齐。
+     */
     getDeletionLockIds: () => string[];
+    /**
+     * M5：跨进程锁管理器（可选）。缺省 = 进程级单例（checkpointOperationLockManager）。
+     * 生产壳层应注入与创建/恢复/单删共用同一 lockDir 的实例（CheckpointService 的
+     * lockManager）——否则 batch/byNodeIds 在独立锁命名空间内运行，即便键一致也不与
+     * 工作区级锁互斥。注入后批删/按节点删与创建/恢复/单删/GC 真正串行。
+     */
+    lockManager?: CheckpointOperationLockManager;
     /** 注册删除操作进度/取消句柄（壳层 operations 注册表；batch 使用） */
     beginOperation: (
         kind: CheckpointOperationProgress['kind'],
@@ -107,6 +121,30 @@ export async function cleanupCheckpointStorage(
  */
 export class CheckpointDeletionService {
     constructor(private readonly deps: CheckpointDeletionServiceDeps) {}
+
+    /** M5：实际使用的跨进程锁管理器（壳层注入时与创建/恢复/单删共用同一 lockDir；缺省进程级单例） */
+    private get lock(): CheckpointOperationLockManager {
+        return this.deps.lockManager ?? checkpointOperationLockManager;
+    }
+
+    /**
+     * M5：删除操作的完整锁键集合 = 壳层提供的锁键 ∪ 当前对话的工作区级键。
+     *
+     * 修复前 batch/byNodeIds 只持壳层全局虚拟键（如 'checkpoint-global-storage'），而
+     * 单删/创建/恢复持工作区根键（roots.map(root => root.id)）——两者不互斥：删除与
+     * 创建/恢复可在同一工作区并发，refcount 增减竞态导致 blob 提前回收。conversationId
+     * 在本模块即工作区 id（conversationIdFor 返回根 id，records 按工作区 id 隔离），
+     * 追加该键后与创建/恢复/单删/GC 共用同一把工作区级锁。多根工作区（DSH 下恒单根）
+     * 时创建/恢复持全部根键，本方法只追加对话主键——需覆盖多根时由壳层在
+     * getDeletionLockIds 中返回全部根键（约定见 deps 注释）。
+     */
+    private deletionLockIds(conversationId: string): string[] {
+        const shellProvided = this.deps.getDeletionLockIds();
+        if (!conversationId || conversationId.length === 0) {
+            return [...shellProvided];
+        }
+        return [...shellProvided, conversationId];
+    }
 
     /**
      * 无锁删除检查点（调用方必须已持有工作区级存档锁）。
@@ -282,8 +320,8 @@ export class CheckpointDeletionService {
             // M7: 每个对话注册进度/取消句柄（设置页批量删除可展示进度并取消）
             const { operationId, signal, report } = this.deps.beginOperation('delete', item.conversationId);
             try {
-                await checkpointOperationLockManager.runExclusive(
-                    this.deps.getDeletionLockIds(),
+                await this.lock.runExclusive(
+                    this.deletionLockIds(item.conversationId),
                     'delete',
                     `checkpoint:${item.conversationId}:delete-batch:${operationId}`,
                     async () => {
@@ -405,8 +443,8 @@ export class CheckpointDeletionService {
             return result;
         }
         try {
-            await checkpointOperationLockManager.runExclusive(
-                this.deps.getDeletionLockIds(),
+            await this.lock.runExclusive(
+                this.deletionLockIds(conversationId),
                 'delete',
                 `checkpoint:${conversationId}:delete-by-node-ids:${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                 async () => {

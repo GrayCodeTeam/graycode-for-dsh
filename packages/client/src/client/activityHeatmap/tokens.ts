@@ -29,10 +29,14 @@ const RANGE_DAYS: Readonly<Record<Exclude<ActivityRange, 'all'>, number>> = {
 /** Local midnight of the range start; undefined = unbounded (`all`). */
 export function activityTokenRangeStartMs(range: ActivityRange | undefined, now: number): number | undefined {
   if (range === undefined || range === 'all') return undefined
+  const days = RANGE_DAYS[range]
+  // 宿主日历日语义：窗口起点 = 今天本地零点往回退 (days-1) 个「日历日」，
+  // 而不是固定 24h 算术——DST 过渡日的 24h 时长不等于一个日历日，按小时相减会
+  // 把边界日的整天数据丢失或混入（3.1-M1）。setDate 逐日历日回退，天然跨月/跨年。
   const startOfToday = new Date(now)
   startOfToday.setHours(0, 0, 0, 0)
-  const days = RANGE_DAYS[range]
-  return startOfToday.getTime() - (days - 1) * 24 * 60 * 60 * 1000
+  startOfToday.setDate(startOfToday.getDate() - (days - 1))
+  return startOfToday.getTime()
 }
 
 /** Sum two bucket sets into a new immutable bucket set. */

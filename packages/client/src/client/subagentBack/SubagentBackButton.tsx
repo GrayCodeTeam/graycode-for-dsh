@@ -13,6 +13,7 @@
  * injected `open` seat, so the node-environment tests cover the decision
  * logic without React.
  */
+import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 
@@ -37,7 +38,11 @@ export interface SubagentBackSummaryLike {
 
 /** Structural mirror of the `useSessions` snapshot selector the slot injects. */
 export interface SubagentBackSessionListStateLike {
-  readonly byId: Readonly<Record<string, SubagentBackSummaryLike | undefined>>
+  /**
+   * Session summaries keyed by session id. Optional: a drifted host snapshot
+   * may omit it, and the selector must not crash on that (3.3-M3).
+   */
+  readonly byId?: Readonly<Record<string, SubagentBackSummaryLike | undefined>>
 }
 
 /** Injected seat: navigate the host conversation view to a session. */
@@ -67,13 +72,47 @@ export function subagentBackTarget(summary: SubagentBackSummaryLike | undefined)
   return summary.parentId
 }
 
+/**
+ * Decide the back-to-main target from a live session-list snapshot (3.3-M3):
+ * the current session must be a subagent WITH a parent, and the parent must
+ * actually exist in the snapshot — a deleted parent must not render a dead
+ * button. A missing `byId` seat (drifted host contract) renders nothing too,
+ * so the "never crashes the header" promise holds against any snapshot shape.
+ */
+export function subagentBackTargetFromState(
+  state: SubagentBackSessionListStateLike | undefined,
+  sessionId: string,
+): string | undefined {
+  if (state === undefined || state.byId === undefined) return undefined
+  const summary = state.byId[sessionId]
+  const target = subagentBackTarget(summary)
+  if (target === undefined) return undefined
+  if (state.byId[target] === undefined) return undefined
+  return target
+}
+
 /** Back-to-main header action (renders nothing outside subagent sessions). */
 export function SubagentBackButton({ sessionId, useSessions, open, t }: SubagentBackButtonProps): ReactNode {
-  const summary = useSessions((state) => state.byId[sessionId])
-  const target = subagentBackTarget(summary)
+  const [pending, setPending] = useState(false)
+  // Single selector read: the byId guard lives inside the pure decision so a
+  // drifted snapshot (missing byId, deleted parent) renders null — no crash.
+  const target = useSessions((state) => subagentBackTargetFromState(state, sessionId))
   if (target === undefined) return null
+  const disabled = pending
   return (
-    <button type="button" style={buttonStyle} onClick={() => open(target)} title={t('label')}>
+    <button
+      type="button"
+      style={disabled ? { ...buttonStyle, opacity: 0.5, cursor: 'wait' } : buttonStyle}
+      disabled={disabled}
+      onClick={() => {
+        if (pending) return
+        // Disable while handling (4.3-L5): a double-click must not fire the
+        // navigation twice; the seat stays one-shot until the view unmounts.
+        setPending(true)
+        open(target)
+      }}
+      title={t('label')}
+    >
       {t('label')}
     </button>
   )

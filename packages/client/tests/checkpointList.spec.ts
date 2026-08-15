@@ -342,8 +342,10 @@ describe('formatters', () => {
     expect(formatCheckpointBytes(-1)).toBe('—')
   })
 
-  it('formats times (invalid → placeholder)', () => {
-    expect(formatCheckpointTime(1_700_000_000_000)).not.toBe('—')
+  it('formats times deterministically in UTC (invalid → placeholder)', () => {
+    // Fixed input ⇒ fixed output on every machine (no browser locale/zone).
+    expect(formatCheckpointTime(1_700_000_000_000)).toBe('2023-11-14 22:13:20')
+    expect(formatCheckpointTime(0)).toBe('1970-01-01 00:00:00')
     expect(formatCheckpointTime(Number.NaN)).toBe('—')
     expect(formatCheckpointTime(Number.POSITIVE_INFINITY)).toBe('—')
   })
@@ -656,6 +658,75 @@ describe('checkpoint list store', () => {
     expect(store.state.expandedId).toBeNull()
   })
 
+  it('a reload requested while a queued reload is running awaits its own refresh (M-5)', async () => {
+    const gate = createGateSource([fakeItem(1), fakeItem(2), fakeItem(3), fakeItem(4)])
+    const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: gate.source, pageSize: 2 })
+    const first = store.loadFirstPage() // call 1 (in flight)
+    const reloadA = store.reload() // queued behind call 1 → reload #2 (call 2)
+    gate.release(0)
+    await first
+    expect(gate.calls).toHaveLength(2) // reload #2 is in flight
+    // Queue a second reload while reload #2 is still running.
+    let reloadBDone = false
+    const reloadB = store.reload().then(() => {
+      reloadBDone = true
+    })
+    expect(gate.calls).toHaveLength(2) // reload #3 must not be issued yet
+    gate.release(1) // reload #2 lands → reload #3 starts
+    await reloadA // A resolves after reload #2's refresh
+    expect(gate.calls).toHaveLength(3) // reload #3 is now in flight
+    expect(reloadBDone).toBe(false) // B must not resolve on A's completion (its own refresh is pending)
+    gate.release(2) // reload #3 lands
+    await reloadB
+    expect(reloadBDone).toBe(true)
+    expect(store.state.loadState).toBe('ready')
+    expect(store.state.entries).toHaveLength(2)
+    expect(store.state.total).toBe(4)
+  })
+
+  it('a cancelled first-page load resets the error surface and keeps entries (L-4)', async () => {
+    const items = [fakeItem(1), fakeItem(2), fakeItem(3), fakeItem(4)]
+    const { source } = createFakeSource(items, {
+      failOnCall: 2,
+      failCode: 'GRAY_STORAGE_CORRUPT',
+      cancelOnCall: 3,
+    })
+    const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: source, pageSize: 2 })
+    await store.loadFirstPage() // ok → 2 entries
+    await store.loadNextPage() // fail → error state, entries kept
+    expect(store.state.loadState).toBe('error')
+    expect(store.state.error?.kind).toBe('storageCorrupt')
+    await store.loadFirstPage() // retry → cancelled (call 3)
+    expect(store.state.loadState).toBe('ready')
+    expect(store.state.error).toBeNull()
+    expect(store.state.entries).toHaveLength(2)
+  })
+
+  it('a cursor-miss page terminates pagination (empty page ends the list)', async () => {
+    let calls = 0
+    const source: CheckpointListDataSource = {
+      kind: 'remote',
+      async list(params, _signal) {
+        calls += 1
+        if (calls === 1) {
+          return { ok: true, value: { items: [fakeItem(1), fakeItem(2)], total: 4, nextCursor: 'cp_0002' } }
+        }
+        // Host contract: an unknown cursor → empty terminal page (M-2).
+        return { ok: true, value: { items: [], total: 4, nextCursor: undefined } }
+      },
+    }
+    const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: source, pageSize: 2 })
+    await store.loadFirstPage()
+    expect(store.state.hasMore).toBe(true)
+    await store.loadNextPage()
+    expect(store.state.hasMore).toBe(false)
+    expect(store.state.nextCursor).toBeNull()
+    expect(store.state.entries).toHaveLength(2)
+    const callsAfter = calls
+    await store.loadNextPage() // no-op at the end (no re-request loop)
+    expect(calls).toBe(callsAfter)
+  })
+
   it('toggleExpand toggles the selected item', async () => {
     const { source } = createFakeSource([fakeItem(1), fakeItem(2)])
     const store = createCheckpointListStore({ workspaceId: '/ws', dataSource: source })
@@ -752,6 +823,16 @@ describe('mock data source', () => {
     })
     expect(second.ok).toBe(false)
     if (!second.ok) expect(second.error.code).toBe('GRAY_STORAGE_CORRUPT')
+  })
+
+  it('a cursor miss returns an empty terminal page, never a page-1 reset (M-2)', async () => {
+    const source = createMockCheckpointListDataSource({ seed: 1, total: 5 })
+    const outcome = await source.list({ workspaceId: '/ws', cursor: 'cp_mock_missing', limit: 5 })
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      expect(outcome.value.items).toEqual([])
+      expect(outcome.value.nextCursor).toBeUndefined()
+    }
   })
 
   it('verify: known id ok, unknown id NOT_FOUND', async () => {

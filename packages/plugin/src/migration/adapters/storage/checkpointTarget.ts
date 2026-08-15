@@ -306,7 +306,8 @@ export function createCheckpointTargetWriter(options: { dataRoot: string }): Tar
           skippedFiles += 1
           notes.push(`非普通文件跳过: ${scopedKey}`)
           continue
-        }        try {
+        }
+        try {
           const expectedHash = SHA256_RE.test(entry.hash) ? entry.hash : undefined
           const result = await blobs.stageAndCommit(opId, srcPath, expectedHash, entry.size)
           files[scopedPath] = { hash: result.hash, size: result.size, mode: stat.mode }

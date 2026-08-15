@@ -129,7 +129,7 @@ jobs:
           rm -rf "$DSH_HOME"
           mkdir -p "$DSH_HOME"
 
-          BUNDLE_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-*.tgz' ! -name 'graycode-dsh-plugin-*.tgz' -print -quit)
+          BUNDLE_TGZ=$(find . -maxdepth 1 -name 'graycode-dsh-[0-9]*.tgz' -print -quit)
           test -n "$BUNDLE_TGZ"
           echo "bundle tarball: $BUNDLE_TGZ"
           dsh plugin --profile graycode add "$BUNDLE_TGZ" >dsh-smoke-bundle.log 2>&1

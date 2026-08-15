@@ -116,6 +116,25 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     subagents: { maxHopDepth: 5, maxConcurrent: 2, customAgents: [] },
     notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
     thoughts: { enabled: false, sendHistoryThoughts: false },
+    images: {
+      enabled: false,
+      agentScope: 'roots',
+      url: 'https://generativelanguage.googleapis.com/v1beta',
+      apiKey: '',
+      model: 'gemini-3-pro-image-preview',
+      enableAspectRatio: false,
+      defaultAspectRatio: undefined,
+      enableImageSize: false,
+      defaultImageSize: undefined,
+      maxBatchTasks: 5,
+      maxImagesPerTask: 1,
+    },
+    summary: {
+      enabled: true,
+      keepRecentRounds: 2,
+      keepRecentTokens: '50%',
+      summarizePrompt: '',
+    },
   }
 }
 

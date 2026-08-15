@@ -34,6 +34,7 @@ import {
   DOMAIN_ORDER,
   MIGRATION_ERROR_CODES,
   MigrationError,
+  domainOfObjectType,
   type ImportRun,
   type ImportStepName,
   type LedgerEntry,
@@ -61,6 +62,8 @@ export interface ScanResult {
 export interface ImportServiceOptions {
   runIdFactory?: () => string
   now?: () => string
+  /** 单调时钟注入（3.20-M2：H1c 锁陈旧判定/超时用；缺省 Date.now）。测试可注入可控时钟 */
+  nowMs?: () => number
   /** apply 跨进程文件锁路径（<dataRoot>/migration/.locks/apply.lock）；缺省 = 不加文件锁 */
   lockFile?: string
   /** 锁获取总超时（毫秒；缺省 5 分钟） */
@@ -87,6 +90,10 @@ export class LegacyImportService {
 
   private now(): string {
     return this.options.now ? this.options.now() : new Date().toISOString()
+  }
+
+  private clockMs(): number {
+    return this.options.nowMs ? this.options.nowMs() : Date.now()
   }
 
   // ─── 用例 1：scan（dry-run） ─────────────────────────
@@ -238,7 +245,6 @@ export class LegacyImportService {
       const outcome = decideLedgerOutcome(await this.deps.ledger.get(key), obj.sourceHash)
       return { ...obj, outcome, skipReason: undefined }
     }))
-    let anyCommitted = false
     // B2：settings 域写时结果（脱敏）收集，最终合流进 report.settingsSummary.writeResult
     const settingsWriteSummaries: Record<string, unknown>[] = []
 
@@ -299,7 +305,6 @@ export class LegacyImportService {
           }
           await this.deps.ledger.put(entry)
           committed += 1
-          anyCommitted = true
           if (result.notes?.length) domainNotes.push(...result.notes)
         } catch (err) {
           failed += 1
@@ -326,7 +331,9 @@ export class LegacyImportService {
     run = updateStep(run, 'verify', { status: 'running' })
     let verify: VerifyResult
     try {
-      verify = await this.verify(sourceDir, signal)
+      // H-5a：apply 内验证只核对当前 run 源指纹的条目——台账中的其他源条目
+      // （多源共存）不是本源的陈旧证据；独立 migration_verify 工具仍全量核对。
+      verify = await this.verify(sourceDir, signal, { onlyFingerprint: run.sourceFingerprint })
     } catch (err) {
       verify = { ok: false, checked: 0, mismatches: 0, missingTargets: 0, issues: [(err as Error).message] }
     }
@@ -378,7 +385,7 @@ export class LegacyImportService {
 
   // ─── 用例 3：verify ─────────────────────────
 
-  async verify(sourceDir: string, signal?: AbortSignal): Promise<VerifyResult> {
+  async verify(sourceDir: string, signal?: AbortSignal, opts?: { onlyFingerprint?: string }): Promise<VerifyResult> {
     this.assertNotCancelled(signal)
     const ledger = await this.deps.ledger.getAll()
     if (ledger.length === 0) {
@@ -396,7 +403,14 @@ export class LegacyImportService {
     let missingTargets = 0
     for (const entry of ledger) {
       if (entry.sourceFingerprint !== inventory.sourceFingerprint) {
-        issues.push(`台账条目 ${entry.legacyId} 的源指纹与当前源目录不一致（源已更换？）`)
+        if (opts?.onlyFingerprint !== undefined) {
+          // H-5a：多源共存的台账中，其他源的条目跳过（不是本源的陈旧证据）
+          continue
+        }
+        // 3.14-M4：源指纹不匹配（源已更换/多源台账陈旧条目）计入失败统计——
+        // verify 不得在存在大量陈旧条目时仍报 ok
+        mismatches += 1
+        issues.push(`台账条目 ${entry.legacyId} 的源指纹与当前源目录不一致（源已更换？陈旧条目计入失败）`)
         continue
       }
       const current = byKey.get(entry.key)
@@ -453,7 +467,7 @@ export class LegacyImportService {
     const pollMs = this.options.lockPollMs ?? 100
     const staleMs = this.options.lockStaleMs ?? 60 * 1000
     await fs.mkdir(path.dirname(lockFile), { recursive: true })
-    const deadline = Date.now() + timeoutMs
+    const deadline = this.clockMs() + timeoutMs
     for (;;) {
       this.assertNotCancelled(signal)
       let handle
@@ -466,7 +480,7 @@ export class LegacyImportService {
         } else if (code !== 'EPERM' && code !== 'EACCES' && code !== 'ENOENT') {
           throw err
         }
-        if (Date.now() >= deadline) {
+        if (this.clockMs() >= deadline) {
           throw new MigrationError(
             MIGRATION_ERROR_CODES.LOCK_TIMEOUT,
             `等待迁移 apply 文件锁超时（${timeoutMs}ms，另一进程/实例正在 apply）: ${lockFile}`,
@@ -476,7 +490,7 @@ export class LegacyImportService {
         continue
       }
       try {
-        await handle.writeFile(this.lockPayload(Date.now(), Date.now()), 'utf-8')
+        await handle.writeFile(this.lockPayload(this.clockMs(), this.clockMs()), 'utf-8')
       } catch {
         await handle.close().catch(() => {})
         await fs.unlink(lockFile).catch(() => {})
@@ -484,11 +498,11 @@ export class LegacyImportService {
       }
       // 心跳：周期重写 updatedAt，防止长 apply（大目录导入可能超过 staleMs）被
       // 其他进程的陈旧锁判定误破（镜像 checkpoints 跨进程锁的心跳设计）。
-      const createdAt = Date.now()
+      const createdAt = this.clockMs()
       const heartbeatMs = Math.max(1000, Math.floor(staleMs / 3))
       const heartbeat = setInterval(() => {
         handle.truncate(0)
-          .then(() => handle.writeFile(this.lockPayload(createdAt, Date.now()), 'utf-8'))
+          .then(() => handle.writeFile(this.lockPayload(createdAt, this.clockMs()), 'utf-8'))
           .catch(() => {})
       }, heartbeatMs)
       let released = false
@@ -515,12 +529,12 @@ export class LegacyImportService {
       const raw = await fs.readFile(lockFile, 'utf-8')
       const parsed = JSON.parse(raw) as { createdAt?: number; updatedAt?: number }
       if (typeof parsed.updatedAt === 'number') {
-        stale = Date.now() - parsed.updatedAt > staleMs
+        stale = this.clockMs() - parsed.updatedAt > staleMs
       } else if (typeof parsed.createdAt === 'number') {
-        stale = Date.now() - parsed.createdAt > staleMs
+        stale = this.clockMs() - parsed.createdAt > staleMs
       } else {
         const stat = await fs.stat(lockFile)
-        stale = Date.now() - stat.mtimeMs > staleMs
+        stale = this.clockMs() - stat.mtimeMs > staleMs
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true
@@ -613,22 +627,5 @@ function sanitizeSettingsSummary(data: unknown): unknown {
   return out
 }
 
-function domainOfObjectType(objectType: string): TargetDomain {
-  switch (objectType) {
-    case 'conversation':
-      return 'conversations'
-    case 'snapshot':
-      return 'snapshots'
-    case 'checkpoint':
-      return 'checkpoints'
-    case 'memory-global':
-    case 'memory-workspace':
-      return 'memory'
-    case 'settings':
-      return 'settings'
-    default:
-      return 'conversations'
-  }
-}
 
 

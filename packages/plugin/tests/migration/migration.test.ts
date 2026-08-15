@@ -258,6 +258,37 @@ describe('migration scan（dry-run）', () => {
   })
 })
 
+describe('migration verify（3.14-M4：指纹不匹配计入失败）', () => {
+  test('源指纹不匹配的陈旧台账条目计入 mismatches，verify 报失败而非 ok', async () => {
+    const sourceA = makeLegacyRoot({ withMemory: true })
+    const sourceB = makeLegacyRoot({ withMemory: true })
+    // 第二源目录额外文件 → 源指纹与第一源不同
+    writeText(sourceB, 'extra.txt', 'extra')
+    const fx = makeService()
+    try {
+      const scanA = await fx.service.scan(sourceA)
+      const applied = await fx.service.apply(sourceA, scanA.report.planToken)
+      expect(applied.run.status).toBe('complete')
+
+      // 对另一源目录 verify：台账条目指纹全部不匹配 → 每条都计入失败
+      const verify = await fx.service.verify(sourceB)
+      expect(verify.ok).toBe(false)
+      expect(verify.checked).toBe(1)
+      expect(verify.mismatches).toBe(1)
+      expect(verify.issues.join('\n')).toContain('源指纹')
+
+      // 对原源目录 verify：指纹一致、内容未变 → ok
+      const verifyA = await fx.service.verify(sourceA)
+      expect(verifyA.ok).toBe(true)
+      expect(verifyA.mismatches).toBe(0)
+    } finally {
+      fx.cleanup()
+      fs.rmSync(sourceA, { recursive: true, force: true })
+      fs.rmSync(sourceB, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('migration apply（幂等）', () => {
   test('同输入两次 apply：第二次全部 already-imported，不生成副本', async () => {
     const sourceDir = makeLegacyRoot({ withMemory: true, withSettings: true })
@@ -497,9 +528,9 @@ describe('settings 脱敏', () => {
       expect(notes).toContain('llm-pi-ai.providers')
       expect(notes).toContain('GRAYCODE_GEMINI_CH_GEMINI_API_KEY')
 
-      // 建议文件记录 dshWrite.direct 与渠道映射
+      // 建议文件记录 dshWrite.direct 与渠道映射（4.14-L3：按 legacy 文件名键控）
       const suggested = JSON.parse(
-        fs.readFileSync(path.join(importsRoot, applied.run.id, 'settings.suggested.json'), 'utf-8'),
+        fs.readFileSync(path.join(importsRoot, applied.run.id, 'settings', 'limcode-settings.json'), 'utf-8'),
       ) as {
         dshWrite: { mode: string; writtenRoutes: string[]; credentialRefs: string[] }
         channels: Array<{ id: string; route?: string; credentialRef?: string; unmigratedFields?: string[] }>

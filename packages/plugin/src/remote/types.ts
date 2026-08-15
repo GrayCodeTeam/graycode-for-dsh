@@ -299,6 +299,31 @@ export interface GrayCheckpointGcParams {
   readonly confirm?: true
 }
 
+// ==================== branches（reroll / editRetry 重试端点） ====================
+
+/** branches/reroll 与 branches/editRetry 的公共入参。 */
+export interface GrayBranchRetryParams {
+  /** 源会话 id（fork 的 parent；未归组时端点层自动建组）。 */
+  readonly sessionId: string
+  /** 目标轮次号（fork 该轮次之前的完整前缀，并把该轮次的用户消息重发到新会话）。 */
+  readonly turn: number
+  /** CAS：branches/list 的 revision（数字或数字字符串；可选）。 */
+  readonly expectedRevision?: number | string
+}
+
+export interface GrayBranchRerollParams extends GrayBranchRetryParams {}
+
+export interface GrayBranchEditRetryParams extends GrayBranchRetryParams {
+  /** 编辑后的用户消息文本（重发内容）。 */
+  readonly text: string
+}
+
+/** branches/reroll 与 branches/editRetry 的成功结果。 */
+export interface GrayBranchRetryResult {
+  /** fork 产生的 child session id（新候选；已自动激活为当前会话）。 */
+  readonly branchSessionId: string
+}
+
 // ==================== stagedDiff（P4-06 staged diff 卡片） ====================
 
 import type { StagedEntry, StagedEntryStatus } from '../stagedDiff/domain/types.ts'

@@ -22,7 +22,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
+import { createHash } from 'node:crypto'
 import type { MemoryService } from './service.ts'
+import type { MemoryManager } from './domain/MemoryManager.ts'
+import type { WakeBlock, WakeResult } from './domain/types.ts'
 
 /** Payload of the `agent/pre-step` event (see dsh-agent runtime-types). */
 export interface PreStepPayload {
@@ -57,12 +60,9 @@ export async function buildMemorySnapshot(
   cwd: string | undefined,
 ): Promise<MemorySnapshot | null> {
   const globalMgr = await service.getGlobal()
-  const globalWake = await globalMgr.wake(1)
+  const globalWake = await wakeWithRawFallback(globalMgr)
   const wsMgr = cwd ? await service.getWorkspace(cwd, false) : null
-  const wsWake = wsMgr ? await wsMgr.wake(1) : null
-
-  const globalPending = await globalMgr.pendingCount(globalWake.totalMemories)
-  const wsPending = wsWake && wsMgr ? await wsMgr.pendingCount(wsWake.totalMemories) : null
+  const wsWake = wsMgr ? await wakeWithRawFallback(wsMgr) : null
 
   const lines: string[] = []
   if (globalWake.totalMemories > 0) {
@@ -76,14 +76,57 @@ export async function buildMemorySnapshot(
   }
   if (lines.length === 0) return null
 
-  const revision = [globalWake.totalMemories, globalPending, wsWake?.totalMemories ?? '-', wsPending ?? '-'].join(':')
+  const text = lines.join('\n')
+  // M5: revision 内容寻址（绑定注入文本本身）——原地编辑/同数量增删改都会改变文本
+  // → 触发重新注入；旧实现只拼计数（"3:2:2:1"）会在编辑后产生相同 revision，
+  // 导致自动注入不重新注入，agent 永远看不到更新后的内容。
+  const revision = createHash('sha256').update(text, 'utf8').digest('base64url')
   return {
     revision,
     message: createUserMessage({
-      content: [{ type: 'text', text: lines.join('\n') }],
+      content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: PLUGIN_SOURCE },
     }),
   }
+}
+
+/**
+ * wake 快照（M4）：缺失摘要 + 存在 pending 压缩导致 wake 抛错（大记忆库常态）时，
+ * 降级为「不含 pending 压缩的部分内容」——只注入原始尾部快照，避免整个自动注入
+ * 静默降级为空。其他存储故障原样上抛（调用方降级为不注入 + warn）。
+ */
+async function wakeWithRawFallback(mgr: MemoryManager): Promise<WakeResult> {
+  try {
+    return await mgr.wake(1)
+  } catch (error) {
+    try {
+      const T = await mgr.totalEntries()
+      if (T <= 0) throw error
+      if ((await mgr.pendingCount(T)) <= 0) throw error
+      return {
+        blocks: await rawTailBlocks(mgr),
+        part: 1,
+        totalParts: 1,
+        totalMemories: T,
+        awake: false,
+      }
+    } catch {
+      throw error
+    }
+  }
+}
+
+/** 原始尾部条目（wakeLines 预算内）转为 raw 块——与 wake 的原始行格式一致 */
+async function rawTailBlocks(mgr: MemoryManager): Promise<WakeBlock[]> {
+  const cfg = mgr.getConfig()
+  const entries = await mgr.listEntries()
+  const tail = entries.slice(-Math.max(1, cfg.wakeLines))
+  return tail.map(entry => ({
+    lo: entry.id,
+    hi: entry.id,
+    text: `${entry.date} ${entry.text}`,
+    isRaw: true,
+  }))
 }
 
 function appendWakeBlocks(lines: string[], blocks: Array<{ lo: number; hi: number; text: string; isRaw: boolean }>): void {

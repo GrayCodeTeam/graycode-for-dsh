@@ -181,6 +181,32 @@ describe('executeTodoUpdate（端口注入）', () => {
       { content: 'b', status: 'pending' },
     ])
   })
+
+  it('空 ops / 无实际变更不写回整表（4.15-L4）', async () => {
+    let stored: DshTodoItem[] = [{ content: 'one', status: 'pending' }]
+    let writes = 0
+    const port: TodoSessionPort = {
+      readTodos: () => stored,
+      writeTodos: async todos => {
+        writes++
+        stored = todos
+      },
+    }
+    // 空 ops
+    await executeTodoUpdate(port, 'k', [])
+    expect(writes).toBe(0)
+    // 全部 not-found（无实际变更）
+    await executeTodoUpdate(port, 'k', [{ op: 'remove', id: 'ghost' }])
+    expect(writes).toBe(0)
+    // 无实际变更（set_status 置为当前值）
+    await executeTodoUpdate(port, 'k', [{ op: 'set_status', id: synthesizeTodoId('one'), status: 'pending' }])
+    expect(writes).toBe(0)
+    expect(stored).toEqual([{ content: 'one', status: 'pending' }])
+    // 有实际变更 → 写回
+    await executeTodoUpdate(port, 'k', [{ op: 'set_status', id: synthesizeTodoId('one'), status: 'completed' }])
+    expect(writes).toBe(1)
+    expect(stored).toEqual([{ content: 'one', status: 'completed' }])
+  })
 })
 
 describe('工具层 guard', () => {

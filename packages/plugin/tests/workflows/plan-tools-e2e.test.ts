@@ -524,21 +524,21 @@ describe('staged 写前钩子交互（enabled=true）', () => {
     expect(await readWorkspaceFile('.graycode/plans/staged-base.plan.md')).toContain('v2')
   })
 
-  it('staging 失败（存储写失败）→ 回退直接落盘并以 warnings 上报，不阻断主流程', async () => {
+  it('staging 失败（存储写失败）→ fail-closed：拒绝写入、磁盘零写入（3.17-M2）', async () => {
     const { service, store, hook } = makeHook(true)
     await service.initialize()
     store.failSave = true
     setStagedWriteHook(hook)
 
-    const created = await executeCreatePlan(deps, {
+    await expect(executeCreatePlan(deps, {
       title: 'Staged Fallback',
       plan: 'v1',
       todos: [{ id: 't1', content: 'x', status: 'pending' }],
-    }) as { path: string; staged?: { entryId: string }; warnings?: string[] }
+    })).rejects.toThrow(/disk full/)
 
-    expect(created.staged).toBeUndefined()
-    expect(await readWorkspaceFile(created.path)).toContain('v1')
-    expect(created.warnings!.some(w => w.startsWith('Failed to stage write for'))).toBe(true)
+    // 审阅门闸未被绕过：主文档未落盘
+    expect(await targetExistsOnDisk('.graycode/plans/staged-fallback.plan.md')).toBe(false)
+    expect(service.listEntries().length).toBe(0)
   })
 })
 

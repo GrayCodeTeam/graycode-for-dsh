@@ -37,6 +37,14 @@ export class ThreadHopCounter {
     return { allowed: true, hop: next }
   }
 
+  /**
+   * 该线程当前是否有活跃预算记录。用于「预算重置仅在确实需要时进行」的判定（L4）：
+   * 活跃线程的再次 start 是 resume，不应被重置清零（否则 ping-pong 可无限绕开熔断）。
+   */
+  has(threadId: string): boolean {
+    return this.hops.has(threadId)
+  }
+
   /** 新线程/新激活纪元开始：重置计数（subagent/start）。 */
   reset(threadId: string): void {
     this.hops.set(threadId, 0)

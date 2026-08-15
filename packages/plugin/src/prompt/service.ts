@@ -687,7 +687,13 @@ export class PromptSettingsService {
       seenIds.add(mode.id)
       modes.push(mode)
     }
-    return { version: PROMPT_MODE_STORE_VERSION, currentModeId, modes }
+    // L6：currentModeId 必须引用已存在的 mode——手改 store 产生悬垂引用时回退到
+    // 首个内置模式（与 getCurrentMode/currentModeSnapshot 的既有回退语义一致），
+    // 而不是把悬垂 id 留在内存快照里。合法 store 的 currentModeId 始终指向真实 mode。
+    const resolvedCurrent = modes.some(mode => mode.id === currentModeId)
+      ? currentModeId
+      : (BUILTIN_MODE_IDS[0] as string)
+    return { version: PROMPT_MODE_STORE_VERSION, currentModeId: resolvedCurrent, modes }
   }
 
   /** Atomic persist (tmp + rename with Windows retry). */

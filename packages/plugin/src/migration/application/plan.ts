@@ -20,25 +20,7 @@ import {
 } from '../domain/conflict.ts'
 import type { PlanOutput, PlanPort } from './ports.ts'
 import type { PlanInput } from './ports.ts'
-import type { PlannedObject, TargetDomain } from '../domain/types.ts'
-
-export function domainOf(objectType: string): TargetDomain {
-  switch (objectType) {
-    case 'conversation':
-      return 'conversations'
-    case 'snapshot':
-      return 'snapshots'
-    case 'checkpoint':
-      return 'checkpoints'
-    case 'memory-global':
-    case 'memory-workspace':
-      return 'memory'
-    case 'settings':
-      return 'settings'
-    default:
-      return 'conversations'
-  }
-}
+import { domainOfObjectType, type PlannedObject } from '../domain/types.ts'
 
 export class DefaultPlanner implements PlanPort {
   async plan(input: PlanInput): Promise<PlanOutput> {
@@ -46,7 +28,7 @@ export class DefaultPlanner implements PlanPort {
     const skips: PlanOutput['skips'] = []
 
     for (const validated of input.validated) {
-      const domain = domainOf(validated.objectType)
+      const domain = domainOfObjectType(validated.objectType)
       const base = {
         domain,
         objectType: validated.objectType,
@@ -64,20 +46,34 @@ export class DefaultPlanner implements PlanPort {
         continue
       }
 
-      // memory-workspace：scope.json 缺失/损坏 → 无法映射到 DSH workspace
+      // memory-workspace：scope.json 缺失/损坏，或可解析但无可用工作区路径
+      // （fsPath/cwd 均缺失）→ 无法映射到 DSH workspace（3.14-M1：无路径与损坏
+      // 同语义——plan 输出 unmapped，与 scopeMap 报告的 unmapped 判定一致，
+      // 用户可在 apply 用 scopeOverrides 显式恢复）。
       if (validated.objectType === 'memory-workspace') {
-        const data = validated.data as { scopeValid?: boolean } | undefined
-        if (data?.scopeValid === false) {
+        const data = validated.data as
+          | { scopeValid?: boolean; scopeMeta?: { fsPath?: string; cwd?: string } }
+          | undefined
+        const scopeMeta = data?.scopeMeta
+        const hasUsablePath =
+          (typeof scopeMeta?.fsPath === 'string' && scopeMeta.fsPath.length > 0)
+          || (typeof scopeMeta?.cwd === 'string' && scopeMeta.cwd.length > 0)
+        if (data?.scopeValid === false || !hasUsablePath) {
+          const noPath = data?.scopeValid !== false
           objects.push({
             ...base,
             outcome: 'unmapped',
-            skipReason: 'scope.json 缺失/损坏，无法映射到 DSH workspace',
+            skipReason: noPath
+              ? 'scope.json 无可用工作区路径（fsPath/cwd 缺失），无法映射到 DSH workspace'
+              : 'scope.json 缺失/损坏，无法映射到 DSH workspace',
             data: validated.data,
           })
           skips.push({
             objectType: validated.objectType,
             legacyId: validated.legacyId,
-            reason: 'scope.json 缺失/损坏（不视为工作区记忆 scope）',
+            reason: noPath
+              ? 'scope.json 无可用工作区路径（不视为工作区记忆 scope）'
+              : 'scope.json 缺失/损坏（不视为工作区记忆 scope）',
           })
           continue
         }

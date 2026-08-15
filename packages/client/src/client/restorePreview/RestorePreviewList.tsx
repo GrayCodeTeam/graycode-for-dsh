@@ -24,6 +24,13 @@ export interface RestorePreviewListProps {
   classification: PreviewClassification
   /** Legacy archives cannot give exact lists — show the note. */
   legacy?: boolean
+  /**
+   * Host-reported count of checkpoints auto-pruned alongside this restore.
+   * 4.6-L5: `undefined` (absent) or 0 fold the hint — only a positive count
+   * renders the note, and the reader preserves an explicitly-present 0 so
+   * this check is meaningful.
+   */
+  autoPrunedCount?: number
 }
 
 const listStyle: CSSProperties = {
@@ -112,13 +119,18 @@ function itemReasonLabel(t: TranslateNS<'graycode.restorePreview'>, item: Previe
  * Grouped preview list. Mount it inside the preview phase of the restore
  * panel (see README.md for wiring).
  */
-export function RestorePreviewList({ t, classification, legacy = false }: RestorePreviewListProps): ReactNode {
+export function RestorePreviewList({ t, classification, legacy = false, autoPrunedCount }: RestorePreviewListProps): ReactNode {
   return (
     <div data-graycode-restorepreview="list" style={listStyle}>
       <div style={summaryStyle}>
         {t('totalLabel')}: {classification.totalAffected}
       </div>
       {legacy && <div style={noteStyle}>{t('legacyNote')}</div>}
+      {autoPrunedCount !== undefined && autoPrunedCount > 0 && (
+        <div style={noteStyle} data-graycode-restorepreview="auto-pruned">
+          {t('prunedNote')}: {autoPrunedCount}
+        </div>
+      )}
       {classification.groups.map(group => (
         <div
           key={group.cls}

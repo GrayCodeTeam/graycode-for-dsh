@@ -5,7 +5,8 @@
  *    （setStagedWriteHook），验证：
  *    - enabled=true：design 写入意图先变成 staged 条目，磁盘零写入；accept 后才落盘；
  *    - before 快照捕获（update 场景）；
- *    - staging 失败回退直接落盘并以 warnings 上报（best-effort，不阻断主流程）；
+ *    - staging 失败 fail-closed（3.17-M2）：拒绝写入并如实上报，绝不回退直接落盘
+ *      （回退会绕过审阅门闸）；
  *    - enabled=false / 未安装钩子：直接落盘，与现状完全一致（默认关闭）。
  * 2. cordis 跨域接线面：真实挂载 workflows + stagedDiff 两个子插件（同一 ctx，
  *    与根 index.ts 相同的挂载顺序），验证 stagedDiff 经 ctx.provide 提供
@@ -176,21 +177,22 @@ describe('写前钩子（enabled=true：写入意图先 staged，接受后才落
     expect(await readDisk('.graycode/design/base.md')).toBe('v2')
   })
 
-  it('staging 失败（存储写失败）→ 回退直接落盘并以 warnings 上报，不阻断主流程', async () => {
+  it('staging 失败（存储写失败）→ fail-closed：拒绝写入、磁盘零写入、不假报完成', async () => {
     const { service, store, hook } = makeHook(true)
     await service.initialize()
     store.failSave = true
     setStagedWriteHook(hook)
 
-    const created = await executeCreateDesign(deps, {
+    // 3.17-M2：staging 失败不再回退直接落盘（fail-open 会让内容绕过审阅门闸直接
+    // 进入 workspace）；工具如实拒绝并上报底层错误。
+    await expect(executeCreateDesign(deps, {
       title: 'Fallback',
       design: 'v1',
-    }) as { path: string; staged?: { entryId: string }; warnings?: string[] }
+    })).rejects.toThrow(/disk full/)
 
-    // 主文档照常落盘成功（回退路径）
-    expect(created.staged).toBeUndefined()
-    expect(await readDisk(created.path)).toBe('v1')
-    expect(created.warnings!.some(w => w.startsWith('Failed to stage write for'))).toBe(true)
+    // 磁盘上没有任何文件：主文档未落盘，审阅门闸未被绕过
+    expect(await targetExistsOnDisk('.graycode/design/fallback.md')).toBe(false)
+    expect(service.listEntries().length).toBe(0)
   })
 
   it('create_progress 同样走 staged 通道并返回 warnings 提示', async () => {
@@ -356,6 +358,8 @@ describe('cordis 跨域接线（workflows ↔ staged-diff service，与根 index
 
     // stagedDiff 卸载 → 钩子随 inject 纤维回收被移除
     await stagedFiber.dispose()
+    // 3.20-M4：同一 fiber 二次 dispose 是幂等 no-op（清理循环会再次 dispose，锁死该契约）
+    expect(() => stagedFiber.dispose()).not.toThrow()
     await vi.waitFor(() => {
       expect(getStagedWriteHook()).toBeNull()
     })
@@ -421,6 +425,8 @@ describe('cordis 跨域接线（workflows ↔ staged-diff service，与根 index
 
     // 旧实例卸载 → 钩子随 inject 纤维回收被移除（clearIfCurrent 清理自己的钩子）
     await fiberA.dispose()
+    // 3.20-M4：同一 fiber 二次 dispose 是幂等 no-op（清理循环会再次 dispose，锁死该契约）
+    expect(() => fiberA.dispose()).not.toThrow()
     await vi.waitFor(() => {
       expect(getStagedWriteHook()).toBeNull()
     })
@@ -442,6 +448,7 @@ describe('cordis 跨域接线（workflows ↔ staged-diff service，与根 index
 
     // 新实例也卸载 → 钩子彻底移除
     await fiberB.dispose()
+    expect(() => fiberB.dispose()).not.toThrow()
     await vi.waitFor(() => {
       expect(getStagedWriteHook()).toBeNull()
     })

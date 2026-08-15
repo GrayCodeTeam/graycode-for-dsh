@@ -26,7 +26,6 @@ import {
   depsFromExec,
   readTargetText,
   resolveTarget,
-  targetExists,
   writeTargetText,
   type ToolDeps,
 } from '../workflows/workspace.ts'
@@ -99,14 +98,24 @@ export function validateDeleteEntry(
   return { ok: true, entry: { path: filePath, start_line: startLine, end_line: endLine } }
 }
 
-/** 读取文件文本；文件不存在返回 File not found（老版文案） */
+/** 读取文件文本；文件不存在返回 File not found（老版文案）。先 stat 判 5MB 护栏再读，
+ *  大文件不整读入内存（M4：把「先读后判」改为「先判后读」）。 */
 async function readFileOrNotFound(
   deps: ToolDeps,
   relPath: string,
 ): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
   const target = await resolveTarget(deps, relPath)
-  if (!(await targetExists(deps, target))) {
+  const info = await deps.fs.stat(target, deps.signal)
+  if (info === undefined) {
     return { ok: false, error: `File not found: ${relPath}` }
+  }
+  // 大小护栏前置：stat 能报告字节数时直接拒绝，避免大文件被整读进内存后再判（M4）。
+  // 后端无法报告 size 时（size === undefined）回退到读取后按 UTF-8 字节数判定，保证兜底一致。
+  if (info.size !== undefined && info.size > MAX_EDIT_FILE_BYTES) {
+    return {
+      ok: false,
+      error: `File too large to edit (${relPath} exceeds ${MAX_EDIT_FILE_BYTES} bytes)`,
+    }
   }
   try {
     const content = await readTargetText(deps, target)

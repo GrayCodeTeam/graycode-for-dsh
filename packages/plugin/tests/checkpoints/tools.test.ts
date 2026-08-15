@@ -55,6 +55,7 @@ interface DeleteToolResult {
   success: boolean
   deleted: boolean
   rejected?: string
+  reason?: string
 }
 
 interface VerifyToolResult {
@@ -150,6 +151,28 @@ describe('checkpoint 工具层', () => {
     }
   })
 
+  test('checkpoint_list：相对路径 workspace 拒绝（4.12-L1）；绝对路径正常', async () => {
+    const { workspaceDir, dataRoot, service, tools } = await setup()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'alpha')
+      await service.createCheckpoint(workspaceDir)
+      const list = tools.get('checkpoint_list')!
+
+      // 相对路径/空白路径：绝对路径校验拒绝（与服务端 requireWorkspace 同一判定）
+      await expect(list.execute({ workspace: 'relative/path' }, makeExec(workspaceDir))).rejects.toThrow(
+        /absolute path/,
+      )
+      await expect(list.execute({ workspace: '   ' }, makeExec(workspaceDir))).rejects.toThrow(/absolute path/)
+
+      // 绝对路径（含 Windows 盘符形态）仍可用
+      const ok = (await list.execute({ workspace: workspaceDir }, makeExec(workspaceDir))) as ListToolResult
+      expect(ok.total).toBe(1)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+
   test('checkpoint_preview → checkpoint_restore：token 门闸经工具层生效；无 token 结构化拒绝', async () => {
     const { workspaceDir, dataRoot, service, tools } = await setup()
     try {
@@ -201,8 +224,17 @@ describe('checkpoint 工具层', () => {
       expect(second!.baseCheckpointId).toBe(first!.checkpointId)
 
       const del = tools.get('checkpoint_delete')!
-      const rejected = (await del.execute(
+      // M7：破坏性删除必须先显式 confirm（与 remote 端点门闸一致）
+      const denied = (await del.execute(
         { checkpointId: first!.checkpointId },
+        makeExec(workspaceDir),
+      )) as DeleteToolResult
+      expect(denied.success).toBe(false)
+      expect(denied.deleted).toBe(false)
+      expect(denied.reason).toContain('confirm')
+
+      const rejected = (await del.execute(
+        { checkpointId: first!.checkpointId, confirm: true },
         makeExec(workspaceDir),
       )) as DeleteToolResult
       expect(rejected.success).toBe(false)
@@ -210,11 +242,43 @@ describe('checkpoint 工具层', () => {
       expect(rejected.rejected).toContain('chain protection')
 
       const forced = (await del.execute(
-        { checkpointId: first!.checkpointId, force: true },
+        { checkpointId: first!.checkpointId, force: true, confirm: true },
         makeExec(workspaceDir),
       )) as DeleteToolResult
       expect(forced.success).toBe(true)
       expect(forced.deleted).toBe(true)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+
+  test('checkpoint_delete：无 confirm 门闸结构化拒绝，存档不被删除（M7）', async () => {
+    const { workspaceDir, dataRoot, service, tools } = await setup()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'v1')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      const del = tools.get('checkpoint_delete')!
+
+      const denied = (await del.execute(
+        { checkpointId: created!.checkpointId },
+        makeExec(workspaceDir),
+      )) as DeleteToolResult
+      expect(denied.success).toBe(false)
+      expect(denied.deleted).toBe(false)
+      expect(denied.reason).toContain('confirm')
+      // 存档仍存在（记录未被触碰）
+      expect((await service.listCheckpoints(workspaceDir)).total).toBe(1)
+
+      // confirm=true 后正常删除（无后继引用 → 无链保护）
+      const confirmed = (await del.execute(
+        { checkpointId: created!.checkpointId, confirm: true },
+        makeExec(workspaceDir),
+      )) as DeleteToolResult
+      expect(confirmed.success).toBe(true)
+      expect(confirmed.deleted).toBe(true)
+      expect((await service.listCheckpoints(workspaceDir)).total).toBe(0)
     } finally {
       service.dispose()
       await cleanup(workspaceDir, dataRoot)

@@ -462,21 +462,21 @@ function renderMilestone(metadata: ProgressMilestoneRecord): string {
     lines.push(`- 完成时间：${metadata.completedAt}`);
   }
   if (metadata.relatedTodoIds.length > 0) {
-    lines.push(`- 关联 TODO：${metadata.relatedTodoIds.join(', ')}`);
+    lines.push(`- 关联 TODO：${metadata.relatedTodoIds.map(escapeProgressMarkerTokens).join(', ')}`);
   }
   if (metadata.relatedReviewMilestoneIds.length > 0) {
-    lines.push(`- 关联审查里程碑：${metadata.relatedReviewMilestoneIds.join(', ')}`);
+    lines.push(`- 关联审查里程碑：${metadata.relatedReviewMilestoneIds.map(escapeProgressMarkerTokens).join(', ')}`);
   }
   if (metadata.relatedArtifacts && Object.keys(metadata.relatedArtifacts).length > 0) {
     lines.push('- 关联文档：');
     if (metadata.relatedArtifacts.design) {
-      lines.push(`  - 设计：\`${metadata.relatedArtifacts.design}\``);
+      lines.push(`  - 设计：\`${escapeProgressMarkerTokens(metadata.relatedArtifacts.design)}\``);
     }
     if (metadata.relatedArtifacts.plan) {
-      lines.push(`  - 计划：\`${metadata.relatedArtifacts.plan}\``);
+      lines.push(`  - 计划：\`${escapeProgressMarkerTokens(metadata.relatedArtifacts.plan)}\``);
     }
     if (metadata.relatedArtifacts.review) {
-      lines.push(`  - 审查：\`${metadata.relatedArtifacts.review}\``);
+      lines.push(`  - 审查：\`${escapeProgressMarkerTokens(metadata.relatedArtifacts.review)}\``);
     }
   }
 
@@ -522,7 +522,8 @@ function renderRisksSection(metadata: ProgressDocumentMetadataV1): string {
 
 function renderLogSection(metadata: ProgressDocumentMetadataV1): string {
   const lines = metadata.log.map((item) => {
-    const refPart = item.refId ? ` | ${item.refId}` : '';
+    // 4.17-L6：refId 为用户可控 id，同样需要 marker 转义（旧实现只转义了 message）
+    const refPart = item.refId ? ` | ${escapeProgressMarkerTokens(item.refId)}` : '';
     return `- ${item.at} | ${item.type}${refPart} | ${escapeProgressMarkerTokens(item.message)}`;
   });
 

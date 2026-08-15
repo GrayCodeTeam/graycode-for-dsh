@@ -24,11 +24,13 @@ export type StagedDiffErrorKind =
   | 'rejectConflict'
   | 'applyFailed'
   | 'illegalTransition'
+  | 'workspaceConflict'
   | 'conflict'
   | 'notFound'
   | 'endpointNotFound'
   | 'approvalRequired'
   | 'cancelled'
+  | 'timeout'
   | 'storageCorrupt'
   | 'invalidInput'
   | 'internal'
@@ -88,6 +90,8 @@ function makeError(
  *   staging (resolve before rejecting);
  * - `GRAY_STAGED_APPLY_FAILED` — disk write failed; the entry stays
  *   `accepted` and the decision can be retried as-is;
+ * - `GRAY_STAGED_WORKSPACE_CONFLICT` — the decision targets a workspace the
+ *   entry does not belong to; refuse and prompt;
  * - `GRAY_STAGED_ILLEGAL_TRANSITION` — the entry moved past the decision
  *   point; refresh.
  */
@@ -104,6 +108,9 @@ export function mapStagedDiffFailure(failure: GrayRemoteFailure): StagedDiffCard
     }
     if (cause === GRAY_STAGED_CAUSE_CODES.APPLY_FAILED) {
       return makeError('applyFailed', code, failure, { retryable: true })
+    }
+    if (cause === GRAY_STAGED_CAUSE_CODES.WORKSPACE_CONFLICT) {
+      return makeError('workspaceConflict', code, failure)
     }
     if (cause === GRAY_STAGED_CAUSE_CODES.ILLEGAL_TRANSITION) {
       return makeError('illegalTransition', code, failure, { refreshRequired: true })

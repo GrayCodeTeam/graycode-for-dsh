@@ -19,6 +19,7 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { renderModeSectionText } from './domain/entries.ts'
 import { PromptError, PromptErrorCode } from './domain/promptTypes.ts'
+import { previewPlaceholderValues } from './promptInjector.ts'
 import type { PromptSettingsService } from './service.ts'
 
 /** Error projection: stable code + human-readable message. */
@@ -179,20 +180,24 @@ export function createPromptTools(
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       try {
         const mode = args.modeId ? await service.getMode(args.modeId) : await service.getCurrentMode()
         if (!mode) {
           throw new PromptError(`prompt mode "${args.modeId}" not found`, PromptErrorCode.MODE_NOT_FOUND)
         }
-        // Render the system part only (requestLayer mirrors the A1 switch: on,
-        // user/assistant preset entries are injected as real messages at the
-        // request layer and do not appear in this system-text preview).
+        // M2：预览必须与真实注入路径同源——补上 requestLayer 与 placeholderValues
+        // （ENVIRONMENT 等 {{$MODULE}} 占位值），否则预览与注入文本不一致（预览会显示
+        // "[placeholder ENVIRONMENT: not available in DSH]" 而实际注入的是真实环境段落）。
+        const cwd = exec?.agent?.session?.header?.cwd
         const requestLayer = getRequestLayer?.() ?? false
         const sectionText = renderModeSectionText(mode, {
           sendHistoryThoughts: getSendHistoryThoughts(),
           requestLayer,
+          placeholderValues: previewPlaceholderValues(cwd),
         })
+        // requestLayer 开启时 user/assistant 预设条目作为真实消息注入，不在系统文本预览中——
+        // 追加说明避免模型误以为预设被丢弃。
         const text = requestLayer
           ? `${sectionText.length > 0 ? `${sectionText}\n\n` : ''}Note: user/assistant preset entries will be injected as real messages at the request layer (llm/stream) and are not included in this system-text preview.`
           : sectionText

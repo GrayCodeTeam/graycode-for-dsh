@@ -80,6 +80,11 @@ export interface SnapshotBuildOptions {
      * CP-PARTIAL-1：受影响文件绝对路径（工具执行存档性能优化）。
      * 非空时走部分快照分支——不递归扫描整个工作区，只对列出的路径 stat + 哈希；
      * 不在任何工作区根内的路径被跳过。缺省（undefined/空数组）＝全量扫描（既有行为）。
+     *
+     * ⚠️ 接线状态（3.11-M3）：当前**无生产调用点**传入本字段——唯一调用方
+     * （service.ts createCheckpoint）恒走全量分支，partial 恒不触发。本分支保留为
+     * CP-PARTIAL-1 的实现与测试载体（snapshotBuilder.test.ts）；接入时由调用方
+     * （工具执行链路）从模型参数提取受影响路径后传入。
      */
     affectedPaths?: string[];
 }
@@ -118,6 +123,8 @@ export async function buildWorkspaceSnapshot(
 ): Promise<CheckpointSnapshotBuildResult> {
     // CP-PARTIAL-1：受影响路径限定（工具执行存档性能优化）——非空时走部分快照分支，
     // 不再递归扫描整个工作区（大工作区全量 stat + 哈希可达 10-20MB 哈希表）。
+    // M3：生产调用方（service.ts createCheckpoint）从不传 affectedPaths——本分支目前
+    // 仅由单元测试（snapshotBuilder.test.ts）直接驱动，属「已实现未接线」的预留优化。
     if (options.affectedPaths && options.affectedPaths.length > 0) {
         return buildAffectedPathsSnapshot(options);
     }

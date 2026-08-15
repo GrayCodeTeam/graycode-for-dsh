@@ -280,6 +280,22 @@ function formatToolListText(tools: readonly { name: string; description: string 
  * their dynamic switches are on (off → key omitted, so the template renders
  * the deterministic "not available" notice instead).
  */
+/**
+ * tools 层（prompt_mode_preview）便捷版：仅解析 ENVIRONMENT 占位值（cwd），
+ * 与注入路径的完整版（含 TODO_LIST/MEMORY）分离——预览工具拿不到
+ * PromptRenderState/agent，只需展示与真实注入一致的 ENVIRONMENT 段。
+ */
+export function previewPlaceholderValues(cwd: string | undefined): Record<string, string> {
+  const environment = [
+    cwd ? `Current Workspace: ${cwd}` : 'No workspace open',
+    `Operating System: ${osDescription()}`,
+    `Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+    `User Language: ${userLanguage()}`,
+    "Please respond using the user's language by default.",
+  ].join('\n')
+  return { ENVIRONMENT: `====\n\nENVIRONMENT\n\n${environment}` }
+}
+
 function defaultPlaceholderValues(agent: Agent, state: PromptRenderState, resolveMemoryText: () => string): Record<string, string> {
   const cwd = cwdOf(agent)
   const environment = [

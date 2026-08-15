@@ -187,6 +187,41 @@ describe('custom agent tool', () => {
     await tool.execute({ description: 'review', prompt: 'check x', run_in_background: false }, { agent: { id: 'parent' }, signal: new AbortController().signal })
     expect(start.mock.calls[0]![1]).not.toHaveProperty('persona')
   })
+
+  it('L1：前台执行失败且 dispose 也失败 → AggregateError 同时上报两者（不丢 dispose 失败）', async () => {
+    const { seam } = makeFakeSeam()
+    const tool = toolOf(createCustomAgentTool(AGENT, 'subagent_code_reviewer', seam))
+    const execError = new Error('run failed')
+    const disposeError = new Error('dispose failed')
+    seam.start = vi.fn(async () => ({
+      id: 'child',
+      result: Promise.reject(execError),
+      dispose: vi.fn(async () => { throw disposeError }),
+    }))
+    const error = await tool.execute(
+      { description: 'review', prompt: 'x', run_in_background: false },
+      { agent: { id: 'parent' }, signal: new AbortController().signal },
+    ).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toContain(execError)
+    expect((error as AggregateError).errors).toContain(disposeError)
+  })
+
+  it('L1：执行成功但 dispose 失败 → 上报 dispose 失败', async () => {
+    const { seam } = makeFakeSeam()
+    const tool = toolOf(createCustomAgentTool(AGENT, 'subagent_code_reviewer', seam))
+    const disposeError = new Error('dispose failed')
+    seam.start = vi.fn(async () => ({
+      id: 'child',
+      result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'ok' }] }),
+      dispose: vi.fn(async () => { throw disposeError }),
+    }))
+    const error = await tool.execute(
+      { description: 'review', prompt: 'x', run_in_background: false },
+      { agent: { id: 'parent' }, signal: new AbortController().signal },
+    ).catch((e: unknown) => e)
+    expect(error).toBe(disposeError)
+  })
 })
 
 describe('installCustomAgentRuntimes', () => {

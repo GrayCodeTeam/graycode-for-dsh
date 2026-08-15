@@ -58,6 +58,14 @@ export interface StagedDiffOperationTracker<TResult> {
   forget(operationId: string): void
 }
 
+/**
+ * Cap on tracked operation records (4.8-L1): beyond this the oldest records
+ * are evicted so the registry cannot grow without bound on a long-lived
+ * session. Eviction prefers resolved records so in-flight dedupe is kept as
+ * long as possible.
+ */
+export const MAX_TRACKED_OPERATIONS = 1000
+
 /** Create an empty operation tracker. */
 export function createStagedDiffOperationTracker<TResult>(): StagedDiffOperationTracker<TResult> {
   const records = new Map<string, StagedDiffOperationRecord<TResult>>()
@@ -67,6 +75,21 @@ export function createStagedDiffOperationTracker<TResult>(): StagedDiffOperation
       const existing = records.get(operationId)
       if (existing !== undefined) {
         return { operationId, duplicate: true, record: existing }
+      }
+      if (records.size >= MAX_TRACKED_OPERATIONS) {
+        let evicted = false
+        for (const [id, record] of records) {
+          if (record.state === 'resolved') {
+            records.delete(id)
+            evicted = true
+            break
+          }
+        }
+        if (!evicted) {
+          // Every record is still in flight — fall back to the oldest entry.
+          const oldest = records.keys().next()
+          if (!oldest.done) records.delete(oldest.value)
+        }
       }
       const record: StagedDiffOperationRecord<TResult> = {
         operationId,

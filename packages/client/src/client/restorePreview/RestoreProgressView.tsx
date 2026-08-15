@@ -9,7 +9,7 @@
  */
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import { restoreFailureLocaleKey } from './labels.ts'
+import { progressPhaseLocaleKey, restoreFailureLocaleKey } from './labels.ts'
 import { progressPercent } from './progress.ts'
 import type { RestoreProgress } from './types.ts'
 
@@ -95,7 +95,7 @@ export function RestoreProgressView({ t, progress }: RestoreProgressViewProps): 
     <div data-graycode-restorepreview="progress" data-phase={progress.phase} style={progressStyle}>
       <div style={headerStyle}>
         <span>{t('progressLabel')}</span>
-        <span style={phaseStyle}>{progress.phase}</span>
+        <span style={phaseStyle}>{t(progressPhaseLocaleKey(progress.phase))}</span>
         <span>
           {t('processedLabel')}: {progress.processed}/{progress.total}
         </span>

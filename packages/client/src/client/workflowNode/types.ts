@@ -206,9 +206,16 @@ export function readDocumentStatus(data: unknown): string | null {
   return readStringField(readResultPayload(data), 'status')
 }
 
+/**
+ * Unified summary-field priority shared by start (`tool/call` args) and
+ * update (result payload) so the card summary text never jumps between them
+ * (audit L4): title > projectName > currentFocus > overview.
+ */
+export const WORKFLOW_SUMMARY_FIELDS = ['title', 'projectName', 'currentFocus', 'overview'] as const
+
 /** One-line summary from a workflow result payload (review title / progress focus). */
 export function readResultSummary(data: unknown): string | null {
-  return firstStringField(readResultPayload(data), ['currentFocus', 'title', 'projectName'])
+  return firstStringField(readResultPayload(data), WORKFLOW_SUMMARY_FIELDS)
 }
 
 /**

@@ -150,6 +150,7 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   const registrar = createScopedToolRegistrar(ctx, config.agentScope)
+  // M2：把 A1 requestLayer 状态传给工具层，预览与真实注入同源
   registrar.register(createPromptTools(
     service,
     () => config.sendHistoryThoughts,

@@ -113,7 +113,7 @@ export interface MemoryConfig {
     wakeLines: number;
     /** ENTRY_CHARS: 单条记忆最大字节数 */
     entryChars: number;
-    /** PART_CHARS: 输出分页的最大字符数 */
+    /** PART_CHARS: 输出分页的最大字节数（UTF-8；paginate/recall 均按字节计，与 ENTRY_CHARS 口径一致） */
     partChars: number;
     /** PART_LINES: 输出分页的最大行数 */
     partLines: number;

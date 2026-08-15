@@ -206,14 +206,17 @@ export function readActivityThrownError(error: unknown): ActivityStatsError {
 
 /**
  * Narrow one host `TokenUsageProjection` value (`{ uncachedInputTokens,
- * outputTokens, cacheReadTokens, cacheWriteTokens }`). Missing cache buckets
- * degrade to 0; a missing input/output bucket is a malformed row (null).
+ * outputTokens, cacheReadTokens, cacheWriteTokens }`). The field names and the
+ * `projections.values.tokenUsage` envelope are unverifiable host-contract
+ * assumptions (3.1-M3), so missing / non-numeric buckets degrade to 0 instead
+ * of dropping the row: a contract drift must undercount one bucket, not
+ * silently empty the whole token section. A non-record input still yields null
+ * (there is nothing to read at all).
  */
 export function readActivityTokenBuckets(value: unknown): ActivityTokenBucketsLike | null {
   if (!isRecord(value)) return null
-  const inputTokens = readInt(value.uncachedInputTokens)
-  const outputTokens = readInt(value.outputTokens)
-  if (inputTokens === undefined || outputTokens === undefined) return null
+  const inputTokens = readInt(value.uncachedInputTokens) ?? 0
+  const outputTokens = readInt(value.outputTokens) ?? 0
   const cacheReadTokens = readInt(value.cacheReadTokens) ?? 0
   const cacheWriteTokens = readInt(value.cacheWriteTokens) ?? 0
   return {
@@ -268,4 +271,14 @@ export function readActivityTokenSessionSummary(value: unknown): ActivityTokenSe
 export function readActivityTokenListItems(value: unknown): unknown[] | null {
   if (!isRecord(value) || !Array.isArray(value.items)) return null
   return value.items
+}
+
+/**
+ * Narrow the `session.list` page cursor (`value.nextCursor`); undefined when
+ * absent or blank = no more pages. Opaque and returned verbatim — the host
+ * binds its meaning, the client only echoes it back (3.1-M2 pagination loop).
+ */
+export function readActivityNextCursor(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined
+  return readString(value.nextCursor)
 }

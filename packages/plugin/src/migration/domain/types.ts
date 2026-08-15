@@ -32,6 +32,25 @@ export const DOMAIN_ORDER: readonly TargetDomain[] = [
   'settings',
 ]
 
+/** objectType → 目标写入域（单一事实来源；plan/report/verify 共用，避免映射漂移，4.14-L2） */
+export function domainOfObjectType(objectType: string): TargetDomain {
+  switch (objectType) {
+    case 'conversation':
+      return 'conversations'
+    case 'snapshot':
+      return 'snapshots'
+    case 'checkpoint':
+      return 'checkpoints'
+    case 'memory-global':
+    case 'memory-workspace':
+      return 'memory'
+    case 'settings':
+      return 'settings'
+    default:
+      return 'conversations'
+  }
+}
+
 /** ImportRun 状态机状态（§7.4 ImportRun.status） */
 export type ImportRunStatus = 'scanned' | 'planned' | 'applying' | 'partial' | 'complete' | 'failed'
 
@@ -141,6 +160,7 @@ export interface LedgerEntry {
 export interface VerifyResult {
   ok: boolean
   checked: number
+  /** 源对象哈希已变化 + 源指纹不匹配（陈旧条目）总数（3.14-M4：指纹不匹配计入失败） */
   mismatches: number
   missingTargets: number
   issues: string[]

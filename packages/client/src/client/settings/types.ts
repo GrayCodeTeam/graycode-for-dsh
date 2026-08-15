@@ -27,6 +27,21 @@ export interface CheckpointMessagePolicy {
   mergeUnchangedCheckpoints: boolean
 }
 
+/** Image generation (mirror of the plugin's images entry). */
+export interface ImagesConfig {
+  enabled: boolean
+  agentScope: AgentScope
+  url: string
+  apiKey: string
+  model: string
+  enableAspectRatio: boolean
+  defaultAspectRatio?: string
+  enableImageSize: boolean
+  defaultImageSize?: string
+  maxBatchTasks: number
+  maxImagesPerTask: number
+}
+
 export interface GrayCodeConfig {
   workflows: DataRootConfig & ScopedConfig & { documentRoot: string }
   memory: DataRootConfig & ScopedConfig & {
@@ -59,6 +74,7 @@ export interface GrayCodeConfig {
     /** 执行后自动存档的工具名列表（默认 DSH 版 24 工具）。 */
     afterTools: string[]
   }
+  images: ImagesConfig
   branches: DataRootConfig & ScopedConfig
   persona: ToggleScopedConfig & { template?: string }
   prompt: DataRootConfig & ToggleScopedConfig & {
@@ -159,6 +175,6 @@ export interface CheckpointGcResult {
   removedBlobs: string[]
   removedBytes: number
   pendingBlobs: Array<{ hash: string; orphanedSince: number; ageMs: number }>
-  refsVerified: number
+  blobsScanned: number
   issue?: string
 }

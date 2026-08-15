@@ -10,6 +10,7 @@ import {
   IconEnhanceOutline16,
   IconGraphLineOutline16,
   IconSettingsOutline16,
+  IconSparkle16,
   IconUserOutline16,
 } from './icons.tsx'
 import { AGENT_SCOPES } from './defaults.ts'
@@ -93,6 +94,12 @@ export const userBeforeTransform = {
 export const modelAfterTransform = {
   toInput: (value: unknown): boolean => Array.isArray(value) ? value.includes('model') : false,
   fromInput: (value: unknown): Array<'user' | 'model'> => value === true ? ['model'] : [],
+}
+
+/** 可选字符串 ↔ 空串（select 的「自动」选项）：'' 提交为 undefined。 */
+const optionalSelectTransform = {
+  toInput: (value: unknown): string => typeof value === 'string' ? value : '',
+  fromInput: (value: unknown): string | undefined => typeof value === 'string' && value !== '' ? value : undefined,
 }
 
 const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace, checkpointConfigT }) => (
@@ -224,6 +231,53 @@ const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT, co
   )
 }
 
+const ImagePage: GrayCodePage = ({ t, config, onChange }) => {
+  const aspectRatioOptions = [
+    { value: '', label: t('fields.images.aspectRatio.auto') },
+    { value: '1:1', label: '1:1' },
+    { value: '3:2', label: '3:2' },
+    { value: '2:3', label: '2:3' },
+    { value: '3:4', label: '3:4' },
+    { value: '4:3', label: '4:3' },
+    { value: '4:5', label: '4:5' },
+    { value: '5:4', label: '5:4' },
+    { value: '9:16', label: '9:16' },
+    { value: '16:9', label: '16:9' },
+    { value: '21:9', label: '21:9' },
+  ]
+  const imageSizeOptions = [
+    { value: '', label: t('fields.images.imageSize.auto') },
+    { value: '1K', label: '1K' },
+    { value: '2K', label: '2K' },
+    { value: '4K', label: '4K' },
+  ]
+  return (
+    <div>
+      <FieldSection
+        title={t('pages.image.title')}
+        description={t('pages.image.description')}
+        fields={[
+          { kind: 'boolean', path: ['images', 'enabled'], labelKey: 'fields.images.enabled', descriptionKey: 'fields.images.enabled.description' },
+          scope('images', t),
+          { kind: 'text', path: ['images', 'url'], labelKey: 'fields.images.url', descriptionKey: 'fields.images.url.description', monospace: true },
+          { kind: 'text', path: ['images', 'model'], labelKey: 'fields.images.model', descriptionKey: 'fields.images.model.description', monospace: true },
+          { kind: 'secret', path: ['images', 'apiKey'], labelKey: 'fields.images.apiKey', descriptionKey: 'fields.images.apiKey.description', placeholderKey: 'fields.images.apiKey.placeholder' },
+          { kind: 'boolean', path: ['images', 'enableAspectRatio'], labelKey: 'fields.images.enableAspectRatio', descriptionKey: 'fields.images.enableAspectRatio.description' },
+          { kind: 'select', path: ['images', 'defaultAspectRatio'], labelKey: 'fields.images.defaultAspectRatio', descriptionKey: 'fields.images.defaultAspectRatio.description', options: aspectRatioOptions, transform: optionalSelectTransform },
+          { kind: 'boolean', path: ['images', 'enableImageSize'], labelKey: 'fields.images.enableImageSize', descriptionKey: 'fields.images.enableImageSize.description' },
+          { kind: 'select', path: ['images', 'defaultImageSize'], labelKey: 'fields.images.defaultImageSize', descriptionKey: 'fields.images.defaultImageSize.description', options: imageSizeOptions, transform: optionalSelectTransform },
+          { kind: 'number', path: ['images', 'maxBatchTasks'], labelKey: 'fields.images.maxBatchTasks', descriptionKey: 'fields.images.maxBatchTasks.description', min: 1, step: 1 },
+          { kind: 'number', path: ['images', 'maxImagesPerTask'], labelKey: 'fields.images.maxImagesPerTask', descriptionKey: 'fields.images.maxImagesPerTask.description', min: 1, step: 1 },
+        ]}
+        config={config}
+        onChange={onChange}
+        t={t}
+      />
+      <p style={noteStyle}>{t('pages.image.usage')}</p>
+    </div>
+  )
+}
+
 const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
   <div>
     <FieldSection
@@ -335,6 +389,7 @@ export const CATEGORIES: readonly GrayCodeCategory[] = [
   { id: 'memory', labelKey: 'tabs.memory', icon: <IconDataOutline16 size={16} />, page: MemoryPage },
   { id: 'workflows', labelKey: 'tabs.workflows', icon: <IconChecklistOutline14 size={16} />, page: WorkflowsPage },
   { id: 'activity', labelKey: 'tabs.activity', icon: <IconGraphLineOutline16 size={16} />, page: ActivityPage },
+  { id: 'image', labelKey: 'tabs.image', icon: <IconSparkle16 size={16} />, page: ImagePage },
   { id: 'subagents', labelKey: 'tabs.subagents', icon: <IconUserOutline16 size={16} />, page: SubagentsPage },
   { id: 'prompt', labelKey: 'tabs.prompt', icon: <IconEnhanceOutline16 size={16} />, page: PromptPage },
   { id: 'tools', labelKey: 'tabs.tools', icon: <IconCodeOutline16 size={16} />, page: ToolsPage },

@@ -33,6 +33,7 @@ import type {
 import type { WorkflowStreamWindow } from './stream.ts'
 import { WORKFLOW_KIND, isWorkflowToolName, workflowToolFamily, isWorkflowResultMeta } from './tools.ts'
 import {
+  WORKFLOW_SUMMARY_FIELDS,
   parseWorkflowArgs,
   readDocumentStatus,
   readResultPath,
@@ -107,7 +108,9 @@ export function startWorkflowNode(context: WorkflowContextLike<WorkflowNodeState
     path: firstString(args, ['path']),
     resultAt: null,
     error: null,
-    summary: firstString(args, ['title', 'projectName', 'currentFocus', 'overview']),
+    // Shared priority with the result payload (WORKFLOW_SUMMARY_FIELDS) so the
+    // card summary never jumps when the result arrives (audit L4).
+    summary: firstString(args, WORKFLOW_SUMMARY_FIELDS),
     documentStatus: null,
   }
 }
@@ -324,9 +327,14 @@ export function foldWorkflowWindow(window: WorkflowStreamWindow): WorkflowNodeDa
   }
 
   const views: WorkflowNodeData[] = []
+  const emitted = new Set<string>()
   for (const event of window.entries) {
     const result = matchWorkflowEvent(event)
     if (result === null || result.role !== 'start') continue
+    // A re-delivered start (same callId at a later seq) must not produce a
+    // second view with the same key — first start wins (audit M2).
+    if (emitted.has(result.id)) continue
+    emitted.add(result.id)
     const foldedContext = folded.get(result.id)
     if (foldedContext === undefined) continue
     const node = buildWorkflowViewNode({

@@ -30,6 +30,11 @@ export interface CheckpointSummary {
     baseCheckpointId?: string;
     contentHash: string;
     fileCount: number;
+    /**
+     * 本次快照**新增写入** blob 池的字节总数（增量口径：内容未变的复用 blob 不重复计入）。
+     * 名称沿用历史（backupBytes），语义并非「备份目录总磁盘占用」——增量复用大时该值会
+     * 显著小于快照总大小；前端展示「快照大小」时应以合计（新增+复用）口径另行统计。
+     */
     backupBytes: number;
     excludedCount: number;
     manifestVersion: number;
@@ -361,7 +366,12 @@ export interface CheckpointRecord {
     workspaceFingerprint?: string;
     /** 关联的消息节点 ID（树状分支扩展预留，与 CheckpointSummary 对齐） */
     messageNodeId?: string;
-    /** CPF-09: 创建时记录的备份目录磁盘占用（字节）；旧存档缺失时按需懒扫描并写回 */
+    /**
+     * CPF-09: 创建时记录的**新增写入** blob 字节数（增量口径，见 CheckpointSummary.backupBytes）。
+     * 注意：字段名/旧注释沿用过「备份目录磁盘占用」，实为本次快照新增 blob 字节
+     * （service.ts 以 newBlobBytes 写入），内容未变的复用 blob 不计入；旧存档缺失时
+     * 按需懒扫描写回。
+     */
     backupBytes?: number;
     /** CPF-01: 本存档 manifest 的 schema 版本（写入 manifest.json 时记录） */
     manifestVersion?: number;

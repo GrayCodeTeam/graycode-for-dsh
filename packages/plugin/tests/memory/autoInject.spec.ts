@@ -105,6 +105,37 @@ describe('createMemoryPreStepListener', () => {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })
+  test('原地编辑记忆（updateEntry）改变内容 revision → 触发重新注入（M5）', async () => {
+    const { service, dataRoot } = makeService()
+    try {
+      const globalMgr = await service.getGlobal()
+      await globalMgr.note('original-text')
+      const listener = createMemoryPreStepListener(service)
+      const agent = fakeAgent('agent-edit', WS)
+
+      const first = await listener(stepPayload(agent), () => enterDecision(1))
+      expect(first.kind).toBe('enter')
+      if (first.kind !== 'enter') return
+      expect(first.messages).toHaveLength(2)
+      expect((first.messages[1]!.content[0]! as { text: string }).text).toContain('original-text')
+
+      // 内容未变化：revision 相同 → 不重复注入
+      const second = await listener(stepPayload(agent), () => enterDecision(1))
+      expect(second.kind).toBe('enter')
+      if (second.kind !== 'enter') return
+      expect(second.messages).toHaveLength(1)
+
+      // 原地编辑（条目数不变）改变注入文本 → revision 变化 → 重新注入新内容
+      await globalMgr.updateEntry(0, 'edited-text')
+      const third = await listener(stepPayload(agent), () => enterDecision(1))
+      expect(third.kind).toBe('enter')
+      if (third.kind !== 'enter') return
+      expect(third.messages).toHaveLength(2)
+      expect((third.messages[1]!.content[0]! as { text: string }).text).toContain('edited-text')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+    }
+  })
 
   test('不同 agent 独立去重（WeakMap 按 agent 分键）', async () => {
     const { service, dataRoot } = makeService()

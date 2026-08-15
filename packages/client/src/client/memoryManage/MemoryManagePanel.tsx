@@ -53,6 +53,7 @@ import {
   memoryScopeOptionKey,
   normalizeMemoryEntryChars,
   normalizeMemoryLimit,
+  normalizeMemoryNoteText,
   parseMemoryNextCursor,
   rejectBatchForget,
   rejectForget,
@@ -228,6 +229,11 @@ const addCharOverflowStyle: CSSProperties = {
 const addNoteStyle: CSSProperties = {
   fontSize: '11px',
   color: '#3fb950',
+}
+
+const addHintStyle: CSSProperties = {
+  fontSize: '11px',
+  color: '#d29922',
 }
 
 const totalStyle: CSSProperties = {
@@ -527,6 +533,7 @@ export function MemoryManagePanel({
       setPhase('ready')
       return
     }
+    const requestTransport = transport
     setPhase('loading')
     setError(null)
     let result
@@ -541,12 +548,17 @@ export function MemoryManagePanel({
       }
     } else {
       try {
-        result = await transport.list(buildMemoryListParams(queryState(q, s, targetWorkspace)))
+        result = await requestTransport.list(buildMemoryListParams(queryState(q, s, targetWorkspace)))
       } catch (err) {
         result = { ok: false as const, error: toMemoryFailure(err) }
       }
     }
-    if (seq !== seqRef.current || contextKey !== currentContextKeyRef.current || !mountedRef.current) return
+    if (
+      seq !== seqRef.current
+      || contextKey !== currentContextKeyRef.current
+      || !mountedRef.current
+      || requestTransport !== currentTransportRef.current
+    ) return
     if (result.ok) {
       setList(buildMemoryListViewModel(result.value, { scope: s, workspace: targetWorkspace, query: q }))
       setPhase('ready')
@@ -637,6 +649,7 @@ export function MemoryManagePanel({
     const targetScope = scope
     const targetWorkspace = activeWorkspace
     const contextKey = currentContextKeyRef.current
+    const requestTransport = transport
     setLoadingMore(true)
     const cursor = parseMemoryNextCursor(list.nextCursor)
     if (cursor === null) {
@@ -649,7 +662,7 @@ export function MemoryManagePanel({
     }
     let result
     try {
-      result = await transport.list(buildMemoryListParams(queryState(targetQuery, targetScope, targetWorkspace, cursor)))
+      result = await requestTransport.list(buildMemoryListParams(queryState(targetQuery, targetScope, targetWorkspace, cursor)))
     } catch (err) {
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
@@ -658,6 +671,7 @@ export function MemoryManagePanel({
       || requestId !== loadMoreSeqRef.current
       || contextKey !== currentContextKeyRef.current
       || !mountedRef.current
+      || requestTransport !== currentTransportRef.current
     ) return
     setLoadingMore(false)
     if (result.ok) {
@@ -714,7 +728,10 @@ export function MemoryManagePanel({
 
   const submitAdd = useCallback(async () => {
     if (transport === undefined) return
-    const text = addText.trim()
+    // 3.4-M2: the host `memory/note` contract rejects line breaks ("A memory
+    // is one line."). Collapse them to spaces before validating/submitting.
+    const normalized = normalizeMemoryNoteText(addText)
+    const text = normalized.text
     if (text.length === 0) return
     setAddError(null)
     setAddNote(null)
@@ -747,29 +764,35 @@ export function MemoryManagePanel({
       // settled state in the mounted UI; view generations never unlock it.
       if (mountedRef.current) setAdding(addGate.isInFlight())
     }
-    if (
-      !mountedRef.current
-      || requestId !== addSeqRef.current
-      || contextKey !== currentContextKeyRef.current
-      || requestTransport !== currentTransportRef.current
-    ) return
+    // The add gate is per-panel, so a transport-object swap (HMR) must also
+    // invalidate the outcome — the host write it belongs to is obsolete (M5).
+    if (!mountedRef.current || requestTransport !== currentTransportRef.current) return
+    const viewIsCurrent = requestId === addSeqRef.current && contextKey === currentContextKeyRef.current
     if (result.ok) {
       setAddText('')
-      setAddNote(t('add.success'))
-      // `memory/note` may have initialized a previously absent workspace
-      // store. Refresh its effective persisted config as well as the list.
-      void fetchEffectiveConfig(targetScope, targetWorkspace)
-      // The debounced applied query may have advanced while the write was in
-      // flight even though the raw-input view identity stayed the same. Always
-      // refresh the newest applied query; never cancel it with an older one.
-      await fetchFirstPage(currentAppliedQueryRef.current, targetScope, targetWorkspace)
-    } else {
+      if (viewIsCurrent) {
+        setAddNote(t('add.success'))
+        // `memory/note` may have initialized a previously absent workspace
+        // store. Refresh its effective persisted config as well as the list.
+        void fetchEffectiveConfig(targetScope, targetWorkspace)
+        // The debounced applied query may have advanced while the write was in
+        // flight even though the raw-input view identity stayed the same.
+        // Always refresh the newest applied query; never cancel it with an
+        // older one.
+        await fetchFirstPage(currentAppliedQueryRef.current, targetScope, targetWorkspace)
+      } else {
+        // 3.4-M4: the write landed after the user switched views — a silent
+        // drop would make the user resubmit and create a duplicate memory.
+        setAddNote(t('add.success'))
+      }
+    } else if (viewIsCurrent) {
       setAddError(mapMemoryFailure(result.error))
     }
   }, [transport, addText, effectiveEntryChars, scope, activeWorkspace, fetchFirstPage, fetchEffectiveConfig, t]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
+    const requestTransport = transport
     setAddNote(null)
     // Capture the list generation the target belongs to; a response landing
     // after a scope/search change must not write into the newer list.
@@ -780,7 +803,7 @@ export function MemoryManagePanel({
     const target = editTarget
     let result
     try {
-      result = await transport.edit({
+      result = await requestTransport.edit({
         scope: target.scope,
         workspace: target.workspace,
         id: target.id,
@@ -791,6 +814,13 @@ export function MemoryManagePanel({
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
     if (!mountedRef.current || requestId !== editSeqRef.current || contextKey !== currentContextKeyRef.current) return
+    if (requestTransport !== currentTransportRef.current) {
+      // Transport swapped mid-flight (HMR): the response is untrusted, but the
+      // overlay's in-flight flag must still settle (the view-reset effect does
+      // not run on a transport change).
+      setEditSaving(false)
+      return
+    }
     setEditSaving(false)
     if (result.ok) {
       const updated = buildMemoryEntryView(result.value, {
@@ -844,6 +874,7 @@ export function MemoryManagePanel({
 
   const onForgetConfirm = useCallback(async () => {
     if (transport === undefined || forget.target === null) return
+    const requestTransport = transport
     const submitting = confirmForget(forget)
     setForget(submitting)
     const target = submitting.target!
@@ -851,7 +882,7 @@ export function MemoryManagePanel({
     const contextKey = currentContextKeyRef.current
     let result
     try {
-      result = await transport.forget({
+      result = await requestTransport.forget({
         scope: target.scope,
         workspace: target.workspace,
         blockId: String(target.id),
@@ -862,6 +893,13 @@ export function MemoryManagePanel({
       result = { ok: false as const, error: toMemoryFailure(err) }
     }
     if (!mountedRef.current || requestId !== forgetSeqRef.current || contextKey !== currentContextKeyRef.current) return
+    if (requestTransport !== currentTransportRef.current) {
+      // Transport swapped mid-flight (HMR): abandon the machine back to idle so
+      // it can never wedge in 'submitting' (the view-reset effect does not run
+      // on a transport change).
+      setForget(IDLE_FORGET_STATE)
+      return
+    }
     if (result.ok) {
       setList(prev =>
         prev === null
@@ -1002,6 +1040,9 @@ export function MemoryManagePanel({
   const allSelected = list !== null && isMemoryPageSelected(selection, list.items.map(item => item.id))
   const batchBusy = batchForget.phase === 'submitting'
   const canBatchForget = wired && selection.length > 0 && !batchBusy && batchForget.phase !== 'confirming'
+  // 3.4-M2: the byte counter reflects the normalized (single-line) text the
+  // host will actually store, so the limit check matches the submission.
+  const addBytes = utf8Bytes(normalizeMemoryNoteText(addText).text)
 
   return (
     <div data-graycode-memory="panel" style={panelStyle}>
@@ -1074,6 +1115,12 @@ export function MemoryManagePanel({
         )}
       </div>
 
+      {transport === undefined && (
+        <div data-graycode-memory="replay-hint" style={hintStyle}>
+          {t('replayOnly')}
+        </div>
+      )}
+
       {error !== null && (
         <MemoryErrorBanner t={t} error={error} onRetry={() => void fetchFirstPage(searchSettle.appliedQuery, scope)} />
       )}
@@ -1098,9 +1145,9 @@ export function MemoryManagePanel({
           <div style={addRowStyle}>
             <span
               data-graycode-memory="add-bytes"
-              style={effectiveEntryChars !== undefined && utf8Bytes(addText) > effectiveEntryChars ? addCharOverflowStyle : addCharStyle}
+              style={effectiveEntryChars !== undefined && addBytes > effectiveEntryChars ? addCharOverflowStyle : addCharStyle}
             >
-              {utf8Bytes(addText)}
+              {addBytes}
               {effectiveEntryChars !== undefined ? `/${effectiveEntryChars}` : ''}
             </span>
             <button
@@ -1113,6 +1160,11 @@ export function MemoryManagePanel({
               {adding ? t('add.busy') : t('add.button')}
             </button>
           </div>
+          {/\r?\n/.test(addText) && (
+            <span data-graycode-memory="add-newline-hint" style={addHintStyle}>
+              {t('add.newlineHint')}
+            </span>
+          )}
           {addError !== null && (
             <MemoryErrorBanner t={t} error={addError} onRetry={() => void submitAdd()} />
           )}

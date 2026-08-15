@@ -96,7 +96,7 @@ function toolResult(
   }
 }
 
-function contextOf(id: string, state: WorkflowNodeState | undefined, start?: WorkflowEventLike): WorkflowContextLike<WorkflowNodeState> {
+function contextOf(id: string, state: WorkflowNodeState | undefined, start?: WorkflowEventLike): WorkflowContextLike<WorkflowNodeState> & { state: WorkflowNodeState } {
   const startMatch = start === undefined
     ? undefined
     : { event: start, role: 'start' as const, location: { kind: 'unresolved' } as const }
@@ -106,7 +106,9 @@ function contextOf(id: string, state: WorkflowNodeState | undefined, start?: Wor
     id,
     matches: startMatch === undefined ? [] : [startMatch],
     start: startMatch,
-    state,
+    // Callers pass a real state whenever the node needs one (update paths);
+    // the assertion only narrows the test-helper surface, not runtime data.
+    state: state as WorkflowNodeState,
     current: new Map(),
   }
 }
@@ -602,6 +604,22 @@ describe('foldWorkflowWindow (window → node views)', () => {
     const second = applyWorkflowStreamUpdate(EMPTY_WORKFLOW_STREAM, { kind: 'replace', entries, hasMore: false })
     expect(foldWorkflowWindow(first)).toEqual(foldWorkflowWindow(second))
   })
+
+  it('emits one view per callId when a start is re-delivered (first wins)', () => {
+    const window = applyWorkflowStreamUpdate(EMPTY_WORKFLOW_STREAM, {
+      kind: 'replace',
+      entries: [
+        toolCall(10, 'c1', 'create_design', { title: 'First' }),
+        toolCall(20, 'c1', 'create_design', { title: 'Second' }),
+        toolResult(30, 'c1', { path: '.graycode/design/a.md' }),
+      ],
+      hasMore: false,
+    })
+    const views = foldWorkflowWindow(window)
+    expect(views).toHaveLength(1)
+    expect(views[0]!.summary).toBe('First')
+    expect(views[0]!.status).toBe('completed')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -645,7 +663,7 @@ describe('graycode.workflow locale dictionaries', () => {
       expect(en[`status.${status}`]).toBeDefined()
     }
     for (const label of ['path', 'summary', 'calledAt', 'completedAt', 'error', 'retry', 'openDocument', 'replayOnly']) {
-      expect(en[label]).toBeDefined()
+      expect((en as Record<string, string>)[label]).toBeDefined()
     }
   })
 })

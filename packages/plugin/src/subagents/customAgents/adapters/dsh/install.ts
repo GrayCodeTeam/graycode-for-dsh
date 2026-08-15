@@ -19,6 +19,7 @@
  */
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
+import { stopReasonError } from '../../../domain/stopReason.ts'
 import type { CustomAgentConfig } from '../../domain/plan.ts'
 import { deriveProviderName, deriveToolName, deriveToolNames, slugify } from '../../domain/plan.ts'
 
@@ -71,26 +72,25 @@ export interface CustomAgentToolsLike {
   register(definition: unknown): () => void
 }
 
-/** A non-`completed` stop reason means the child did not finish cleanly. */
-function stopReasonError(result: SubagentResultLike): string | undefined {
-  switch (result.stopReason) {
-    case 'completed': return undefined
-    case 'aborted': return 'subagent run was cancelled'
-    case 'error': return 'subagent run failed'
-    case 'max-tokens': return 'subagent run hit its token limit before finishing'
-    case 'refusal': return 'subagent declined the task'
-    default: return `subagent run ended abnormally (${String(result.stopReason)})`
-  }
-}
+// stop reason 词汇统一来自 subagents/domain/stopReason.ts（共享词汇表，L2）：
+// 'completed' 视为干净完成，其余已知/未知码一律作为失败上报（不静默视为成功）。
 
 /** Collect and release one foreground run without losing an independent failure. */
 async function settleForegroundRun(run: SubagentRunLike): Promise<{ kind: 'foreground'; runId: string; output: JsonValue[] }> {
   const [execution] = await Promise.allSettled([run.result.then((result) => {
-    const error = stopReasonError(result)
+    const error = stopReasonError(result.stopReason)
     if (error !== undefined) throw new Error(error)
     return { kind: 'foreground' as const, runId: run.id, output: [...result.output] as JsonValue[] }
   })])
   const [disposal] = await Promise.allSettled([Promise.resolve().then(() => run.dispose())])
+  // L1：执行失败时不再丢弃 dispose 失败——两者都失败时合并上报（AggregateError 同时
+  // 携带执行与 dispose 两个原因），单一失败则照常抛对应原因（不静默吞掉 dispose 失败）。
+  if (execution.status === 'rejected' && disposal.status === 'rejected') {
+    throw new AggregateError(
+      [execution.reason, disposal.reason],
+      'subagent foreground run failed and its dispose also failed',
+    )
+  }
   if (execution.status === 'rejected') throw execution.reason
   if (disposal.status === 'rejected') throw disposal.reason
   return execution.value

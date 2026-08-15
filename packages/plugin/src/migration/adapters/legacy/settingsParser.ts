@@ -136,9 +136,13 @@ function isSecretKey(key: string): boolean {
   return SECRET_KEY_RE.test(key)
 }
 
-/** 字符串脱敏：非空且非占位符时替换 */
+/**
+ * 敏感值脱敏（3.14-M2）：非空字符串替换为占位；非字符串敏感值（数值/布尔/
+ * null 等）同样脱敏——凭据不得因类型绕过“默认不迁移”承诺。空字符串保留
+ * （apiKey:'' = 无密钥，不制造重录噪音）。
+ */
 function redactValue(value: unknown): unknown {
-  if (typeof value !== 'string') return value
+  if (typeof value !== 'string') return REDACTED_PLACEHOLDER
   if (value.length === 0 || value === REDACTED_PLACEHOLDER) return value
   return REDACTED_PLACEHOLDER
 }
@@ -152,10 +156,12 @@ function redactObjectSecrets(value: unknown): unknown {
     if (isSecretKey(key)) {
       out[key] = redactValue(child)
     } else if (key === 'env' && child && typeof child === 'object' && !Array.isArray(child)) {
-      // MCP transport env：值全部脱敏，键保留（报告只列键名）
+      // MCP transport env：值全部脱敏，键保留（报告只列键名）。3.14-M2：非字符串
+      // 敏感值（数值/布尔/null）同样脱敏，不得因类型绕过「默认不迁移」承诺；
+      // 仅空字符串保留（= 无密钥，不制造重录噪音，4.14-L8）。
       const env: Record<string, unknown> = {}
       for (const [envKey, envValue] of Object.entries(child as Record<string, unknown>)) {
-        env[envKey] = typeof envValue === 'string' && envValue.length > 0 ? REDACTED_PLACEHOLDER : envValue
+        env[envKey] = typeof envValue === 'string' && envValue.length === 0 ? envValue : REDACTED_PLACEHOLDER
       }
       out[key] = env
     } else if (key === 'customHeaders' && child && typeof child === 'object' && !Array.isArray(child)) {
@@ -410,6 +416,9 @@ export function parseSettingsExport(
     channels.push(parsedChannel)
   }
 
+  // 4.14-L6：同一渠道可能因 apiKey/url/headers 多次命中重录判定 → 去重。
+  // 注：mcpServers 的重录条目在下方 mcp 循环 push，去重统一在 mcp 之后执行。
+
   // mcpServers（env 脱敏；command/args 中的 --token=xxx 凭据脱敏；命令/参数保留结构）
   const mcpServers: ParsedMcpServer[] = []
   const rawMcp = Array.isArray(root.mcpServers) ? root.mcpServers : []
@@ -420,7 +429,16 @@ export function parseSettingsExport(
     const transport = asRecord(server.transport)
     const env = asRecord(transport.env)
     const envKeys = Object.keys(env)
-    let credentialFound = envKeys.length > 0
+    // 4.14-L8：只有存在非空 env 值才视为敏感（envRedacted/重录判定不再因键存在即标红）；
+    // 3.14-M2：数值/布尔只有挂在敏感键名（token/secret/…）下才计入（TOKEN=123456 数值密钥），
+    // 非敏感键的配置型数值（PORT=8080）不计；空串/null/undefined 不计。
+    const hasEnvValues = envKeys.some(k => {
+      const v = env[k]
+      if (v === null || v === undefined) return false
+      if (typeof v === 'string') return v.length > 0
+      return isSecretKey(k)
+    })
+    let credentialFound = hasEnvValues
 
     let command: string | undefined
     if (typeof transport.command === 'string' && transport.command.length > 0) {
@@ -448,11 +466,14 @@ export function parseSettingsExport(
       ...(command ? { command } : {}),
       args,
       envKeys,
-      envRedacted: envKeys.length > 0,
+      envRedacted: hasEnvValues,
       cliRedacted,
       enabled: server.enabled !== false,
     })
   }
+
+  // 4.14-L6：同一渠道/服务可能因 apiKey/url/headers/env/CLI 多次命中重录判定 → 去重
+  const credentialReentryRequiredDeduped = [...new Set(credentialReentryRequired)]
 
   // skills（source 迁移 + 同名同 hash 去重）
   const skills: ParsedSkill[] = []
@@ -489,7 +510,7 @@ export function parseSettingsExport(
     channels,
     mcpServers,
     skills,
-    credentialReentryRequired,
+    credentialReentryRequired: credentialReentryRequiredDeduped,
     ...(credentialSecrets.length > 0 ? { credentialSecrets } : {}),
     disabledDraftChannels,
     deduplicatedSkills,

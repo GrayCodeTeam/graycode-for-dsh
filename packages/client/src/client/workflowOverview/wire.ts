@@ -45,6 +45,16 @@ function readString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined
 }
 
+/**
+ * Read a path-like field verbatim (no trim). Workspace roots and document
+ * paths are rendered and compared as-is — trimming them would distort a
+ * legitimate path (audit M7). Only a fully empty value is rejected.
+ */
+function readPathString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  return value
+}
+
 function readInt(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
   return Math.floor(value)
@@ -62,8 +72,8 @@ function internalFailure(message: string): WorkflowOverviewError {
 export function readWorkflowRunSummary(value: unknown): WorkflowRunSummaryLike | null {
   if (!isRecord(value)) return null
   const id = readString(value.id)
-  const path = readString(value.path)
-  const workspace = readString(value.workspace)
+  const path = readPathString(value.path)
+  const workspace = readPathString(value.workspace)
   if (id === undefined || path === undefined || workspace === undefined) return null
   if (typeof value.kind !== 'string' || !RUN_KINDS.includes(value.kind)) return null
   const kind = value.kind as WorkflowRunKind

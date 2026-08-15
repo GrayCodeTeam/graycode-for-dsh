@@ -15,6 +15,7 @@
 import type { WorkflowOverviewError, WorkflowOverviewListResult } from './types.ts'
 import {
   buildWorkflowListView,
+  workflowRunKey,
   type WorkflowRunView,
 } from './viewModel.ts'
 
@@ -59,7 +60,9 @@ export function applyWorkflowPageLoading(state: WorkflowOverviewPageState): Work
 
 /**
  * Merge incoming run views after the existing ones, keeping the first
- * occurrence of each id (defensive against cursor-boundary re-delivery).
+ * occurrence of each (workspace, id) pair (defensive against cursor-boundary
+ * re-delivery; ids are workspace-relative and repeat across workspaces —
+ * audit M6).
  * @param existing - accumulated entries.
  * @param incoming - newly loaded page entries.
  */
@@ -67,11 +70,12 @@ export function mergeWorkflowRunViews(
   existing: readonly WorkflowRunView[],
   incoming: readonly WorkflowRunView[],
 ): readonly WorkflowRunView[] {
-  const seen = new Set<string>(existing.map((run) => run.id))
+  const seen = new Set<string>(existing.map(workflowRunKey))
   const merged = [...existing]
   for (const run of incoming) {
-    if (seen.has(run.id)) continue
-    seen.add(run.id)
+    const key = workflowRunKey(run)
+    if (seen.has(key)) continue
+    seen.add(key)
     merged.push(run)
   }
   return merged
@@ -79,7 +83,8 @@ export function mergeWorkflowRunViews(
 
 /**
  * Land a page: `replace` installs a fresh page (filter change / first load),
- * `append` accumulates after the existing entries with id dedupe (load more).
+ * `append` accumulates after the existing entries with (workspace, id) dedupe
+ * (load more), terminating when an append yields zero new items (audit M4).
  */
 export function applyWorkflowPageLoaded(
   state: WorkflowOverviewPageState,
@@ -87,11 +92,28 @@ export function applyWorkflowPageLoaded(
   mode: 'replace' | 'append',
 ): WorkflowOverviewPageState {
   const view = buildWorkflowListView(result)
+  if (mode === 'replace') {
+    return {
+      entries: view.entries,
+      total: view.total,
+      nextCursor: view.nextCursor,
+      hasMore: view.hasMore,
+      phase: 'ready',
+      error: null,
+      revision: state.revision + 1,
+    }
+  }
+  const merged = mergeWorkflowRunViews(state.entries, view.entries)
+  // Zero-new append with a live cursor means the page was entirely duplicates
+  // of already-loaded entries — re-issuing the same cursor would loop forever
+  // on "load more" with no progress (audit M4). Terminate paging; the
+  // host-reported total stays authoritative.
+  const stuck = merged.length === state.entries.length && view.nextCursor !== null
   return {
-    entries: mode === 'replace' ? view.entries : mergeWorkflowRunViews(state.entries, view.entries),
+    entries: merged,
     total: view.total,
-    nextCursor: view.nextCursor,
-    hasMore: view.hasMore,
+    nextCursor: stuck ? null : view.nextCursor,
+    hasMore: stuck ? false : view.hasMore,
     phase: 'ready',
     error: null,
     revision: state.revision + 1,

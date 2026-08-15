@@ -68,6 +68,33 @@ function revisionConflict(entry: StagedEntry, expectedRevision: number): GrayRem
   )
 }
 
+/**
+ * Client-side mirror of the host `createStagedWorkspaceId` (service.ts):
+ * deterministic and synchronous (the browser has no node `crypto.createHash`)
+ * and stable within the mock. Entries seeded for a decision workspace must
+ * use this id for the workspace-conflict guard to pass (3.8-M4).
+ */
+export function mockWorkspaceIdOf(cwd: string): string {
+  const normalized = cwd.trim().replace(/\\/g, '/').replace(/\/+$/g, '')
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < normalized.length; i += 1) {
+    const c = normalized.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
+    h2 = Math.imul(h2 + c, 0x85ebca6b) >>> 0
+  }
+  const hex = `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}`
+  return `ws_${hex}`
+}
+
+function workspaceConflict(entry: StagedEntry, workspace: string): GrayRemoteFailure {
+  return makeFailure(
+    GRAY_REMOTE_ERROR_CODES.CONFLICT,
+    `staged entry "${entry.id}" belongs to workspace ${entry.workspaceId}, not ${mockWorkspaceIdOf(workspace)}`,
+    { causeCode: GRAY_STAGED_CAUSE_CODES.WORKSPACE_CONFLICT, entry },
+  )
+}
+
 /** Create an in-memory staged-diff data source seeded with entries. */
 export function createMockStagedDiffDataSource(
   entries: readonly StagedEntry[],
@@ -141,6 +168,11 @@ export function createMockStagedDiffDataSource(
           ),
         })
       }
+      // 3.8-M4: the host refuses decisions against a different workspace
+      // (service.ts `assertWorkspace`) — mirror it before the CAS check.
+      if (entry.workspaceId !== mockWorkspaceIdOf(params.workspace)) {
+        return delay({ ok: false, error: workspaceConflict(entry, params.workspace) })
+      }
       if (entry.revision !== params.expectedRevision) {
         return delay({ ok: false, error: revisionConflict(entry, params.expectedRevision) })
       }
@@ -192,10 +224,27 @@ export function createMockStagedDiffDataSource(
           ),
         })
       }
+      // 3.8-M4: mirror the host `assertWorkspace` before the CAS check.
+      if (entry.workspaceId !== mockWorkspaceIdOf(params.workspace)) {
+        return delay({ ok: false, error: workspaceConflict(entry, params.workspace) })
+      }
       if (entry.revision !== params.expectedRevision) {
         return delay({ ok: false, error: revisionConflict(entry, params.expectedRevision) })
       }
       if (entry.status === 'rejected') return delay({ ok: true, value: { ...entry } })
+      if (entry.status === 'accepted') {
+        // 4.8-L2: rejecting an accepted entry is an illegal transition —
+        // return the envelope instead of letting `transitionStagedEntry`
+        // throw a raw Error (the never-throw envelope contract).
+        return delay({
+          ok: false,
+          error: makeFailure(
+            GRAY_REMOTE_ERROR_CODES.CONFLICT,
+            `cannot reject accepted entry "${params.entryId}"`,
+            { causeCode: GRAY_STAGED_CAUSE_CODES.ILLEGAL_TRANSITION, entry },
+          ),
+        })
+      }
       if (entry.status === 'done') {
         return delay({
           ok: false,

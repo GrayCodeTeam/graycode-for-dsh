@@ -43,8 +43,10 @@ import { normalizeLineEndingsToLF } from '../domain/shared/textUtils.ts'
 import {
   ensureMatchingActiveReviewSession,
   ensureNoActiveReviewSession,
+  flushReviewSessionStore,
   loadReviewSessionState,
   saveReviewSessionState,
+  takeReviewSessionPersistError,
   withReviewSessionLock,
 } from '../sessionState.ts'
 import { withProgressWriteLock } from '../domain/progress/progressWriteLock.ts'
@@ -239,6 +241,11 @@ export async function executeCreateReview(
             createdAt: summary.reviewSnapshot.createdAt,
             finalizedAt: summary.reviewSnapshot.finalizedAt,
           })
+          // 会话状态持久化是异步排队写盘（3.17-M5）：保存后等待在途写入完成并把
+          // 失败（若发生）上报为 warnings，不再静默吞掉。
+          await flushReviewSessionStore()
+          const persistError = takeReviewSessionPersistError()
+          if (persistError) warnings.push(persistError)
         } catch (error) {
           warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -254,7 +261,7 @@ export async function executeCreateReview(
         extra: buildReviewExtra(warnings, outcome),
       })
     })
-  })
+  }, deps.cwd)
 }
 
 export async function executeRecordReviewMilestone(
@@ -277,33 +284,57 @@ export async function executeRecordReviewMilestone(
 
   assertReviewPathAllowed(deps, path)
 
-  const sessionCheck = ensureMatchingActiveReviewSession(deps.sessionId, path)
-  if (sessionCheck.ok === false) {
-    throw new Error(sessionCheck.error)
-  }
-
   const target = await resolveTarget(deps, path)
 
-  // 读改写整体进 per-path 写锁：并行子代理不会基于同一份旧盘面互相覆盖
+  // 会话门闸检查与「读 → 改 → 写 → 保存会话状态」整体进 per-path 写锁 + per-session
+  // 锁（与 create 一致，3.17-M1）：同一会话的 record/finalize/reopen 严格串行，门闸
+  // 在临界区内重查，校验与执行原子化，避免并发操作基于过期会话状态放行。
   const next = await withProgressWriteLock(path, async () => {
-    const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
-    const locale = getCurrentReviewDocumentLocale()
-    const result = appendReviewMilestone(originalContent, {
-      milestoneId: typeof rawArgs.milestoneId === 'string' ? rawArgs.milestoneId : '',
-      milestoneTitle,
-      summary,
-      status: rawArgs.status === 'completed' ? 'completed' : undefined,
-      conclusion: typeof rawArgs.conclusion === 'string' ? rawArgs.conclusion : '',
-      evidenceFiles: Array.isArray(rawArgs.evidenceFiles) ? rawArgs.evidenceFiles : [],
-      evidence: Array.isArray(rawArgs.evidence) ? rawArgs.evidence : [],
-      findings: Array.isArray(rawArgs.findings) ? rawArgs.findings : [],
-      structuredFindings: Array.isArray(rawArgs.structuredFindings) ? rawArgs.structuredFindings : [],
-      reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
-      recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
-    }, locale)
-    const outcome = await writeTargetText(deps, target, result.content, path)
-    return { result, outcome }
-  })
+    return withReviewSessionLock(deps.sessionId, async () => {
+      const sessionCheck = ensureMatchingActiveReviewSession(deps.sessionId, path)
+      if (sessionCheck.ok === false) {
+        throw new Error(sessionCheck.error)
+      }
+
+      const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
+      const locale = getCurrentReviewDocumentLocale()
+      const result = appendReviewMilestone(originalContent, {
+        milestoneId: typeof rawArgs.milestoneId === 'string' ? rawArgs.milestoneId : '',
+        milestoneTitle,
+        summary,
+        status: rawArgs.status === 'completed' ? 'completed' : undefined,
+        conclusion: typeof rawArgs.conclusion === 'string' ? rawArgs.conclusion : '',
+        evidenceFiles: Array.isArray(rawArgs.evidenceFiles) ? rawArgs.evidenceFiles : [],
+        evidence: Array.isArray(rawArgs.evidence) ? rawArgs.evidence : [],
+        findings: Array.isArray(rawArgs.findings) ? rawArgs.findings : [],
+        structuredFindings: Array.isArray(rawArgs.structuredFindings) ? rawArgs.structuredFindings : [],
+        reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
+        recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
+      }, locale)
+      const outcome = await writeTargetText(deps, target, result.content, path)
+      const sessionWarnings: string[] = []
+      // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新，
+      // 会话状态始终反映磁盘真相；保存失败降级为 warnings（非关键步骤）。
+      if (!outcome.staged) {
+        try {
+          saveReviewSessionState(deps.sessionId, {
+            reviewRunId: result.reviewSnapshot.reviewRunId,
+            reviewPath: path,
+            status: result.reviewSnapshot.status,
+            createdAt: result.reviewSnapshot.createdAt,
+            finalizedAt: result.reviewSnapshot.finalizedAt,
+          })
+          // 3.17-M5：等待在途持久化完成并把失败（若发生）上报，不再静默吞掉。
+          await flushReviewSessionStore()
+          const persistError = takeReviewSessionPersistError()
+          if (persistError) sessionWarnings.push(persistError)
+        } catch (error) {
+          sessionWarnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return { result, outcome, sessionWarnings }
+    })
+  }, deps.cwd)
 
   const progressWarnings = await syncProgressFromReviewArtifact(deps, {
     reviewPath: path,
@@ -317,22 +348,7 @@ export async function executeRecordReviewMilestone(
     eventMessage: `同步审查里程碑：${next.result.milestoneId}`,
   })
 
-  const warnings = [...progressWarnings]
-  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新，
-  // 会话状态始终反映磁盘真相；保存失败降级为 warnings（非关键步骤）。
-  if (!next.outcome.staged) {
-    try {
-      saveReviewSessionState(deps.sessionId, {
-        reviewRunId: next.result.reviewSnapshot.reviewRunId,
-        reviewPath: path,
-        status: next.result.reviewSnapshot.status,
-        createdAt: next.result.reviewSnapshot.createdAt,
-        finalizedAt: next.result.reviewSnapshot.finalizedAt,
-      })
-    } catch (error) {
-      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const warnings = [...(next.sessionWarnings ?? []), ...progressWarnings]
 
   return projectReviewToolResultData({
     path,
@@ -368,26 +384,49 @@ export async function executeFinalizeReview(
 
   assertReviewPathAllowed(deps, path)
 
-  const sessionCheck = ensureMatchingActiveReviewSession(deps.sessionId, path)
-  if (sessionCheck.ok === false) {
-    throw new Error(sessionCheck.error)
-  }
-
   const target = await resolveTarget(deps, path)
 
-  // 读改写整体进 per-path 写锁
+  // 会话门闸检查与「读 → 改 → 写 → 保存会话状态」整体进 per-path 写锁 + per-session 锁
+  // （3.17-M1）：门闸在临界区内重查，校验与执行原子化。
   const next = await withProgressWriteLock(path, async () => {
-    const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
-    const locale = getCurrentReviewDocumentLocale()
-    const result = finalizeReviewDocument(originalContent, {
-      conclusion,
-      overallDecision: toOverallDecision(rawArgs.overallDecision),
-      recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
-      reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
-    }, locale)
-    const outcome = await writeTargetText(deps, target, result.content, path)
-    return { result, outcome }
-  })
+    return withReviewSessionLock(deps.sessionId, async () => {
+      const sessionCheck = ensureMatchingActiveReviewSession(deps.sessionId, path)
+      if (sessionCheck.ok === false) {
+        throw new Error(sessionCheck.error)
+      }
+
+      const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
+      const locale = getCurrentReviewDocumentLocale()
+      const result = finalizeReviewDocument(originalContent, {
+        conclusion,
+        overallDecision: toOverallDecision(rawArgs.overallDecision),
+        recommendedNextAction: typeof rawArgs.recommendedNextAction === 'string' ? rawArgs.recommendedNextAction : '',
+        reviewedModules: Array.isArray(rawArgs.reviewedModules) ? rawArgs.reviewedModules : [],
+      }, locale)
+      const outcome = await writeTargetText(deps, target, result.content, path)
+      const sessionWarnings: string[] = []
+      // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
+      // 保存失败降级为 warnings（非关键步骤，文档已落盘不阻断主流程）。
+      if (!outcome.staged) {
+        try {
+          saveReviewSessionState(deps.sessionId, {
+            reviewRunId: result.reviewSnapshot.reviewRunId,
+            reviewPath: path,
+            status: result.reviewSnapshot.status,
+            createdAt: result.reviewSnapshot.createdAt,
+            finalizedAt: result.reviewSnapshot.finalizedAt,
+          })
+          // 3.17-M5：等待在途持久化完成并把失败（若发生）上报，不再静默吞掉。
+          await flushReviewSessionStore()
+          const persistError = takeReviewSessionPersistError()
+          if (persistError) sessionWarnings.push(persistError)
+        } catch (error) {
+          sessionWarnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return { result, outcome, sessionWarnings }
+    })
+  }, deps.cwd)
 
   const progressWarnings = await syncProgressFromReviewArtifact(deps, {
     reviewPath: path,
@@ -401,22 +440,7 @@ export async function executeFinalizeReview(
     eventMessage: `同步审查结论：${path}`,
   })
 
-  const warnings = [...progressWarnings]
-  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
-  // 保存失败降级为 warnings（非关键步骤，文档已落盘不阻断主流程）。
-  if (!next.outcome.staged) {
-    try {
-      saveReviewSessionState(deps.sessionId, {
-        reviewRunId: next.result.reviewSnapshot.reviewRunId,
-        reviewPath: path,
-        status: next.result.reviewSnapshot.status,
-        createdAt: next.result.reviewSnapshot.createdAt,
-        finalizedAt: next.result.reviewSnapshot.finalizedAt,
-      })
-    } catch (error) {
-      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const warnings = [...(next.sessionWarnings ?? []), ...progressWarnings]
 
   return projectReviewToolResultData({
     path,
@@ -445,24 +469,47 @@ export async function executeReopenReview(
 
   assertReviewPathAllowed(deps, path)
 
-  const session = loadReviewSessionState(deps.sessionId)
-  if (session?.status === 'in_progress') {
-    if (session.reviewPath === path) {
-      throw new Error(`The review session is already active for path: ${path}`)
-    }
-    throw new Error(`Another active review session already exists for this conversation: ${session.reviewPath}`)
-  }
-
   const target = await resolveTarget(deps, path)
 
-  // 读改写整体进 per-path 写锁
+  // 会话门闸检查与「读 → 改 → 写 → 保存会话状态」整体进 per-path 写锁 + per-session 锁
+  // （3.17-M1）：门闸在临界区内重查，校验与执行原子化。
   const next = await withProgressWriteLock(path, async () => {
-    const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
-    const locale = getCurrentReviewDocumentLocale()
-    const result = reopenReviewDocument(originalContent, locale)
-    const outcome = await writeTargetText(deps, target, result.content, path)
-    return { result, outcome }
-  })
+    return withReviewSessionLock(deps.sessionId, async () => {
+      const session = loadReviewSessionState(deps.sessionId)
+      if (session?.status === 'in_progress') {
+        if (session.reviewPath === path) {
+          throw new Error(`The review session is already active for path: ${path}`)
+        }
+        throw new Error(`Another active review session already exists for this conversation: ${session.reviewPath}`)
+      }
+
+      const originalContent = normalizeLineEndingsToLF(await readTargetText(deps, target))
+      const locale = getCurrentReviewDocumentLocale()
+      const result = reopenReviewDocument(originalContent, locale)
+      const outcome = await writeTargetText(deps, target, result.content, path)
+      const sessionWarnings: string[] = []
+      // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
+      // 保存失败降级为 warnings（非关键步骤）。
+      if (!outcome.staged) {
+        try {
+          saveReviewSessionState(deps.sessionId, {
+            reviewRunId: result.reviewSnapshot.reviewRunId,
+            reviewPath: path,
+            status: result.reviewSnapshot.status,
+            createdAt: result.reviewSnapshot.createdAt,
+            finalizedAt: result.reviewSnapshot.finalizedAt,
+          })
+          // 3.17-M5：等待在途持久化完成并把失败（若发生）上报，不再静默吞掉。
+          await flushReviewSessionStore()
+          const persistError = takeReviewSessionPersistError()
+          if (persistError) sessionWarnings.push(persistError)
+        } catch (error) {
+          sessionWarnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return { result, outcome, sessionWarnings }
+    })
+  }, deps.cwd)
 
   const progressWarnings = await syncProgressFromReviewArtifact(deps, {
     reviewPath: path,
@@ -470,22 +517,7 @@ export async function executeReopenReview(
     eventMessage: `重新打开审查：${path}`,
   })
 
-  const warnings = [...progressWarnings]
-  // 与 create 一致：写入意图只 staged（未落盘）时跳过会话状态更新；
-  // 保存失败降级为 warnings（非关键步骤）。
-  if (!next.outcome.staged) {
-    try {
-      saveReviewSessionState(deps.sessionId, {
-        reviewRunId: next.result.reviewSnapshot.reviewRunId,
-        reviewPath: path,
-        status: next.result.reviewSnapshot.status,
-        createdAt: next.result.reviewSnapshot.createdAt,
-        finalizedAt: next.result.reviewSnapshot.finalizedAt,
-      })
-    } catch (error) {
-      warnings.push(`Failed to save review session state: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const warnings = [...(next.sessionWarnings ?? []), ...progressWarnings]
 
   return projectReviewToolResultData({
     path,

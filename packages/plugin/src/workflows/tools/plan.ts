@@ -229,7 +229,7 @@ export async function executeCreatePlan(
         },
       } : {}),
     }, progressWarnings, outcome)
-  })
+  }, deps.cwd)
 }
 
 export async function executeUpdatePlan(
@@ -291,7 +291,7 @@ export async function executeUpdatePlan(
     const { content, todos } = buildPlanDocument(bodyContent, rawArgs.todos, sourceSection)
     const outcome = await writeTargetText(deps, target, content, targetPath)
     return { content, todos, outcome }
-  })
+  }, deps.cwd)
 
   const progressWarnings = await syncProgressFromPlanArtifact(deps, {
     planPath: targetPath,

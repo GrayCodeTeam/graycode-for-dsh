@@ -567,18 +567,19 @@ describe('prompt mode management locales and defaults', () => {
   it('ships zh/en/ja copy for every promptModes key and the memory field', () => {
     const enFlat = en as Record<string, string>
     const jaFlat = graycodeSettingsJaPlaceholder as Record<string, string>
+    const zhFlat = zh as Record<string, string>
     const promptKeys = Object.keys(zh).filter(key => key.startsWith('promptModes.'))
     expect(promptKeys.length).toBeGreaterThan(40)
     for (const key of promptKeys) {
-      expect(zh[key].length).toBeGreaterThan(0)
+      expect(zhFlat[key]!.length).toBeGreaterThan(0)
       expect(enFlat[key]).toBeDefined()
-      expect(enFlat[key].length).toBeGreaterThan(0)
+      expect(enFlat[key]!.length).toBeGreaterThan(0)
       expect(jaFlat[key]).toBeDefined()
     }
-    expect(zh['label.memory.systemPrompt'].length).toBeGreaterThan(0)
-    expect(zh['desc.memory.systemPrompt'].length).toBeGreaterThan(0)
-    expect(zh['placeholder.memory.systemPrompt'].length).toBeGreaterThan(0)
-    expect(enFlat['label.memory.systemPrompt'].length).toBeGreaterThan(0)
+    expect(zhFlat['label.memory.systemPrompt']!.length).toBeGreaterThan(0)
+    expect(zhFlat['desc.memory.systemPrompt']!.length).toBeGreaterThan(0)
+    expect(zhFlat['placeholder.memory.systemPrompt']!.length).toBeGreaterThan(0)
+    expect(enFlat['label.memory.systemPrompt']!.length).toBeGreaterThan(0)
     expect(jaFlat['desc.memory.systemPrompt']).toBeDefined()
   })
 

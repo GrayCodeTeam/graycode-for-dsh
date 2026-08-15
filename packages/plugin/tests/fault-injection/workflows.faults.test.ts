@@ -29,7 +29,10 @@ import {
   executeUpdateProgress,
   executeValidateProgressDocument,
 } from '../../src/workflows/tools/progress.ts'
-import { getProgressWriteQueueSize } from '../../src/workflows/domain/progress/progressWriteLock.ts'
+import {
+  getProgressWriteQueueSize,
+  resetProgressWriteLocksForTest,
+} from '../../src/workflows/domain/progress/progressWriteLock.ts'
 import { validateProgressDocument } from '../../src/workflows/domain/progress/documentLayout.ts'
 import type { ProgressToolStructuredResultV1 } from '../../src/workflows/domain/progress/schema.ts'
 import type { ToolDeps } from '../../src/workflows/workspace.ts'
@@ -53,6 +56,9 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await rm(path.join(tmpDir, '.graycode'), { recursive: true, force: true })
+  // 3.19-M5：重置模块级写锁队列——前序用例失败若留下未排空条目，会让后续用例的
+  // getProgressWriteQueueSize() === 0 断言级联失败（顺序依赖）；每用例重置后隔离。
+  resetProgressWriteLocksForTest()
   deps = makeDeps('fault-session')
 })
 

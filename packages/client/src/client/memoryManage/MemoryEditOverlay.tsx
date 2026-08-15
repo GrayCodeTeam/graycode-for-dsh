@@ -215,11 +215,19 @@ export function MemoryEditOverlay({
   onCancel,
 }: MemoryEditOverlayProps): ReactNode {
   const [text, setText] = useState(entry.text)
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false)
   const diff = useMemo(() => diffMemoryText(entry.text, text), [entry.text, text])
   const empty = text.trim().length === 0
   const bytes = utf8Bytes(text)
   const overLimit = entryChars !== undefined && bytes > entryChars
   const canSave = diff.changed && !empty && !saving && !overLimit
+
+  // 3.4-M6: cancelling with unsaved changes asks for confirmation first — the
+  // draft (and the reviewed diff) must never be discarded silently.
+  const requestCancel = () => {
+    if (diff.changed && !saving) setConfirmingDiscard(true)
+    else onCancel()
+  }
 
   return (
     <div data-graycode-memory="edit-overlay" style={scrimStyle}>
@@ -228,7 +236,7 @@ export function MemoryEditOverlay({
           <span>
             {t('edit.title')} #{entry.id}
           </span>
-          <button type="button" data-graycode-memory="edit-close" style={closeStyle} disabled={saving} onClick={onCancel}>
+          <button type="button" data-graycode-memory="edit-close" style={closeStyle} disabled={saving} onClick={requestCancel}>
             ✕
           </button>
         </div>
@@ -246,7 +254,10 @@ export function MemoryEditOverlay({
           rows={4}
           disabled={saving}
           style={textareaStyle}
-          onChange={event => setText(event.target.value)}
+          onChange={event => {
+            setText(event.target.value)
+            setConfirmingDiscard(false)
+          }}
         />
         <div style={byteRowStyle}>
           <span
@@ -301,19 +312,33 @@ export function MemoryEditOverlay({
           </div>
         )}
         <div style={footerStyle}>
-          <span style={saveHintStyle}>{t('edit.saveHint')}</span>
-          <button type="button" data-graycode-memory="edit-cancel" style={buttonStyle} disabled={saving} onClick={onCancel}>
-            {t('edit.cancel')}
-          </button>
-          <button
-            type="button"
-            data-graycode-memory="edit-save"
-            style={canSave ? primaryStyle : buttonDisabledStyle}
-            disabled={!canSave}
-            onClick={() => { if (canSave) onSave(text) }}
-          >
-            {saving ? t('loading') : t('edit.save')}
-          </button>
+          {confirmingDiscard ? (
+            <>
+              <span style={saveHintStyle}>{t('edit.discardPrompt')}</span>
+              <button type="button" data-graycode-memory="edit-keep-editing" style={buttonStyle} onClick={() => setConfirmingDiscard(false)}>
+                {t('edit.keepEditing')}
+              </button>
+              <button type="button" data-graycode-memory="edit-discard" style={buttonStyle} onClick={onCancel}>
+                {t('edit.discard')}
+              </button>
+            </>
+          ) : (
+            <>
+              <span style={saveHintStyle}>{t('edit.saveHint')}</span>
+              <button type="button" data-graycode-memory="edit-cancel" style={buttonStyle} disabled={saving} onClick={requestCancel}>
+                {t('edit.cancel')}
+              </button>
+              <button
+                type="button"
+                data-graycode-memory="edit-save"
+                style={canSave ? primaryStyle : buttonDisabledStyle}
+                disabled={!canSave}
+                onClick={() => { if (canSave) onSave(text) }}
+              >
+                {saving ? t('loading') : t('edit.save')}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

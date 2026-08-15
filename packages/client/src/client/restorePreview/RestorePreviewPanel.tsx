@@ -325,7 +325,12 @@ export function RestorePreviewPanel({
           {step.preview !== null && (
             <>
               {classification !== null && (
-                <RestorePreviewList t={t} classification={classification} legacy={step.preview.legacy === true} />
+                <RestorePreviewList
+                  t={t}
+                  classification={classification}
+                  legacy={step.preview.legacy === true}
+                  autoPrunedCount={step.preview.autoPrunedCheckpointCount}
+                />
               )}
 
               {step.phase === 'preview' && (
@@ -386,18 +391,33 @@ export function RestorePreviewPanel({
           {step.phase === 'confirm' && (
             <div style={approvalStyle} data-graycode-restorepreview="armed">
               <div style={warnStyle}>{t('confirmWarning')}</div>
-              <button
-                type="button"
-                data-graycode-restorepreview="restore"
-                style={onRestore === undefined || step.session === null ? disabledButtonStyle : buttonStyle}
-                disabled={onRestore === undefined || step.session === null}
-                title={onRestore === undefined ? t('replayOnly') : undefined}
-                onClick={() => {
-                  if (onRestore !== undefined && step.session !== null) onRestore(step.session)
-                }}
-              >
-                {t('restoreButton')}
-              </button>
+              <div style={actionsStyle}>
+                <button
+                  type="button"
+                  data-graycode-restorepreview="restore"
+                  style={onRestore === undefined || step.session === null ? disabledButtonStyle : buttonStyle}
+                  disabled={onRestore === undefined || step.session === null}
+                  title={onRestore === undefined ? t('replayOnly') : undefined}
+                  onClick={() => {
+                    if (onRestore !== undefined && step.session !== null) onRestore(step.session)
+                  }}
+                >
+                  {t('restoreButton')}
+                </button>
+                {/* 3.6-M3: the armed (confirm) phase must have a way back —
+                    re-preview resets to idle, letting the user adjust the token
+                    (paste mode) or re-run the preview before committing. */}
+                <button
+                  type="button"
+                  data-graycode-restorepreview="re-preview"
+                  style={onRePreview === undefined ? disabledButtonStyle : buttonStyle}
+                  disabled={onRePreview === undefined}
+                  title={onRePreview === undefined ? t('replayOnly') : undefined}
+                  onClick={onRePreview}
+                >
+                  {t('rePreviewButton')}
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -408,6 +428,22 @@ export function RestorePreviewPanel({
           {step.progress === null
             ? <div style={hintStyle}>{t('previewing')}</div>
             : <RestoreProgressView t={t} progress={step.progress} />}
+          {/* 3.6-M2: `running` must not be a dead end — a cancel/reset entry
+              (local RESET) always exits back to idle even if the host hangs.
+              The gateway invoke timeout independently converts a hung host
+              into a failed state via GRAY_RESTORE_TIMEOUT. */}
+          <div style={actionsStyle}>
+            <button
+              type="button"
+              data-graycode-restorepreview="cancel"
+              style={onReset === undefined ? disabledButtonStyle : buttonStyle}
+              disabled={onReset === undefined}
+              title={onReset === undefined ? t('replayOnly') : undefined}
+              onClick={onReset}
+            >
+              {t('cancelButton')}
+            </button>
+          </div>
         </div>
       )}
 

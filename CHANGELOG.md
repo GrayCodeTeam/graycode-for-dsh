@@ -285,6 +285,27 @@
   mergeUnchangedCheckpoints，默认照原插件）；mergeUnchanged 用 contentHash 确认级
   回滚（防误删真实变更）；client settings 新增全部开关与工具列表编辑 + CheckpointManager
   配置区接线。
+- **重新生成 AI 消息**：客户端 `conversation.chat.assistant-actions` 槽注册「重新生成」
+  按钮（`graycode.regenerate`，order 20），经 `branches/reroll` Remote 端点 fork 重发；
+  插件新增 `branches/reroll` / `branches/editRetry` Remote 端点（自动归组、错误码透传
+  NO_PREVIOUS_TURN 等）。
+- **编辑用户消息**：`conversation.chat.turnTail` 槽注册「编辑」按钮
+  （`graycode.edit-turn`）——弹层改写该轮用户消息后经 `branches/editRetry` 重试。
+- **图像生成/编辑（images 域）**：`generate_image` 工具（生成+编辑共用，reference_images
+  裸 base64，prompt+output_path 必填，aspect_ratio/image_size 仅设置启用时暴露）；
+  Gemini Image API（`POST {url}/models/{model}:generateContent`，120s 超时、双源中止、
+  扩展名魔法字节嗅探、路径防穿越、落盘 `<cwd>/generated_images/`、maxImagesPerTask
+  截断）；配置 `images.{enabled,agentScope,url,apiKey,model,enableAspectRatio,
+  defaultAspectRatio,enableImageSize,defaultImageSize,maxBatchTasks,maxImagesPerTask}`，
+  apiKey 经 schema role('secret') 只在写路径可见；客户端设置新增独立 `image` 分类
+  （第 9 分类）与 ImagePage（含 secret 字段）；media 域移除 generate_image 占位
+  （channel 收窄 removeBackground）。
+- **总结功能（summary 域）**：`summary/generate` Remote 端点；SummaryService 经
+  `ctx.llm.stream`（provider/model 取 session.requestContext 或消息 provenance）；
+  policy 纯逻辑（token 估算字符数/4、轮次分组、预算解析数字/百分比、保留最近 N 轮 +
+  超预算从旧轮裁、6 段 system prompt + {history} 模板、MIN_SUMMARY_LENGTH=50 质量
+  校验）；客户端 `graycode.summarize` 命名空间 + `conversation.session.header.actions`
+  槽「总结」按钮（order 30）+ 结果弹层（复制/关闭）；installSummarize 独立安装函数。
 
 ### Changed（变更）
 
@@ -323,6 +344,11 @@
   （beforeMessages 默认 ['user']、afterMessages []、modelOuterLayerOnly true、
   mergeUnchangedCheckpoints true）；memory Config 的 enabled 从「仅控注入」扩展为
   「不注入 + 工具不注册」。
+- **术语改名（对齐原插件）**：「根代理」→「主代理」设置文案 zh/en 同步
+  （options.scope.roots 与 fields.agentScope.description）。
+- **上游同步（rebase 5cefeb4）**：吸收官方 P9-P18（checkpoints 锁/GC 归一化、memory
+  tail-delete、branches 3.15-M2 送达回退、media P15 加固、M1 remote 白名单、
+  subagents P9 等）；本地新增端点并入白名单。
 
 ### Fixed（修复，来自审计批次）
 

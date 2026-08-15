@@ -1,12 +1,14 @@
-# GrayCode media 域（本地图片处理 + 模型渠道工具）
+# GrayCode media 域（本地图片处理 + remove_background 模型渠道工具）
 
 本地图片处理工具：`crop_image` / `resize_image` / `rotate_image`，基于
 [sharp](https://sharp.pixelplumbing.com/)（npm 预构建 dependency，libvips 预编译二进制）。
 
 老 Gray Code 有 5 个媒体工具，其中 `generate_image` / `remove_background` 依赖
 Gemini 模型渠道。DSH rc.6 的 `ctx.llm` 只有流式文本 API（无公开图像生成面，
-见「模型渠道」节），因此本域补齐本地处理三件套 + 模型渠道两工具的
+见「模型渠道」节），因此本域补齐本地处理三件套 + `remove_background` 的
 **fail-closed** 契约（工具注册 + 稳定错误码齐全，渠道就绪后平移真实实现）。
+`generate_image` 已迁出到 **images 域**（`src/images/`，直连 Gemini REST 面的
+真实实现：生成 + 参考图编辑、独立设置页）。
 
 ## 目录结构
 
@@ -39,8 +41,11 @@ tests/media/        单元测试（domain 纯函数 + sharp 集成 + 工具层�
 | `crop_image` | `images[]` 或 `image_path` + `x1,y1,x2,y2` | 归一化坐标 **0-1**（任务要求；老版为 0-1000），x1<x2、y1<y2 |
 | `resize_image` | `images[]` 或 `image_path` + `width,height` | 正整数像素 ≤ 16384；拉伸填充 `fit: 'fill'` + lanczos3（老版同款） |
 | `rotate_image` | `images[]` 或 `image_path` + `angle` + `format?` | angle 枚举 **0/90/180/270**（任务要求）；format 可选 png/jpeg/webp |
-| `generate_image` | `prompt` + `size?` + `format?` + `output_path?` | 模型渠道：prompt 透传；size 形如 `1024x1024`；格式 **png 优先**；默认输出 `<workspace>/media-output/gen-<ts>.png` |
 | `remove_background` | `image_path` + `output_path?` | 模型渠道：输入工作区内图片；默认输出 `<workspace>/media-output/<name>-bg-removed-<ts>.png`（透明背景） |
+
+> `generate_image` 由 images 域提供（`src/images/`）：生成与编辑同一工具
+> （编辑 = 参数带 `reference_images` base64），默认关闭，需在独立设置页配置
+> API Key 后启用。
 
 - 批量模式：`images` 数组（与老版逐字一致）；单张模式：顶层参数（老版兼容形态）。
 - `output_path` **可选**：省略时写入 `<workspace>/media-output/<name>-<ts>.png|jpg|webp`
@@ -97,9 +102,9 @@ tests/media/        单元测试（domain 纯函数 + sharp 集成 + 工具层�
   控制字符）→ 适配层权威校验（`ctx.fs.resolve` 跟随符号链接后 `contains` 包含性检查；
   node 回退实现 realpath 前缀检查），逃逸即 `GRAY_MEDIA_PATH_OUTSIDE_WORKSPACE`。
 
-## 模型渠道：generate_image / remove_background（fail-closed）
+## 模型渠道：remove_background（fail-closed）
 
-两者都需要模型渠道调用（老版为 Gemini 图像生成 / 分割 API）。**SPIKE 探明结论**
+`remove_background` 需要模型渠道调用（老版为 Gemini 分割 API）。**SPIKE 探明结论**
 （实证 `packages/plugin/node_modules/@deepseek-ai/dsh-llm/lib/types/`，v0.1.0-rc.6）：
 
 - `ctx.llm` 是 `LlmRuntime`，仅有流式**文本** API `stream(GenerateOptions)`
@@ -112,19 +117,11 @@ tests/media/        单元测试（domain 纯函数 + sharp 集成 + 工具层�
 因此实现路径为 **b）fail-closed**：工具注册 + 参数/结果/错误码契约完整，未注入真实
 渠道时调用返回 `GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE`，插件其余功能不受影响。
 
-- **generate_image**：参数 `prompt`（必填，≤ 4096 字符，原样透传）+ `size?`
-  （形如 `1024x1024`，单边 ≤ 16K）+ `format?`（png/jpeg/webp，**png 优先**）+
-  `output_path?`。输出格式优先级：显式 format → 输出路径扩展名 → png；默认输出
-  `<workspace>/media-output/gen-<ts>.<ext>`。可取消（AbortSignal 经 ChannelImagePort
-  透传底层 HTTP）；渠道返回字节先做 magic bytes 校验（PNG/JPEG/WebP/GIF，与期望输出
-  格式及渠道声明的 format/mime 一致性校验），不一致报
-  `GRAY_MEDIA_MODEL_RESPONSE_INVALID`（不静默落盘），通过后写盘（复用 MediaFsPort，
-  GAP 回退 node fs）。
 - **remove_background**：参数 `image_path`（必填，工作区内）+ `output_path?`。输入经
   `resolveInsideWorkspace`（纯字符串层）+ `MediaFsPort.readBytes`（适配层权威校验）；
   默认输出 `<workspace>/media-output/<name>-bg-removed-<ts>.png`（透明背景）。
-- **渠道端口**：`domain/modelChannel.ts` 定义 `ChannelImagePort`（generateImage /
-  removeBackground，请求/结果类型含 signal）。`tools.ts` 只依赖该端口；`media/index.ts`
+- **渠道端口**：`domain/modelChannel.ts` 定义 `ChannelImagePort`（removeBackground，
+  请求/结果类型含 signal）。`tools.ts` 只依赖该端口；`media/index.ts`
   默认注入 `createUnavailableChannelImagePort()`（adapters/modelChannel.ts，fail-closed）。
 - **接真实渠道**：实现 `ChannelImagePort`（挂在 `ctx.llm` 图像能力或独立 provider
   服务上，参照远程域 GrayRemoteService 端点注册先例：先注册端点，渠道稳定后平移），
@@ -158,9 +155,10 @@ ctx.plugin(media, { ...config.media })
   sharp 缺失时 `describe.skipIf` 跳过；
 - `tools.test.ts`：工具层接线（stub exec + node fs 适配器 + 临时目录），
   参数接线、错误码、取消（signal abort）、默认输出目录；
-- `modelValidate.test.ts`：模型渠道参数校验纯函数（prompt 必填/长度、size 格式、
+- `modelValidate.test.ts`：模型渠道参数校验纯函数（remove_background 任务校验、
   格式归一、默认输出路径、渠道错误码投影）；
 - `modelTools.test.ts`：模型渠道工具层接线（mock ChannelImagePort 成功写文件 +
-  fail-closed MODEL_CHANNEL_UNAVAILABLE + 调用失败/空响应 + 取消）。
+  fail-closed MODEL_CHANNEL_UNAVAILABLE + 调用失败/空响应 + 取消；
+  generate_image 的接线测试见 tests/images/）。
 
 零网络零模型：渠道端口以 mock/不可用实现注入，测试不触网。

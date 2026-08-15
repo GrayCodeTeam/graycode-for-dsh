@@ -120,7 +120,7 @@ export function ActivityHeatmapChart({ t, rows }: ActivityHeatmapChartProps): Re
               <span
                 key={cell.hour}
                 style={cellStyleWithOpacity(cell.intensity)}
-                title={`${row.date} ${cell.hour}:00 — ${cell.minutes} min`}
+                title={`${row.date} ${cell.hour}:00 — ${cell.minutes} ${t('summary.minutes')}`}
               />
             ))}
           </div>

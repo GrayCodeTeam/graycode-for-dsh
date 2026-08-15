@@ -24,6 +24,7 @@
 import { MemoryService, normalizeWorkspaceKey, stableIdOfScopeKey } from '../../../memory/service.ts'
 import type { TargetWriterPort, WriteTargetInput, WriteTargetResult } from '../../application/ports.ts'
 import { resolveScopeOverride, type ScopeOverrideMap } from '../../domain/scopeMap.ts'
+import { MIGRATION_ERROR_CODES, MigrationError } from '../../domain/types.ts'
 import { AppliedJournalStore } from './appliedJournal.ts'
 
 interface MemoryObjectData {
@@ -92,7 +93,14 @@ export function createMemoryTargetWriter(
           resolvedScopeRef = 'memory://global'
         } else {
           const cwd = resolved.kind === 'workspace' ? resolved.cwd : (data.scopeMeta?.fsPath ?? data.scopeMeta?.cwd)
-          if (!cwd) throw new Error(`memory-workspace ${input.object.legacyId} 缺少可用的工作区路径`)
+          // 3.14-M1：无可用路径在 plan 层已归入 unmapped（可经 scopeOverrides 恢复）；
+          // 绕过 plan 直接调用 writer 时写侧 fail-closed（稳定错误码，不静默写错目标）
+          if (!cwd) {
+            throw new MigrationError(
+              MIGRATION_ERROR_CODES.MEMORY_SCOPE_INVALID,
+              `memory-workspace ${input.object.legacyId} 缺少可用的工作区路径（fsPath/cwd 均缺失）`,
+            )
+          }
           if (resolved.kind === 'workspace') {
             // 覆盖路径同样哈希出 DSH 工作区记忆目录（与 getWorkspace 同算法：
             // sha256(normalizeWorkspaceKey(cwd)) 前 16 hex）

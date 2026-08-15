@@ -131,7 +131,12 @@ const buttonDisabledStyle: CSSProperties = {
 /** Locale-agnostic short time formatting (browser Intl; safe during replay). */
 export function formatWorkflowTime(time: number): string {
   if (!Number.isFinite(time)) return '—'
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(time))
+  const date = new Date(time)
+  // Finite but out-of-range epochs make an Invalid Date whose Intl formatting
+  // throws a RangeError — degrade to the neutral dash instead of crashing the
+  // render (audit M3).
+  if (Number.isNaN(date.getTime())) return '—'
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(date)
 }
 
 /**

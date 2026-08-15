@@ -11,7 +11,7 @@
  * - 多工作区锁按字典序获取（无 ABBA 死锁），释放后锁文件全部移除
  */
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { describe, expect, test } from 'vitest'
@@ -198,6 +198,66 @@ describe('CheckpointOperationLockManager (cross-process file lock)', () => {
       expect(result).toBe('acquired')
       // 释放后锁文件被移除
       await expect(fs.access(lockPath)).rejects.toThrow()
+    } finally {
+      await cleanup(lockDir)
+    }
+  })
+
+  test('M1: resumed holder release does not unlink the successor lock (ownership-guarded release)', async () => {
+    const lockDir = await createTempDir('dsh-cp-lock-')
+    const managerA = new CheckpointOperationLockManager({ lockDir, pollIntervalMs: 20 })
+    const managerB = new CheckpointOperationLockManager({ lockDir, pollIntervalMs: 20, staleLockMs: 200 })
+    try {
+      const lockPath = lockPathFor(lockDir, 'ws1')
+      let releaseA!: () => void
+      const gateA = new Promise<void>(resolve => {
+        releaseA = resolve
+      })
+      const taskA = managerA.runExclusive(['ws1'], 'create', 'owner-a', async () => {
+        await gateA
+        return 'A'
+      })
+      await waitFor(() => existsSync(lockPath))
+
+      // 模拟持有者 A 长时间暂停（>staleLockMs 无心跳）：把锁文件内容改为「陈旧」。
+      // A 的心跳间隔 = max(1000, 60_000/3) = 20s，测试在 1s 内完成，A 不会自行刷新。
+      await fs.writeFile(
+        lockPath,
+        JSON.stringify({ pid: 111, createdAt: Date.now() - 60_000, ownerId: 'owner-a', token: 'a-token' }),
+        'utf-8',
+      )
+
+      // B 检测到陈旧锁并原子接管（保持持有，模拟接管后仍在运行）
+      let releaseB!: () => void
+      const gateB = new Promise<void>(resolve => {
+        releaseB = resolve
+      })
+      const taskB = managerB.runExclusive(['ws1'], 'delete', 'owner-b', async () => {
+        await gateB
+        return 'B'
+      })
+      await waitFor(() => {
+        try {
+          return JSON.parse(readFileSync(lockPath, 'utf-8')).ownerId === 'owner-b'
+        } catch {
+          return false
+        }
+      })
+
+      // A「恢复」并释放：其句柄指向已被 B 接管删除的旧 inode，release 不得 unlink B 的锁
+      releaseA()
+      await expect(taskA).resolves.toBe('A')
+
+      // A 的释放没有破坏 B 的锁：锁文件仍存在且属于 owner-b
+      const afterA = JSON.parse(await fs.readFile(lockPath, 'utf-8'))
+      expect(afterA.ownerId).toBe('owner-b')
+
+      releaseB()
+      await expect(taskB).resolves.toBe('B')
+      // B 基于所有权校验正常 unlink，锁文件最终移除；接管临时文件无残留
+      await expect(fs.access(lockPath)).rejects.toThrow()
+      const leftovers = (await fs.readdir(lockDir)).filter(name => name.includes('.takeover.'))
+      expect(leftovers).toEqual([])
     } finally {
       await cleanup(lockDir)
     }

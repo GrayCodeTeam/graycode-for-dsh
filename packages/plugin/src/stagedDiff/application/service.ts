@@ -195,12 +195,15 @@ export class StagedDiffService {
         if (existing) return { ...existing };
       }
       if (input.toolCallId !== undefined) {
+        // 4.17-L4：幂等匹配覆盖除 done 外的全部状态——rejected 后同 id 再 stage 返回
+        // 被拒条目（重试同一次工具调用不再生成新条目），accepted/needs-reapply 重复
+        // stage 也返回既有条目；仅 done（写盘已结算）允许同 id 重新 stage 表达新意图。
         const existing = this.entries.find(
           entry =>
             entry.toolCallId === input.toolCallId &&
             entry.path === safePath &&
             entry.workspaceId === input.workspaceId &&
-            (entry.status === 'pending' || entry.status === 'reviewing')
+            entry.status !== 'done'
         );
         if (existing) return { ...existing };
       }
@@ -267,6 +270,27 @@ export class StagedDiffService {
           { entry }
         );
       }
+      // 3.17-M3：与 rejectEntry 同口径的 before 冲突检测——目标文件已被其他流程修改
+      // （磁盘内容 ≠ before 快照）时拒绝覆盖。磁盘内容 === after（如崩溃恢复中
+      // needs-reapply 的幂等重放、或内容本就一致）视为一致，不误报冲突。
+      if (entry.before !== null) {
+        const destination = path.join(input.workspaceRoot, entry.path);
+        // undefined = 读盘失败（权限/IO）无法比对：沿用 rejectEntry 的容错，跳过检测；
+        // null = 目标确实不存在（被删除）——与 before 快照（存在）不一致，属冲突
+        let currentDisk: string | null | undefined;
+        try {
+          currentDisk = await this.applier.readFile(destination, { workspaceRoot: input.workspaceRoot });
+        } catch {
+          currentDisk = undefined;
+        }
+        if (currentDisk !== undefined && currentDisk !== entry.before && currentDisk !== entry.after) {
+          throw new StagedDiffError(
+            `target file "${entry.path}" was modified after staging (before snapshot no longer matches disk); resolve the conflict before accepting`,
+            StagedDiffErrorCode.ACCEPT_CONFLICT,
+            { entry }
+          );
+        }
+      }
       const now = Date.now();
       // 1) pending/reviewing/needs-reapply → accepted；已是 accepted（重试）跳过
       let current = entry;
@@ -274,6 +298,14 @@ export class StagedDiffService {
         current = transitionEntry(current, 'accepted', now);
         await this.persist(this.withEntry(current));
         this.entries = this.withEntry(current);
+      }
+      // 4.17-L2：已弃用实例不得再写盘——dispose 后到达落盘步骤的在途 accept 直接拒绝，
+      // 避免 HMR/卸载竞态下已接受的条目在插件关闭后仍写入 workspace。
+      if (this.disposed) {
+        throw new StagedDiffError(
+          `staged-diff service is disposed; cannot apply entry "${input.entryId}"`,
+          StagedDiffErrorCode.STORAGE_CORRUPT
+        );
       }
       // 2) 落盘（destination 由 workspaceRoot + 规范化相对路径拼接）
       const destination = path.join(input.workspaceRoot, current.path);

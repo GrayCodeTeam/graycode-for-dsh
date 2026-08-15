@@ -14,6 +14,7 @@ import {
   UnsupportedAddressingError,
 } from '../../src/subagents/domain/errors.ts'
 import { ThreadHopCounter } from '../../src/subagents/domain/hopPolicy.ts'
+import { stopReasonError } from '../../src/subagents/domain/stopReason.ts'
 
 describe('G1 ThreadHopCounter（hop 熔断边界）', () => {
   it('≤5 放行、>5 拒绝（maxHopDepth=5，参照老 Gray MAX_HOP_DEPTH）', () => {
@@ -126,6 +127,24 @@ describe('G2 resolveChildToParentTarget（子→父寻址能力边界，fail-clo
       target: 'main',
       origin: 'root-session',
     })
+  })
+})
+
+describe('stop reason 共享词汇表（L2）', () => {
+  it('completed → 正常完成（无失败文案）', () => {
+    expect(stopReasonError('completed')).toBeUndefined()
+  })
+
+  it('已知非完成码 → 对应失败文案', () => {
+    expect(stopReasonError('aborted')).toContain('cancelled')
+    expect(stopReasonError('error')).toContain('failed')
+    expect(stopReasonError('max-tokens')).toContain('token limit')
+    expect(stopReasonError('refusal')).toContain('declined')
+  })
+
+  it('未知码 → 原样上报，不静默视为成功', () => {
+    expect(stopReasonError('suspended')).toContain('suspended')
+    expect(stopReasonError('mystery-reason')).toContain('mystery-reason')
   })
 })
 

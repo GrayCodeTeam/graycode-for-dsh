@@ -11,6 +11,7 @@
 
 import * as path from 'path'
 import { ActivityStore } from './domain/store.ts'
+import { toDateStr } from './domain/store.ts'
 import { aggregateActivity, rangeToDays } from './domain/activityStats.ts'
 import {
   ACTIVITY_HEARTBEAT_MS,
@@ -75,10 +76,21 @@ export class ActivityService {
     const range = query.range ?? '7d'
     const days = rangeToDays(range)
     let files: Array<{ date: string; samples: number[] }>
+    let currentSessionSamples: number[] | undefined
     try {
-      files = days === Infinity
-        ? await this.store.loadAllDays(now)
-        : await this.store.loadRecentDays(days, now)
+      if (range === 'today') {
+        // 4.15-L1：today 的 daily/today 按日历日只报今天，但 currentSession 需跨午夜
+        // 归集起点（昨晚开始、今晨继续的会话）——多加载昨天一天，注入聚合层单独用于
+        // currentSession 计算。
+        const twoDays = await this.store.loadRecentDays(2, now)
+        const today = toDateStr(now)
+        files = twoDays.filter(day => day.date === today)
+        currentSessionSamples = twoDays.flatMap(day => day.samples)
+      } else {
+        files = days === Infinity
+          ? await this.store.loadAllDays(now)
+          : await this.store.loadRecentDays(days, now)
+      }
     } catch (error: unknown) {
       throw new ActivityError(
         `activity stats read failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -86,7 +98,7 @@ export class ActivityService {
         { cause: error },
       )
     }
-    return aggregateActivity(files, query, now, this.sampleIntervalMs)
+    return aggregateActivity(files, query, now, this.sampleIntervalMs, currentSessionSamples)
   }
 
   /** 停止采样并落盘（幂等；落盘失败仅告警，不阻断卸载） */

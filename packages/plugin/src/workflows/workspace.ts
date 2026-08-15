@@ -239,7 +239,7 @@ export interface WriteTargetOutcome {
   staged: boolean
   /** staged 时：条目 id（供 staged_diff_accept / staged_diff_reject 使用） */
   stagedEntryId?: string
-  /** 非阻断性警告（如 staging 失败回退直接落盘） */
+  /** 非阻断性警告（预留通道；3.17-M2 起 staging 失败不再回退直接落盘，该字段不再填充） */
   warnings?: string[]
 }
 
@@ -249,9 +249,12 @@ export interface WriteTargetOutcome {
  * staged-diff 适配（ADR-0003 §6 后续动作 2）：当写前钩子已安装且 enabled 时，把
  * 写入意图先变成 staged 条目（绝不提前写 workspace），用户接受后才落盘；否则直接
  * 经 ctx.fs 落盘（默认行为，与现状完全一致）。relPath 为 workspace 相对路径
- * （staged 条目的 path 字段），缺省时即使钩子存在也不接管（回退直接落盘）。
+ * （staged 条目的 path 字段），缺省时即使钩子存在也不接管（直接落盘）。
  *
- * staging 失败（存储/校验等）不阻断主流程：回退直接落盘并在结果中以 warnings 上报。
+ * staging 失败（存储/校验等）fail-closed（3.17-M2）：写入意图无法进入 staged 审阅
+ * 通道时直接抛错拒绝写入——回退直接落盘会绕过审阅门闸（用户接受前内容就进了
+ * workspace），把本应受控的写入变成无审阅落盘，因此不采用 fail-open 回退。
+ * 调用方（工具层）把该错误如实上报，不假报完成。
  *
  * 不在此处用 node:fs 直接 mkdir 父目录：dsh-fs-local 的 writeFileAtomic 内置
  * recursive mkdir（自动建父目录），且 node:fs 直写会绕过 fs 后端的权限/审批/沙箱层
@@ -266,26 +269,17 @@ export async function writeTargetText(
   const normalized = normalizeLineEndingsToLF(content)
   const hook = getStagedWriteHook()
   if (hook && hook.enabled && relPath) {
-    try {
-      const before = await readTargetTextOrNull(deps, target)
-      const { entryId } = await hook.stageWrite({
-        relPath,
-        content: normalized,
-        before,
-        cwd: deps.cwd,
-        sessionId: deps.sessionId,
-      })
-      return { staged: true, stagedEntryId: entryId }
-    } catch (error) {
-      // best-effort：staging 失败不阻断主文档流程，回退直接落盘并上报 warning
-      await deps.fs.writeText(target, normalized, undefined, deps.signal)
-      return {
-        staged: false,
-        warnings: [
-          `Failed to stage write for ${relPath}; wrote directly instead: ${error instanceof Error ? error.message : String(error)}`,
-        ],
-      }
-    }
+    // 3.17-M2 fail-closed：stageWrite 抛错（存储失败/校验拒绝等）时直接向上抛，
+    // 绝不回退直接落盘——审阅门闸一旦启用就不能被静默绕过。
+    const before = await readTargetTextOrNull(deps, target)
+    const { entryId } = await hook.stageWrite({
+      relPath,
+      content: normalized,
+      before,
+      cwd: deps.cwd,
+      sessionId: deps.sessionId,
+    })
+    return { staged: true, stagedEntryId: entryId }
   }
   await deps.fs.writeText(target, normalized, undefined, deps.signal)
   return { staged: false }

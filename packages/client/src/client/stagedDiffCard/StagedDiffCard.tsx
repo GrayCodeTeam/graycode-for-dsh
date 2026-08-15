@@ -164,6 +164,9 @@ export function formatStagedTime(time: number): string {
 /**
  * Render a before/after summary line for the card.
  * @returns e.g. "New file · +12" / "Deleted · −8" / "Modified · +3 −1".
+ *
+ * Zero-count boundaries (an empty file deleted, an empty new file) render
+ * the label without a misleading "−0"/"+0" (4.8-L5).
  */
 export function formatStagedSummary(t: TranslateNS<'graycode.stagedDiffCard'>, entry: StagedEntry): string {
   const summary = summarizeStagedDiff(entry.before, entry.after)
@@ -172,9 +175,9 @@ export function formatStagedSummary(t: TranslateNS<'graycode.stagedDiffCard'>, e
     return `${label} · +${summary.addedLines} −${summary.removedLines}`
   }
   if (summary.kind === 'create') {
-    return `${label} · +${summary.addedLines}`
+    return summary.addedLines > 0 ? `${label} · +${summary.addedLines}` : label
   }
-  return `${label} · −${summary.removedLines}`
+  return summary.removedLines > 0 ? `${label} · −${summary.removedLines}` : label
 }
 
 /**
@@ -230,6 +233,23 @@ export function StagedDiffCard({
         <div style={errorStyle} data-graycode-stageddiff="error">
           <span>{t(stagedDiffErrorLocaleKey(error))}</span>
           <span> ({error.code})</span>
+        </div>
+      )}
+
+      {error !== null && error.retryable && (
+        <div style={actionsStyle}>
+          <button
+            type="button"
+            data-graycode-stageddiff="retry"
+            style={busy || onAccept === undefined ? buttonDisabledStyle : acceptButtonStyle}
+            disabled={busy || onAccept === undefined}
+            title={onAccept === undefined ? replayTitle : undefined}
+            onClick={() => {
+              if (!busy && onAccept !== undefined) onAccept(error.entry ?? entry)
+            }}
+          >
+            {t('action.retry')}
+          </button>
         </div>
       )}
 

@@ -119,6 +119,24 @@ describe('MemoryLogStore 损坏隔离', () => {
     }
   })
 
+  test('record.id 与行号不一致的异常记录按损坏占位处理（L6）', async () => {
+    const { store, dir } = makeStore()
+    try {
+      // 位置 0 的记录 id=5 ≠ 行号 0 → 损坏占位；位置 1 的 id=1 正常
+      fs.writeFileSync(
+        path.join(dir, 'records.jsonl'),
+        encodeRecordLine({ id: 5, date: '2026-01-01', text: 'misaligned', version: 1, source: 'note', tags: [] }) +
+          encodeRecordLine({ id: 1, date: '2026-01-02', text: 'aligned', version: 1, source: 'note', tags: [] }),
+      )
+      expect(await store.logLen()).toBe(2)
+      expect(await store.logSlice(0, 2)).toEqual([{ id: 1, date: '2026-01-02', text: 'aligned' }])
+      expect(await store.rawEntryIdAt(0)).toBeNull()
+      expect(await store.rawEntryIdAt(1)).toBe(1)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('records.jsonl 撕裂尾（无换行半行）：加载时截断修复，logLen 正确', async () => {
     const { store, dir } = makeStore()
     try {
@@ -228,6 +246,39 @@ describe('MemoryLogStore deleteRange', () => {
       expect(result.removed).toBe(2)
       expect(await store.logLen()).toBe(2) // 占位位置保留
       expect((await store.logSlice(0, 2)).map(e => e.text)).toEqual(['d'])
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('尾部删除截除保留区末尾损坏占位，覆盖已删记忆的越界摘要块被丢弃（M1）', async () => {
+    const { store, dir } = makeStore()
+    try {
+      await store.logAppend([
+        { date: '2026-01-01', text: 'a' },
+        { date: '2026-01-01', text: 'b' },
+        { date: '2026-01-01', text: 'c' },
+        { date: '2026-01-01', text: 'd' },
+      ])
+      await store.treePut(0, 2, 'ab', 'compress')
+      await store.treePut(2, 4, 'cd', 'compress')
+      // 位置 4、5 外部破坏为占位（空行）
+      fs.writeFileSync(
+        path.join(dir, 'records.jsonl'),
+        encodeRecordLine({ id: 0, date: '2026-01-01', text: 'a', version: 1, source: 'note', tags: [] }) +
+          encodeRecordLine({ id: 1, date: '2026-01-01', text: 'b', version: 1, source: 'note', tags: [] }) +
+          encodeRecordLine({ id: 2, date: '2026-01-01', text: 'c', version: 1, source: 'note', tags: [] }) +
+          encodeRecordLine({ id: 3, date: '2026-01-01', text: 'd', version: 1, source: 'note', tags: [] }) +
+          '\n\n',
+      )
+      // 尾部删除 [3,5]：区间含两个占位 → 实际删除 d；保留区 [a,b,c]
+      expect((await store.deleteRange(3, 5)).removed).toBe(1)
+      expect(await store.logLen()).toBe(3)
+      expect((await store.logSlice(0, 3)).map(e => e.text)).toEqual(['a', 'b', 'c'])
+      // 覆盖已删 d 的块 [2,4) 与其上层 [0,4) 被丢弃（越界）；未受影响的前缀块 [0,2) 保留
+      expect(await store.treeGet(2, 4)).toBeNull()
+      expect(await store.treeGet(0, 4)).toBeNull()
+      expect(await store.treeGet(0, 2)).toBe('ab')
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

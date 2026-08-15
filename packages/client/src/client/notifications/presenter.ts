@@ -65,7 +65,14 @@ export class BrowserNotificationPresenter {
     }
     if (permission === 'default') {
       try {
-        permission = await this.port.requestPermission()
+        const requested = await this.port.requestPermission()
+        // 4.7-L4：守卫 requestPermission 返回值——仅接受标准三态；旧式 'prompt' /
+        // undefined / 其它非标准返回一律按拒绝处理（非授权结果不展示）。
+        if (requested === 'granted' || requested === 'denied' || requested === 'default') {
+          permission = requested
+        } else {
+          permission = 'denied'
+        }
       } catch {
         return { status: 'failed', intentId: intent.id }
       }

@@ -117,14 +117,26 @@ export function workflowPhaseLabelKey(phase: string | undefined | null): Workflo
 
 /**
  * Short display label of a workspace root (last path segment; POSIX and
- * Windows separators). Falls back to the trimmed input when there is no
- * segment (e.g. a bare drive letter `C:`).
+ * Windows separators). Falls back to the input when there is no segment: a
+ * bare drive letter `C:` labels itself, and the root paths `/` / `\\` render
+ * their own marker instead of an empty string (audit L1). An empty input
+ * stays empty — there is nothing to label.
  * @param workspace - absolute workspace root from the wire.
  */
 export function workspaceLabelOf(workspace: string): string {
   const trimmed = workspace.replace(/[\\/]+$/, '')
   const segments = trimmed.split(/[\\/]/).filter((segment) => segment.length > 0)
-  return segments.at(-1) ?? trimmed
+  if (segments.length > 0) return segments.at(-1) ?? workspace
+  return workspace.length > 0 ? workspace : ''
+}
+
+/**
+ * Stable identity of one run view. Run ids are workspace-relative paths that
+ * repeat across workspaces, so dedupe and React keys are workspace-scoped
+ * (audit M6).
+ */
+export function workflowRunKey(run: Pick<WorkflowRunView, 'workspace' | 'id'>): string {
+  return `${run.workspace}\u0000${run.id}`
 }
 
 /** Normalize one wire summary into a render-ready view. */
@@ -185,12 +197,33 @@ export function formatWorkflowRunSize(sizeBytes: number | null | undefined): Wor
   return { value: text, unitKey: units[unitIndex]! }
 }
 
+/** Epoch ms → a valid Date, or null when absent/unrepresentable. */
+function workflowDateOf(time: number | null | undefined): Date | null {
+  if (time === null || time === undefined || !Number.isFinite(time)) return null
+  const date = new Date(time)
+  // Finite but out-of-range epoch values (beyond the ±8.64e15 ms Date range)
+  // yield an Invalid Date whose Intl formatting throws a RangeError — degrade
+  // to a neutral placeholder instead of crashing the render (audit M3).
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
 /**
  * Short timestamp for a run (`Intl` short date+time; neutral '—' for absent
- * values). Browser/native Intl only — replay-safe, no I/O.
+ * or unrepresentable values). Browser/native Intl only — replay-safe, no I/O.
  * @param time - epoch ms from the wire (or absent).
  */
 export function formatWorkflowRunTime(time: number | null | undefined): string {
-  if (time === null || time === undefined || !Number.isFinite(time)) return '—'
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(new Date(time))
+  const date = workflowDateOf(time)
+  if (date === null) return '—'
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(date)
+}
+
+/**
+ * Epoch ms → ISO string for the `<time dateTime>` attribute; null when absent
+ * or unrepresentable (a malformed value must not throw from `toISOString()`).
+ * @param time - epoch ms from the wire (or absent).
+ */
+export function workflowRunTimeIso(time: number | null | undefined): string | null {
+  const date = workflowDateOf(time)
+  return date === null ? null : date.toISOString()
 }

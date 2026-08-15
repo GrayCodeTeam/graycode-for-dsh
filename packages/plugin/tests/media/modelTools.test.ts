@@ -1,13 +1,14 @@
 /**
  * media 模型渠道工具层接线测试：直接调用 createMediaToolDefinitions 返回的
- * generate_image / remove_background 工具 execute（不经 ctx.tools 注册管线），
+ * remove_background 工具 execute（不经 ctx.tools 注册管线），
  * stub exec 模拟会话（cwd 来自 session header），文件能力注入 node fs 回退
  * 适配器 + 临时目录；模型渠道注入 mock ChannelImagePort 或走缺省 fail-closed。
  *
- * 覆盖：成功写文件（默认/显式输出路径、prompt/size/format 透传、输入字节透传）、
+ * 覆盖：成功写文件（默认/显式输出路径、输入字节透传）、
  * fail-closed MODEL_CHANNEL_UNAVAILABLE、调用失败 MODEL_CHANNEL_FAILED、
  * 空响应 MODEL_RESPONSE_INVALID、INVALID_ARGUMENTS、PATH_OUTSIDE_WORKSPACE、
  * FILE_NOT_FOUND、取消（signal abort）。零网络零模型。
+ * （generate_image 已迁出到 images 域，其接线测试见 tests/images/。）
  */
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
@@ -18,7 +19,6 @@ import { createMediaToolDefinitions } from '../../src/media/tools.ts'
 import { createNodeFsMediaFs } from '../../src/media/adapters/mediaFs.ts'
 import { MediaErrorCode } from '../../src/media/domain/errors.ts'
 import type {
-  ChannelGenerateImageRequest,
   ChannelImagePort,
   ChannelImageResult,
   ChannelRemoveBackgroundRequest,
@@ -64,29 +64,17 @@ async function writeBytes(dir: string, relativePath: string, bytes: Uint8Array):
   return fullPath
 }
 
-/** 最小 JPEG 头字节（FF D8 FF E0 ... JFIF；magic bytes 校验只需前 3 字节） */
-function jpegBytes(): Uint8Array {
-  return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01])
-}
-
 /** 记录调用的 mock 渠道（默认返回 1x1 PNG；可覆盖方法行为） */
-interface MockChannel extends ChannelImagePort {
-  generateCalls: ChannelGenerateImageRequest[]
+interface MockChannel {
   removeCalls: ChannelRemoveBackgroundRequest[]
+  removeBackground(req: ChannelRemoveBackgroundRequest): Promise<ChannelImageResult>
 }
 
 function createMockChannel(overrides: {
-  generateImage?: (req: ChannelGenerateImageRequest) => Promise<ChannelImageResult>
   removeBackground?: (req: ChannelRemoveBackgroundRequest) => Promise<ChannelImageResult>
 } = {}): MockChannel {
   const channel: MockChannel = {
-    generateCalls: [],
     removeCalls: [],
-    async generateImage(req) {
-      this.generateCalls.push(req)
-      if (overrides.generateImage) return overrides.generateImage(req)
-      return { bytes: png1x1Bytes() }
-    },
     async removeBackground(req) {
       this.removeCalls.push(req)
       if (overrides.removeBackground) return overrides.removeBackground(req)
@@ -97,7 +85,7 @@ function createMockChannel(overrides: {
 }
 
 /** 组装工具集合 + 临时工作区（channel 缺省 → fail-closed） */
-async function makeTools(channel?: ChannelImagePort): Promise<{ ws: string; tools: Map<string, ToolDefinition> }> {
+async function makeTools(channel?: Pick<ChannelImagePort, 'removeBackground'>): Promise<{ ws: string; tools: Map<string, ToolDefinition> }> {
   const ws = await createTempDir('dsh-media-model-')
   const tools = new Map(
     createMediaToolDefinitions(
@@ -108,193 +96,6 @@ async function makeTools(channel?: ChannelImagePort): Promise<{ ws: string; tool
   )
   return { ws, tools }
 }
-
-describe('generate_image（成功路径，mock 渠道）', () => {
-  test('成功：默认输出 media-output/gen-<ts>.png，prompt/size/format 透传', async () => {
-    const channel = createMockChannel()
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a red cat', size: '512x512', format: 'png' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(true)
-      expect(result.successCount).toBe(1)
-      expect(result.failedCount).toBe(0)
-      expect(result.paths).toHaveLength(1)
-      const outputPath = result.paths[0]!
-      expect(path.dirname(outputPath)).toBe(path.join(ws, 'media-output'))
-      expect(path.basename(outputPath)).toMatch(/^gen-\d+\.png$/)
-      const bytes = await fs.readFile(outputPath)
-      expect(Buffer.compare(bytes, Buffer.from(png1x1Bytes()))).toBe(0)
-      expect(channel.generateCalls).toHaveLength(1)
-      expect(channel.generateCalls[0]).toMatchObject({ prompt: 'a red cat', size: '512x512', format: 'png' })
-      expect(channel.generateCalls[0]!.signal).toBeDefined()
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('成功：显式 output_path 写入指定路径，format jpg 归一为 jpeg 透传', async () => {
-    // format=jpg 时期望输出 JPEG 字节（H-17 magic bytes 一致性校验），mock 返回 JPEG
-    const channel = createMockChannel({
-      generateImage: async () => ({ bytes: jpegBytes(), format: 'jpeg', mime: 'image/jpeg' }),
-    })
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat', format: 'jpg', output_path: 'art/gen.png' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(true)
-      expect(result.paths[0]).toBe(path.join(ws, 'art', 'gen.png'))
-      expect(channel.generateCalls[0]!.format).toBe('jpeg')
-      const written = await fs.readFile(path.join(ws, 'art', 'gen.png'))
-      expect(written[0]).toBe(0xff)
-      expect(written[1]).toBe(0xd8)
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('成功：默认输出格式 png 优先（无 format/无 output_path 扩展名）', async () => {
-    const channel = createMockChannel()
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(true)
-      expect(path.basename(result.paths[0]!)).toMatch(/^gen-\d+\.png$/)
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('generate_image（失败路径）', () => {
-  test('fail-closed：未注入渠道 → GRAY_MEDIA_MODEL_CHANNEL_UNAVAILABLE，不写文件', async () => {
-    const { ws, tools } = await makeTools()
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.failedCount).toBe(1)
-      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_CHANNEL_UNAVAILABLE)
-      await expect(fs.stat(path.join(ws, 'media-output'))).rejects.toThrow()
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('渠道抛非 MediaError → GRAY_MEDIA_MODEL_CHANNEL_FAILED', async () => {
-    const channel = createMockChannel({
-      generateImage: async () => {
-        throw new Error('provider timeout')
-      },
-    })
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_CHANNEL_FAILED)
-    } finally {
- await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('渠道返回空字节 → GRAY_MEDIA_MODEL_RESPONSE_INVALID', async () => {
-    const channel = createMockChannel({
-      generateImage: async () => ({ bytes: new Uint8Array(0) }),
-    })
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('渠道返回文本字节冒充图片 → GRAY_MEDIA_MODEL_RESPONSE_INVALID，不落盘（H-17）', async () => {
-    const channel = createMockChannel({
-      generateImage: async () => ({ bytes: new TextEncoder().encode('this is not an image at all') }),
-    })
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat', format: 'png' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
-      expect(result.results[0]?.error).toContain('image')
-      // 未通过校验 → 不落盘（media-output 目录不应产生）
-      await expect(fs.stat(path.join(ws, 'media-output'))).rejects.toThrow()
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('渠道声明 format 与 magic bytes 冲突 → GRAY_MEDIA_MODEL_RESPONSE_INVALID（H-17）', async () => {
-    const channel = createMockChannel({
-      generateImage: async () => ({ bytes: png1x1Bytes(), format: 'jpeg' }),
-    })
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.results[0]?.code).toBe(MediaErrorCode.MODEL_RESPONSE_INVALID)
-      expect(result.results[0]?.error).toContain('jpeg')
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('缺 prompt → schema 层拒绝（ToolArgsError，不进入 execute）', async () => {
-    const { ws, tools } = await makeTools()
-    try {
-      const error = (await tools.get('generate_image')!.execute({}, makeExec(ws)).catch(e => e)) as Error
-      expect(error.message).toContain('invalid arguments')
-      expect(error.message).toContain('prompt')
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-
-  test('取消：signal 已中止 → 整批取消，渠道不被调用', async () => {
-    const channel = createMockChannel()
-    const { ws, tools } = await makeTools(channel)
-    try {
-      const controller = new AbortController()
-      controller.abort()
-      const result = (await tools.get('generate_image')!.execute(
-        { prompt: 'a cat' },
-        makeExec(ws, controller.signal),
-      )) as ToolResult
-      expect(result.success).toBe(false)
-      expect(result.code).toBe(MediaErrorCode.CANCELLED)
-      expect(result.cancelledCount).toBe(1)
-      expect(result.results[0]?.cancelled).toBe(true)
-      expect(channel.generateCalls).toHaveLength(0)
-    } finally {
-      await fs.rm(ws, { recursive: true, force: true })
-    }
-  })
-})
 
 describe('remove_background（成功路径，mock 渠道）', () => {
   test('成功：读取输入字节，默认输出 <name>-bg-removed-<ts>.png', async () => {

@@ -285,6 +285,9 @@ describe('workflow overview view model', () => {
     expect(workspaceLabelOf('C:\\dev\\alpha')).toBe('alpha')
     expect(workspaceLabelOf('C:\\dev\\alpha\\')).toBe('alpha')
     expect(workspaceLabelOf('C:\\')).toBe('C:')
+    // bare roots label themselves instead of degrading to an empty string
+    expect(workspaceLabelOf('/')).toBe('/')
+    expect(workspaceLabelOf('\\')).toBe('\\')
     expect(workspaceLabelOf('')).toBe('')
   })
 
@@ -384,6 +387,13 @@ describe('workflow overview view model', () => {
     expect(formatWorkflowRunTime(Number.NaN)).toBe('—')
     expect(formatWorkflowRunTime(1_700_000_000_000)).not.toBe('—')
   })
+
+  it('degrades out-of-range timestamps to the neutral dash (no RangeError)', () => {
+    // Finite but beyond the ±8.64e15 ms Date range: Intl formatting would throw.
+    expect(formatWorkflowRunTime(8.65e15)).toBe('—')
+    expect(formatWorkflowRunTime(-8.65e15)).toBe('—')
+    expect(formatWorkflowRunTime(Number.MAX_SAFE_INTEGER)).toBe('—')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -439,11 +449,42 @@ describe('workflow overview paging', () => {
     expect(second.revision).toBe(first.revision + 1)
   })
 
+  it('append with zero new items and a live cursor terminates paging (no dead loop)', () => {
+    const first = applyWorkflowPageLoaded(createWorkflowOverviewPageState(), {
+      items: [summary(), summary({ id: '.graycode/review/r1.md', kind: 'review' })],
+      total: 4,
+      nextCursor: '.graycode/review/r1.md',
+    }, 'replace')
+    expect(first.hasMore).toBe(true)
+    // The host re-delivers a page of already-loaded items and still reports a
+    // cursor — appending it must terminate instead of looping forever.
+    const stuck = applyWorkflowPageLoaded(first, {
+      items: [
+        summary({ id: '.graycode/review/r1.md', kind: 'review' }),
+        summary(),
+      ],
+      total: 4,
+      nextCursor: '.graycode/progress.md',
+    }, 'append')
+    expect(stuck.entries).toHaveLength(2)
+    expect(stuck.hasMore).toBe(false)
+    expect(stuck.nextCursor).toBeNull()
+    expect(nextWorkflowPageRequest(stuck)).toEqual({ cursor: null })
+  })
+
   it('merge keeps the first occurrence per id', () => {
     const a = buildWorkflowRunView(summary({ id: 'a', kind: 'review' }))
     const b = buildWorkflowRunView(summary({ id: 'b', kind: 'plan' }))
     const merged = mergeWorkflowRunViews([a, b], [b, a])
     expect(merged.map((run) => run.id)).toEqual(['a', 'b'])
+  })
+
+  it('merge dedupes by workspace + id (ids repeat across workspaces)', () => {
+    const alpha = buildWorkflowRunView(summary({ id: '.graycode/progress.md', workspace: 'C:\\dev\\alpha' }))
+    const beta = buildWorkflowRunView(summary({ id: '.graycode/progress.md', workspace: '/home/dev/beta' }))
+    const merged = mergeWorkflowRunViews([alpha], [beta, alpha])
+    expect(merged).toHaveLength(2)
+    expect(merged.map((run) => run.workspace)).toEqual(['C:\\dev\\alpha', '/home/dev/beta'])
   })
 
   it('records failures without dropping loaded entries', () => {
@@ -665,7 +706,7 @@ describe('mock source through the paging state machine', () => {
       const request = nextWorkflowPageRequest(state)
       if (request === null) break
       state = applyWorkflowPageLoading(state)
-      const result = await source.list({ limit: 2, cursor: request.cursor, workspace })
+      const result = await source.list({ limit: 2, cursor: request.cursor ?? undefined, workspace })
       state = applyWorkflowPageLoaded(state, result, 'append')
       if (!state.hasMore) break
     }
@@ -684,7 +725,7 @@ describe('mock source through the paging state machine', () => {
     try {
       await source.list({ workspace: 'C:\\dev\\alpha' })
     } catch (error) {
-      state = applyWorkflowPageError(state, error as { code: string; message: string; details: object })
+      state = applyWorkflowPageError(state, error as { code: string; message: string; details: Record<string, unknown> })
     }
     expect(state.phase).toBe('error')
     expect(state.error?.code).toBe('GRAY_INTERNAL')
@@ -733,13 +774,13 @@ describe('graycode.workflowOverview locale dictionaries', () => {
       expect(en[`phase.${phase}`], phase).toBeDefined()
     }
     for (const code of ['invalidInput', 'conflict', 'approvalRequired', 'cancelled', 'storageCorrupt', 'notFound', 'endpointNotFound', 'internal', 'unknown']) {
-      expect(en[`error.${code}`], code).toBeDefined()
+      expect((en as Record<string, string>)[`error.${code}`], code).toBeDefined()
     }
     for (const unit of ['bytes', 'kb', 'mb', 'gb']) {
-      expect(en[`size.${unit}`], unit).toBeDefined()
+      expect((en as Record<string, string>)[`size.${unit}`], unit).toBeDefined()
     }
     for (const label of ['title', 'filter.workspace', 'filter.sessionUnavailable', 'list.empty', 'list.loadMore', 'state.replayOnly', 'run.locateSession', 'run.openDocument']) {
-      expect(en[label], label).toBeDefined()
+      expect((en as Record<string, string>)[label], label).toBeDefined()
     }
   })
 })

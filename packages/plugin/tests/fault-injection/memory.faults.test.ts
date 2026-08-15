@@ -103,13 +103,15 @@ describe('memory_note：LOG 追加写入失败', () => {
       const backupDir = `${storeDir}.bak`
 
       // 注入故障：存储目录整体暂时不可用（等价于磁盘/挂载点写失败）
+      const storeContentsBefore = fs.readdirSync(storeDir).sort()
       fs.renameSync(storeDir, backupDir)
       const failed = await captureError(note.execute({ text: 'second' }, fakeExec(wsDir)))
       expect(failed).toBeInstanceOf(Error)
       expect((failed as Error).message).toMatch(/ENOENT|no such file/i)
 
-      // 期望最终状态：无半条记录——失败后原路径没有任何新建文件
-      expect(fs.existsSync(storeDir)).toBe(false)
+      // 期望最终状态：无半条记录——失败调用未在（暂存更名后的）存储目录留下任何新文件。
+      // 旧断言 fs.existsSync(storeDir)===false 只是复述刚发生的 rename，恒真无信息量。
+      expect(fs.readdirSync(backupDir).sort()).toEqual(storeContentsBefore)
 
       // 故障消除后重写：id 连续（0 → 1），无空洞、无半条记录
       fs.renameSync(backupDir, storeDir)

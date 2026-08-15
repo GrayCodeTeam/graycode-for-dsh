@@ -8,11 +8,16 @@
  * 可并行**，并升级为**跨进程文件锁**：
  *
  * - 锁文件：`<lockDir>/<sha256(workspaceId) 前 32 hex>.lock`，原子创建（`wx`）即持有；
- * - 持有者元数据（pid/createdAt/ownerId）+ **心跳刷新**（周期写回句柄，更新 mtime/createdAt）
- *   ——陈旧锁检测只对「长时间无心跳」的锁生效，长操作（大工作区恢复）不会被误判打破；
+ * - 持有者元数据（pid/createdAt/ownerId/ownerToken）+ **心跳刷新**（周期写回句柄，
+ *   更新 mtime/createdAt）——陈旧锁检测只对「长时间无心跳」的锁生效，长操作
+ *   （大工作区恢复）不会被误判打破；
+ * - **M1 原子接管（防分裂窗口）**：陈旧锁以 `rename` 原子认领（同一路径只有一方成功），
+ *   认领后复核内容仍与观察到的陈旧内容一致（持有者心跳刷新则放弃接管并还原）才删除并接管；
+ *   持有者释放前校验锁仍指向自己（ownerToken 匹配）才 unlink——暂停期间被接管的旧持有者
+ *   恢复时不会破坏新持有者的锁；心跳同时校验所有权，被接管后停止续租并告警。
  * - 获取**超时**（lockTimeoutMs，缺省 5 分钟；<= 0 = 不限时）与轮询重试；
  * - **Windows 兼容**：EPERM/EACCES（他进程持有句柄、杀软瞬时占用）按「未获取」重试；
- *   打破陈旧锁时 unlink 遇 EPERM = 持有者可能存活，放弃打破；
+ *   打破陈旧锁时 rename/unlink 遇 EPERM = 持有者可能存活，放弃打破；
  *   释放先 close 文件句柄再 unlink（句柄释放），unlink 失败残留的锁由陈旧检测兜底。
  *
  * 进程内保留队列调度（公平排队、abort 取消、队列容量上限、同 owner 可重入），
@@ -99,6 +104,12 @@ interface LockFileMeta {
     pid: number;
     createdAt: number;
     ownerId: string;
+    /**
+     * M1：本次获取生成的唯一 owner token——原子接管（CAS）与所有权校验的比对依据。
+     * 心跳刷新只更新 createdAt（token 不变）；接管方与持有者均以 token 区分
+     * 「我的锁」与「别人的锁」。
+     */
+    token: string;
 }
 
 /** 单个工作区的跨进程文件锁（原子创建 + 心跳 + 陈旧检测 + 句柄释放） */
@@ -116,7 +127,7 @@ class WorkspaceFileLock {
     /**
      * 尝试获取锁（原子创建锁文件）。成功返回 release（句柄关闭 + 锁文件删除）；
      * 失败返回 null（调用方轮询重试）。陈旧锁：createdAt（内容元数据，优先）或 mtime
-     * 超过 staleLockMs 时尝试打破（unlink）后立即重试一次。
+     * 超过 staleLockMs 时经原子接管（M1）后立即重试一次。
      */
     async tryAcquire(ownerId: string): Promise<(() => Promise<void>) | null> {
         let handle: FileHandle;
@@ -125,8 +136,8 @@ class WorkspaceFileLock {
         } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
             if (code === 'EEXIST') {
-                if (await this.tryBreakStaleLock()) {
-                    // 已打破陈旧锁（或锁已被移除）：立即重试一次创建
+                if (await this.tryTakeoverStaleLock()) {
+                    // 陈旧锁已原子清除（或已被其他等待者移除）：立即重试一次创建
                     return this.tryAcquire(ownerId);
                 }
                 return null;
@@ -139,7 +150,8 @@ class WorkspaceFileLock {
             throw err;
         }
 
-        const meta: LockFileMeta = { pid: process.pid, createdAt: this.now(), ownerId };
+        const token = crypto.randomBytes(8).toString('hex');
+        const meta: LockFileMeta = { pid: process.pid, createdAt: this.now(), ownerId, token };
         try {
             await handle.writeFile(`${JSON.stringify(meta)}\n`, 'utf-8');
         } catch {
@@ -159,6 +171,17 @@ class WorkspaceFileLock {
                 void handle
                     .writeFile(`${JSON.stringify({ ...meta, createdAt: this.now() })}\n`, 'utf-8')
                     .catch(() => {});
+                // M1：持有者侧接管检测——锁文件不再指向我们（token 不匹配/已消失）时停止心跳，
+                // 避免持续「续租」一具已被接管的幽灵锁，并留下分裂诊断。
+                void this.verifyOwnership(token).then(owned => {
+                    if (!owned && heartbeat !== undefined) {
+                        clearInterval(heartbeat);
+                        console.warn(
+                            `[CheckpointOperationLock] Lock ${this.lockPath} was taken over by another ` +
+                            `process while held (owner ${ownerId}); stopping heartbeat.`
+                        );
+                    }
+                });
             }, intervalMs);
             // 不让心跳定时器阻止进程退出
             if (typeof heartbeat.unref === 'function') {
@@ -176,16 +199,39 @@ class WorkspaceFileLock {
             }
             // 文件句柄释放：先 close 再 unlink（Windows 上句柄未释放时 unlink 可能 EPERM）
             await handle.close().catch(() => {});
-            await this.unlinkBestEffort();
+            // M1：所有权守卫——只有锁文件仍指向我们（token 匹配）才 unlink。
+            // 持有者暂停期间锁被接管后，恢复的旧持有者绝不能 unlink 新持有者的锁文件
+            // （否则会打破新持有者的锁造成双写分裂）。
+            if (await this.verifyOwnership(token)) {
+                await this.unlinkBestEffort();
+            }
         };
     }
 
-    /** 陈旧锁检测与打破：createdAt（内容元数据优先）或 mtime 超过 staleLockMs 才打破 */
-    private async tryBreakStaleLock(): Promise<boolean> {
+    /**
+     * M1：陈旧锁的**原子接管**（CAS via rename），替代修复前的「read→unlink→create」三步
+     * 非原子打破。
+     *
+     * 修复前的问题：两进程可各自读到陈旧锁并分别 unlink+create（或持有者心跳恰在「读陈旧」
+     * 与「unlink」之间刷新，把仍新鲜的锁打破）——互相认对方陈旧导致分裂窗口。
+     *
+     * 修复后：
+     * 1. 读取锁内容 → 判定陈旧（createdAt 优先，损坏内容回退 mtime）；
+     * 2. 以 `rename` **原子认领**陈旧锁到唯一接管名——同一 lockPath 只有一方能成功
+     *    （其余得到 ENOENT 回退），两进程不可能同时完成接管；
+     * 3. 认领后**复核**：重命名出的内容必须仍与观察到的陈旧内容逐字节一致。持有者若在
+     *    「读陈旧」与「rename」之间刷新了心跳（内容变化），说明锁实际仍新鲜——放弃接管
+     *    并还原（rename 回去），绝不打破活锁；
+     * 4. 复核通过才删除陈旧锁文件，返回 true 让调用方重试创建。
+     *
+     * 返回 true = 陈旧锁已清除/已消失，可立即重试创建；false = 锁新鲜或接管失败，等待。
+     */
+    private async tryTakeoverStaleLock(): Promise<boolean> {
+        let observed = '';
         let stale = false;
         try {
-            const raw = await fs.readFile(this.lockPath, 'utf-8');
-            const parsed = JSON.parse(raw) as Partial<LockFileMeta>;
+            observed = await fs.readFile(this.lockPath, 'utf-8');
+            const parsed = JSON.parse(observed) as Partial<LockFileMeta>;
             if (typeof parsed.createdAt === 'number') {
                 stale = this.now() - parsed.createdAt > this.staleLockMs;
             } else {
@@ -203,7 +249,55 @@ class WorkspaceFileLock {
         if (!stale) {
             return false;
         }
-        return this.unlinkBestEffort();
+
+        // 原子认领：rename 到唯一接管名（内容随 inode 原样迁移，便于复核）。
+        // EPERM/EACCES（Windows 上他进程仍持有打开句柄）→ 持有者可能存活，保守等待。
+        const takeoverTemp = `${this.lockPath}.takeover.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+        try {
+            await fs.rename(this.lockPath, takeoverTemp);
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'ENOENT') {
+                return true; // 锁已被其他等待者接管/移除：重试创建
+            }
+            return false;
+        }
+
+        try {
+            // 接管前校验：重命名出的内容必须仍与观察到的陈旧内容一致。
+            // 若不一致（持有者心跳刷新 / 文件被他人替换）→ 锁并非我们检测到的那把，放弃接管。
+            const claimedRaw = await fs.readFile(takeoverTemp, 'utf-8');
+            if (claimedRaw !== observed) {
+                await fs.rename(takeoverTemp, this.lockPath).catch(() => {});
+                return false;
+            }
+        } catch {
+            // 复核读失败：无法确认锁仍指向检测到的持有者 → 保守放弃接管。
+            // 还原失败时尽力删除接管文件，避免残留。
+            await fs.rename(takeoverTemp, this.lockPath).catch(() =>
+                fs.unlink(takeoverTemp).catch(() => {})
+            );
+            return false;
+        }
+
+        // 校验通过：删除陈旧锁文件（此时锁已不再指向旧持有者），调用方重试创建。
+        await fs.unlink(takeoverTemp).catch(() => {});
+        return true;
+    }
+
+    /**
+     * M1：所有权校验——锁文件是否仍指向我们（token 匹配）。
+     * 用于：心跳期的接管检测（被接管后停止续租）与释放前的 unlink 守卫
+     * （绝不删除别人的锁）。文件不存在/内容损坏/读失败一律按「不再持有」处理（fail-closed）。
+     */
+    private async verifyOwnership(token: string): Promise<boolean> {
+        try {
+            const raw = await fs.readFile(this.lockPath, 'utf-8');
+            const parsed = JSON.parse(raw) as Partial<LockFileMeta>;
+            return parsed.token === token;
+        } catch {
+            return false;
+        }
     }
 
     private async unlinkBestEffort(): Promise<boolean> {

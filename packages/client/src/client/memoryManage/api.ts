@@ -172,6 +172,12 @@ function withMemoryTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   })
 }
 
+/** UTF-8 byte length of a string (TextEncoder in browsers; fallback for node). */
+function utf8Bytes(text: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length
+  return text.length
+}
+
 // ==================== Mock transport (demo / unwired host) ====================
 
 /** Seed entry for the mock store; entries without a scope default to 'global'. */
@@ -353,6 +359,17 @@ export function createMockMemoryTransport(
       if (text.length === 0) {
         return invalid('text must be a non-empty string', { field: 'text' })
       }
+      if (text.includes('\n') || text.includes('\r')) {
+        // Host `memory/note` contract: "A memory is one line." (4.4-L4).
+        return invalid('a memory is one line of text', { field: 'text' })
+      }
+      if (utf8Bytes(text) > config.entryChars) {
+        return invalid(`text exceeds entryChars (${config.entryChars} bytes)`, {
+          field: 'text',
+          actualBytes: utf8Bytes(text),
+          limit: config.entryChars,
+        })
+      }
       const scope = params.scope ?? 'global'
       const workspace = scope === 'workspace' ? targetWorkspaceOf(params) : undefined
       if (scope === 'workspace' && workspace === undefined) {
@@ -369,8 +386,20 @@ export function createMockMemoryTransport(
 
     async edit(params, signal) {
       if (signal?.aborted) return cancelled()
-      if (params.text.trim().length === 0) {
+      const text = params.text.trim()
+      if (text.length === 0) {
         return invalid('text must be a non-empty string', { field: 'text' })
+      }
+      if (text.includes('\n') || text.includes('\r')) {
+        // Host `memory/edit` contract: "A memory is one line." (4.4-L4).
+        return invalid('a memory is one line of text', { field: 'text' })
+      }
+      if (utf8Bytes(text) > config.entryChars) {
+        return invalid(`text exceeds entryChars (${config.entryChars} bytes)`, {
+          field: 'text',
+          actualBytes: utf8Bytes(text),
+          limit: config.entryChars,
+        })
       }
       const targetScope = params.scope ?? 'global'
       const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
@@ -384,7 +413,7 @@ export function createMockMemoryTransport(
       if (entry === undefined) {
         return notFound(`memory entry #${params.id} not found`, { id: params.id })
       }
-      entry.text = params.text // in-memory overwrite; id/date preserved
+      entry.text = text // in-memory overwrite; id/date preserved (host stores trimmed)
       storeRevision += 1
       return { ok: true, value: { id: entry.id, date: entry.date, text: entry.text } }
     },

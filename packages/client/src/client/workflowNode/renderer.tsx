@@ -62,12 +62,13 @@ export function createWorkflowNodeRenderer(options: WorkflowNodeRendererOptions)
  * Narrow a chat view node (or any unknown value) to a workflow chat node.
  * The `kind` check is the dispatch key; `data` is a structural object check
  * only — the payload shape is guaranteed by the workflow Definition's
- * `buildViewNode` (definition.ts), which this package owns.
+ * `buildViewNode` (definition.ts), which this package owns. Arrays are
+ * rejected up front — a kind-tagged array is still not a chat node (audit L3).
  */
 export function isWorkflowChatNode(
   node: unknown,
 ): node is { readonly kind: typeof WORKFLOW_KIND; readonly data: WorkflowNodeData } {
-  if (node === null || typeof node !== 'object') return false
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return false
   const candidate = node as { readonly kind?: unknown; readonly data?: unknown }
   if (candidate.kind !== WORKFLOW_KIND) return false
   const data = candidate.data

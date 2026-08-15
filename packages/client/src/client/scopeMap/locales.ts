@@ -50,6 +50,7 @@ export type GrayCodeScopeMapLocaleKey =
   | 'error.endpointNotFound'
   | 'error.internal'
   | 'error.unknown'
+  | 'error.sourceDirMissing'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -98,6 +99,7 @@ export const graycodeScopeMapDictionaries: Record<LocaleId, LocaleDictOf<'grayco
     'error.endpointNotFound': 'DSH 服务未接入',
     'error.internal': '内部错误',
     'error.unknown': '未知错误',
+    'error.sourceDirMissing': '未配置 sourceDir（源目录）',
   },
   en: {
     title: 'Migration workspace memory mapping',
@@ -130,6 +132,7 @@ export const graycodeScopeMapDictionaries: Record<LocaleId, LocaleDictOf<'grayco
     'error.endpointNotFound': 'DSH service not connected',
     'error.internal': 'Internal error',
     'error.unknown': 'Unknown error',
+    'error.sourceDirMissing': 'Missing sourceDir (source directory)',
   },
 }
 
@@ -170,4 +173,5 @@ export const graycodeScopeMapJaPlaceholder: LocaleDict = {
   'error.endpointNotFound': 'DSH サービスが未接続です',
   'error.internal': '内部エラー',
   'error.unknown': '不明なエラー',
+  'error.sourceDirMissing': 'sourceDir（ソースディレクトリ）が設定されていません',
 }

@@ -167,9 +167,12 @@ export function restoreMachineStep(state: RestoreStep, action: RestoreAction): R
           details: {},
         }, preview, action.at)
       }
-      if (action.outcome.previewToken === undefined || action.outcome.previewToken.length === 0) {
-        // A successful preview without a token cannot be confirmed — treat as
-        // approval missing (the host contract guarantees a token, defensively).
+      const rawToken = typeof action.outcome.previewToken === 'string' ? action.outcome.previewToken.trim() : ''
+      if (rawToken.length === 0) {
+        // A successful preview without a usable token cannot be confirmed —
+        // treat as approval missing (the host contract guarantees a token,
+        // defensively). Trimming first (4.6-L1) keeps a whitespace-only token
+        // from ever becoming the binding previewId.
         return previewFailed(state, {
           code: GRAY_RESTORE_REMOTE_CODES.APPROVAL_REQUIRED,
           message: 'preview succeeded but no previewToken was issued',
@@ -177,7 +180,7 @@ export function restoreMachineStep(state: RestoreStep, action: RestoreAction): R
         }, preview, action.at)
       }
       const session: RestoreSession = {
-        previewId: action.outcome.previewToken,
+        previewId: rawToken,
         checkpointId: state.pending.checkpointId,
         workspace: state.pending.workspace,
         deleteUntrackedFiles: state.pending.deleteUntrackedFiles,

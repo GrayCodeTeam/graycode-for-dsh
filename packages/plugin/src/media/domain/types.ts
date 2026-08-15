@@ -32,6 +32,9 @@ export type OutputFormat = (typeof OUTPUT_FORMATS)[number]
 /** 老插件批量上限默认值（crop/resize/rotate 默认 10） */
 export const DEFAULT_MAX_BATCH = 10
 
+/** 批量上限硬顶（L9：schema 与运行时统一约束，防止配置/直传超大值放大资源消耗面） */
+export const MAX_MEDIA_MAX_BATCH = 100
+
 /** 尺寸信息（老版 originalDimensions/croppedDimensions 同构） */
 export interface Dimensions {
   width: number

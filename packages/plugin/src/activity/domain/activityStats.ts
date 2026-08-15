@@ -191,17 +191,22 @@ export function rangeToDays(range: ActivityRange): number {
  * @param query 查询参数
  * @param now   当前时间（测试注入）
  * @param minuteMs 采样间隔/分钟粒度（默认 60s）
+ * @param currentSessionSamples 仅用于 currentSession 的采样集（4.15-L1：range='today'
+ *   时服务层多加载昨天一天注入，跨午夜归集会话起点；daily/today/hourly/monthly 不受影响）
  */
 export function aggregateActivity(
   files: DayActivityFile[],
   query: ActivityStatsQuery = {},
   now: number = Date.now(),
   minuteMs: number = ACTIVITY_HEARTBEAT_MS,
+  currentSessionSamples?: number[],
 ): ActivityStatsResult {
   const recent = [...files].sort((a, b) => a.date.localeCompare(b.date))
 
-  // 当前连续会话判断只取最近 2 天采样拼接（跨午夜不中断）
-  const recentAll = recent.slice(-2).flatMap((day) => day.samples)
+  // 当前连续会话判断：默认取最近 2 天采样拼接（跨午夜不中断）。4.15-L1：range='today'
+  // 时服务层额外加载昨天一天并注入 currentSessionSamples——daily/today 按日历日只报
+  // 今天，而 currentSession 需归集跨午夜起点（昨晚开始、今晨继续的会话）。
+  const recentAll = currentSessionSamples ?? recent.slice(-2).flatMap((day) => day.samples)
 
   const includeHourly = query.includeHourly === true
   const daily: DayActivityStats[] = []

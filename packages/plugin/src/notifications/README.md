@@ -65,6 +65,13 @@ shell；标题/正文经环境变量注入，无引号注入面）运行 `WINDOW
 或静默失败 → 脚本非零退出 → 投递 failed。README 记录的升级路径：应用标识
 齐全后无需改代码即可实际弹 toast；在此之前语义为 fail-closed（不静默假报成功）。
 
+**silent / level 后端处理（3.15-M4）**：`silent:true` 在 toast XML 上设置
+`<audio silent="true"/>`（静音，深夜静音通知不再响铃）；`level:'error'` 映射为
+`ToastNotificationPriority::High` 高优先级 toast（需 Windows 10 1809+）。两处均为
+best-effort：旧系统/模板差异导致增强失败时以默认行为投递，不影响主流程
+（外层 try/catch 仍是唯一 fail-closed 点，只有主投递失败才返回 failed）。
+`info/success/warning` 当前不映射优先级（默认 Toast 优先级）。
+
 ### 失败隔离
 
 - service.deliver 全 try/catch：后端不可用（skipped）、后端失败（failed）、

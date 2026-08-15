@@ -241,17 +241,20 @@ foreach ($tgzFile in $tarballs) {
       continue
     }
 
+    # path traversal - checked on the RAW entry BEFORE any './' trimming:
+    # TrimStart('./') is a character-set trim (any leading '.' or '/'), so it
+    # would silently eat a leading '..' and bypass this check (4.21-L3).
+    if ($raw -match '(^|/)\.\.(/|$)') {
+      $violations.Add("path traversal '..': '$raw'")
+      continue
+    }
+
     $norm = $raw.TrimStart('./')
     # normalize backslashes to forward slashes for uniform matching
     $norm = $norm -replace '\\', '/'
 
     if ($norm -match '(^|/)[A-Za-z]:[\\/]') {
       $violations.Add("drive-letter path embedded: '$raw'")
-      continue
-    }
-    # path traversal
-    if ($norm -match '(^|/)\.\.(/|$)') {
-      $violations.Add("path traversal '..': '$raw'")
       continue
     }
     # everything in a publishable npm tarball lives under package/

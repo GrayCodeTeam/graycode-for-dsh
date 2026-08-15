@@ -19,8 +19,9 @@
  *   clearIfCurrent 只清理「仍是自己安装」的钩子——旧 stagedDiff 纤维的卸载不会把
  *   新实例刚安装的钩子置 null（消除「卸载与新 provide 之间钩子丢失」窗口）。
  *
- * 失败语义（best-effort）：stageWrite 抛错由 writeTargetText 捕获并回退直接落盘，
- * 以 warnings 上报，不阻断主文档流程。
+ * 失败语义（fail-closed，3.17-M2）：stageWrite 抛错（存储失败/校验拒绝等）时
+ * writeTargetText 直接向上抛，绝不回退直接落盘——审阅门闸一旦启用就不能被静默
+ * 绕过；工具层把该错误如实上报，不假报完成。
  */
 import type { StagedDiffServiceHandle } from '../stagedDiff/adapters/dsh/index.ts'
 

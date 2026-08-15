@@ -34,6 +34,12 @@ export interface PresetInjection {
   /** Rendered body text (placeholder-rendered by the caller). */
   text: string
   /**
+   * 源预设条目的渲染序号（entry.order）。placeInjections 直接以它对照 chat_history
+   * marker 切分，避免 disabled/空文本条目让「按下标与 user/assistant 块配对」错位
+   * （3.15-M3：注入被放错历史一侧）。
+   */
+  entryOrder: number
+  /**
    * Fake-thought text (trimmed) for role=assistant entries when
    * sendHistoryThoughts is on; maps to a `{type:'reasoning'}` block.
    *
@@ -73,7 +79,7 @@ export function presetEntriesToInjections(
     // Old Gray skipped entries whose rendered text was empty.
     if (text.trim().length === 0) continue
     const thought = entry.fakeThought?.trim()
-    const injection: PresetInjection = { role, text }
+    const injection: PresetInjection = { role, text, entryOrder: entry.order }
     if (role === 'assistant' && sendHistoryThoughts && thought && thought.length > 0) {
       injection.thought = thought
     }
@@ -96,19 +102,20 @@ export function placementOf(
 }
 
 /**
- * Pair sorted injections with their placement. `injections` must be in the
- * same render order as the user/assistant entries inside `blockOrders` (the
- * k-th injection matches the k-th user/assistant block); system and
- * chat_history blocks are skipped as anchors only.
+ * Pair sorted injections with their placement. Each injection carries its source
+ * entry's render order (see {@link PresetInjection.entryOrder}), so placement is
+ * decided against the chat_history marker directly — no index-pairing with the
+ * user/assistant blocks in `blockOrders`. This is what keeps disabled / empty
+ * entries from shifting the pairing and dropping injections on the wrong side of
+ * the history (3.15-M3).
  */
 export function placeInjections(
   injections: readonly PresetInjection[],
   blockOrders: ReadonlyArray<{ role: string; order: number }>,
 ): ReadonlyArray<{ injection: PresetInjection; placement: InjectionPlacement }> {
-  const entryBlocks = blockOrders.filter(block => block.role === 'user' || block.role === 'assistant')
-  return injections.map((injection, index) => ({
+  return injections.map((injection) => ({
     injection,
-    placement: placementOf(blockOrders, entryBlocks[index]?.order ?? Number.MAX_SAFE_INTEGER),
+    placement: placementOf(blockOrders, injection.entryOrder),
   }))
 }
 

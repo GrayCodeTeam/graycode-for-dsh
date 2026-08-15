@@ -208,12 +208,24 @@ export function ScopeMapPanel({ t, dataSource, sourceDir, transport }: ScopeMapP
   // on manual retry via revision). Aborting the controller drops stale responses.
   useEffect(() => {
     if (source === undefined) return
+    // 4.7-L5：remote 未配置 sourceDir 属「输入无效」——不发请求，避免宿主对空
+    // sourceDir 的报错被误判为误导性的「内部错误」（该错误码不可重试，无重试按钮）。
+    if (dataSource === 'remote' && (sourceDir === undefined || sourceDir.trim().length === 0)) {
+      setPhase({
+        phase: 'error',
+        error: { code: 'GRAY_SOURCE_DIR_MISSING', message: 'sourceDir is not configured', details: {} },
+      })
+      return
+    }
     const controller = new AbortController()
     setPhase({ phase: 'loading' })
     source.scopeMap({ sourceDir: sourceDir ?? '' }, controller.signal)
       .then((result) => {
         if (disposed.current || controller.signal.aborted) return
         setRows(buildScopeMapRows(result))
+        // 4.7-L1：重取成功后重置旧 selections——过期（不匹配新行集）的手动覆盖
+        // 不得残留，避免把失效覆盖导出为错误的 overrides。
+        setSelections({})
         setPhase({ phase: 'loaded' })
       })
       .catch((error: unknown) => {
@@ -221,7 +233,7 @@ export function ScopeMapPanel({ t, dataSource, sourceDir, transport }: ScopeMapP
         setPhase({ phase: 'error', error: readScopeMapThrownError(error) })
       })
     return () => controller.abort()
-  }, [source, sourceDir, revision])
+  }, [source, sourceDir, revision, dataSource])
 
   const retry = useCallback((): void => {
     setRevision((current) => current + 1)

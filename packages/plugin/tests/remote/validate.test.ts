@@ -31,4 +31,11 @@ describe('slicePage', () => {
     const numeric = [{ id: 3 }, { id: 2 }, { id: 1 }]
     expect(slicePage(numeric, 3, 1)).toEqual({ page: [{ id: 2 }], nextCursor: '2' })
   })
+
+  it('normalizes stringified numeric cursors (L8: 3 === \'3\' 严格比较会永远匹配不上)', () => {
+    const numeric = [{ id: 3 }, { id: 2 }, { id: 1 }]
+    // nextCursor 恒为字符串：调用方原样回传时也必须能定位游标项
+    expect(slicePage(numeric, '3', 1)).toEqual({ page: [{ id: 2 }], nextCursor: '2' })
+    expect(slicePage(numeric, '2', 10)).toEqual({ page: [{ id: 1 }], nextCursor: undefined })
+  })
 })

@@ -16,6 +16,7 @@ import {
   DEFAULT_PERSONA_TEMPLATE,
   PERSONA_SECTION_NAME,
   PERSONA_WORKSPACE_VARIABLE,
+  workspaceNameOf,
   type Config as PersonaConfig,
 } from '../src/persona.ts'
 
@@ -189,5 +190,22 @@ describe('createPersonaRegistrar', () => {
     expect(PERSONA_WORKSPACE_VARIABLE).toBe('graycode_workspace')
     const config: PersonaConfig = { enabled: true, agentScope: 'roots' }
     expect(config.agentScope).toBe('roots')
+  })
+})
+
+describe('workspaceNameOf（L6：cwd → 工作区显示名，判空 + 盘符根安全降级）', () => {
+  test('常规路径取 basename；反斜杠 / 尾部斜杠归一', () => {
+    expect(workspaceNameOf('X:/synthetic/graycode-project')).toBe('graycode-project')
+    expect(workspaceNameOf('C:\\Users\\me\\project')).toBe('project')
+    expect(workspaceNameOf('C:/project/')).toBe('project')
+    expect(workspaceNameOf('//server/share')).toBe('share')
+  })
+
+  test('空值 / 路径根 / 盘符根 → undefined（不退化空串）', () => {
+    expect(workspaceNameOf(undefined)).toBeUndefined()
+    expect(workspaceNameOf('')).toBeUndefined()
+    expect(workspaceNameOf('/')).toBeUndefined()
+    expect(workspaceNameOf('C:/')).toBeUndefined()
+    expect(workspaceNameOf('C:\\')).toBeUndefined()
   })
 })

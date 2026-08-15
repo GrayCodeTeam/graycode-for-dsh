@@ -11,6 +11,7 @@
  * - Secret items are NOT rendered here — they have their own row
  *   (SecretItemRow) that structurally cannot carry a value.
  */
+import { useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { graySettingsDefaultValue } from './catalog.ts'
@@ -100,10 +101,24 @@ const hintStyle: CSSProperties = {
 
 const controlId = (key: string): string => `graycode-settings-${key}`
 
+/**
+ * Draft tokens a `type="number"` input can hold mid-typing but must not be
+ * committed yet ("1.", "1e", "-"): committing them through `Number()` swallows
+ * the trailing token (`Number('1.')` → 1), which is exactly why a plain
+ * controlled value can never type a decimal (4.3-L3).
+ */
+const INCOMPLETE_NUMBER_TAIL = /[.eE+\-]$/
+
 /** One config row. Renders the control matching `item.kind` plus hints. */
 export function ConfigItemRow({ t, item, value, onChange, readOnly }: ConfigItemRowProps): ReactNode {
   const disabled = readOnly === true || onChange === undefined
   const validation = validateGrayValue(item, value)
+  // Number-draft state (4.3-L3): the controlled value round-trips through
+  // `String(Number(raw))`, which swallows intermediate tokens like a trailing
+  // "." — a user typing "1.5" would otherwise end up with "15". While the
+  // field is focused, the raw string owns the display and incomplete drafts
+  // are held here until they parse to a complete number.
+  const [numberDraft, setNumberDraft] = useState<string | null>(null)
   // Defaults only exist on non-secret items; secret rows use SecretItemRow.
   const defaultValue = graySettingsDefaultValue(item)
 
@@ -121,8 +136,11 @@ export function ConfigItemRow({ t, item, value, onChange, readOnly }: ConfigItem
       </div>
       <div style={descriptionStyle}>{t(item.descriptionKey as GrayCodeSettingsContributionLocaleKey)}</div>
 
+      {/* 4.3-L2: the header label (htmlFor) is the single label for this control;
+          a wrapping <label> would duplicate the association (invalid double-label
+          markup), so the on/off indicator is a plain span. */}
       {item.kind === 'boolean' && (
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <input
             id={controlId(item.key)}
             type="checkbox"
@@ -135,7 +153,7 @@ export function ConfigItemRow({ t, item, value, onChange, readOnly }: ConfigItem
             }}
           />
           <span>{value === true ? 'on' : 'off'}</span>
-        </label>
+        </div>
       )}
 
       {item.kind === 'string' && (
@@ -156,18 +174,32 @@ export function ConfigItemRow({ t, item, value, onChange, readOnly }: ConfigItem
         <input
           id={controlId(item.key)}
           type="number"
+          inputMode="decimal"
+          step="any"
           style={controlStyle}
-          value={value === undefined ? '' : String(value)}
+          value={numberDraft ?? (value === undefined ? '' : String(value))}
           disabled={disabled}
           data-graycode-settings="input"
           onChange={(event) => {
             if (disabled) return
             const raw = event.target.value
+            // Hold the raw string locally so intermediate drafts ("1.", "1e")
+            // are not coerced through Number() and swallowed (4.3-L3).
+            setNumberDraft(raw)
             if (raw === '') {
               onChange?.(item.key, undefined)
-            } else {
-              onChange?.(item.key, Number(raw))
+            } else if (!INCOMPLETE_NUMBER_TAIL.test(raw)) {
+              const parsed = Number(raw)
+              if (Number.isFinite(parsed)) onChange?.(item.key, parsed)
             }
+          }}
+          onBlur={() => {
+            // Commit a still-parseable draft (e.g. a trailing ".") and release
+            // the local draft so the committed value owns the display again.
+            if (numberDraft !== null && numberDraft !== '' && Number.isFinite(Number(numberDraft))) {
+              onChange?.(item.key, Number(numberDraft))
+            }
+            setNumberDraft(null)
           }}
         />
       )}

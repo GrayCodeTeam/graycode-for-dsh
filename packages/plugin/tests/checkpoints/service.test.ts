@@ -19,7 +19,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { CheckpointService, type CheckpointServiceConfig, type CreateCheckpointResult } from '../../src/checkpoints/service.ts'
 import { createDshFsRestoreWorkspaceWriter, createNodeFsRestoreWorkspaceWriter, type RestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
-import { computeForcedKeepIds } from '../../src/checkpoints/domain/CheckpointDeletionService.ts'
+import { computeForcedKeepIds, type CheckpointWorkspaceStorage } from '../../src/checkpoints/domain/CheckpointDeletionService.ts'
 import { BlobStore, BLOB_HASH_PATTERN } from '../../src/checkpoints/domain/BlobStore.ts'
 import * as fileHashing from '../../src/checkpoints/domain/fileHashing.ts'
 import type { CheckpointRecord } from '../../src/checkpoints/domain/types.ts'
@@ -34,6 +34,26 @@ vi.mock('../../src/checkpoints/domain/fileHashing.ts', async importOriginal => {
   return {
     ...actual,
     hashFileStreaming: vi.fn(actual.hashFileStreaming),
+  }
+})
+
+/**
+ * 4.19-L1 故障注入：把 rename 包成 vi.fn（默认转发真实实现），
+ * 使测试能按目标路径注入失败。src 用 'fs/promises'、测试用
+ * 'node:fs/promises'，两个 specifier 都 mock 以命中同一模块实例。
+ */
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
+  }
+})
+vi.mock('fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
   }
 })
 
@@ -430,7 +450,8 @@ describe('CheckpointService blob GC (dry-run, refcount, grace period)', () => {
       expect(gcWhileReferenced.dryRun).toBe(true)
       expect(gcWhileReferenced.removedBlobs).toEqual([])
       expect(gcWhileReferenced.pendingBlobs).toEqual([])
-      expect(gcWhileReferenced.refsVerified).toBe(2)
+      // 4.12-L3：refsVerified 改名 blobsScanned（实为 blob 池文件数，名实相符）
+      expect(gcWhileReferenced.blobsScanned).toBe(2)
 
       // 删除：只减引用（blob 物理仍在）
       const deleted = await service.deleteCheckpoint(workspaceDir, created!.checkpointId)
@@ -1320,6 +1341,237 @@ describe('CheckpointService verify unsafe conversationId (M5)', () => {
       const verified = await service.verifyCheckpoint(created!.checkpointId)
       expect(verified.ok).toBe(false)
       expect(verified.issues.some(issue => issue.includes('Unsafe workspace id'))).toBe(true)
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir)
+    }
+  })
+})
+describe('CheckpointService post-commit create failure does not evict old checkpoints (M8)', () => {
+  test('staging cleanup failure after record commit rolls back only the new record; eviction is deferred and skipped', async () => {
+    // maxCheckpoints=1：若创建成功，新存档会触发旧存档驱逐。注入记录提交之后的
+    // staging 清理失败（修复前该步骤在驱逐之后——旧存档已被驱逐、新记录又被回滚，
+    // 创建报告失败但数据已变更）。修复后 staging 清理先于驱逐，失败路径不含驱逐。
+    const { workspaceDir, dataRoot, service } = await makeEnv({ maxCheckpoints: 1 })
+    // 注入：记录提交后的 staging 清理失败（仅第一次调用；catch 内重试走真实实现）。
+    // let + try 外声明：try 块作用域不向 finally 泄漏，finally 才能安全恢复。
+    let spy: ReturnType<typeof vi.spyOn> | undefined
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'v1')
+      const first = await service.createCheckpoint(workspaceDir)
+      expect(first).not.toBeNull()
+
+      // 破坏 first 的 manifest：下一次创建 resolveChainState 失败 → 从完整备份开始
+      // （新存档不引用 first，驱逐才有机会命中 first，链保护不会拦下驱逐）。
+      const wsId = service.conversationIdFor(workspaceDir)
+      await fs.rm(path.join(service.checkpointsDir, wsId, 'manifests', `${first!.checkpointId}.json`), { force: true })
+
+      // 仅在 second 创建前装 mock（first 的 staging 清理走真实实现）
+      spy = vi
+        .spyOn(service as unknown as { quarantineStagingLeftovers: () => Promise<void> }, 'quarantineStagingLeftovers')
+        .mockRejectedValueOnce(new Error('injected staging cleanup failure'))
+
+      await writeFile(workspaceDir, 'a.txt', 'v2')
+      const second = await service.createCheckpoint(workspaceDir)
+      expect(second).toBeNull() // 创建失败（后期清理失败 → 回滚新记录）
+
+      // 旧存档未被驱逐：records.json 仍只有 first（second 的记录已回滚）
+      const records = await service.listCheckpoints(workspaceDir)
+      expect(records.total).toBe(1)
+      expect(records.items[0]!.id).toBe(first!.checkpointId)
+      // 新存档的 manifest 已回滚
+      const manifestsDir = path.join(service.checkpointsDir, wsId, 'manifests')
+      expect(await fs.readdir(manifestsDir).catch(() => [])).toEqual([])
+    } finally {
+      spy?.mockRestore()
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+})
+
+describe('CheckpointService fault injection coverage (4.19-L1)', () => {
+  test('blob commit rename failure quarantines evidence and keeps the file unbacked', async () => {
+    // BlobStore.commitStaged 的 rename 失败分支（非 EEXIST/ENOTEMPTY/EPERM 复用路径）：
+    // rename 抛错 → stageAndCommit 上抛 → create 路径 quarantine + markUnbacked，
+    // 创建仍成功但该文件记录为未备份（恢复时受保护）。
+    // 注：ESM 命名空间不可 spyOn，rename 已由文件级 vi.mock 包装为 vi.fn。
+    const realRename = vi.mocked(fs.rename).getMockImplementation()!
+    vi.mocked(fs.rename).mockImplementation(async (from, to) => {
+      const target = typeof to === 'string' ? to : String(to)
+      if (/[\\/]blobs[\\/][a-f0-9]{64}$/.test(target)) {
+        throw new Error('injected blob commit rename failure')
+      }
+      return realRename(from, to)
+    })
+    const { workspaceDir, dataRoot, service } = await makeEnv()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'payload')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      // rename 失败 → blob 未提交 → 文件记入 unbackedPaths（恢复时受保护）
+      expect(created!.fileCount).toBe(0)
+      const wsId = service.conversationIdFor(workspaceDir)
+      const recordsRaw = JSON.parse(await fs.readFile(path.join(service.checkpointsDir, 'records.json'), 'utf-8'))
+      const record = recordsRaw.find((r: { id: string }) => r.id === created!.checkpointId) as { unbackedPaths?: string[] }
+      expect(record.unbackedPaths).toContain(`${wsId}/a.txt`)
+
+      // 证据进 quarantine（entries.json 记录）
+      const quarantineRoot = path.join(service.checkpointsDir, wsId, 'quarantine')
+      const opDirs = await fs.readdir(quarantineRoot)
+      expect(opDirs.length).toBeGreaterThan(0)
+      const entries = await fs.readFile(path.join(quarantineRoot, opDirs[0]!, 'entries.json'), 'utf-8')
+      expect(entries).toContain('a.txt')
+
+      // 恢复不删除未备份文件（受保护）
+      await writeFile(workspaceDir, 'a.txt', 'changed after failed snapshot')
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      expect(restored.success).toBe(true)
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('changed after failed snapshot')
+    } finally {
+      vi.mocked(fs.rename).mockReset()
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+
+  test('workspace writer writeFile failure is reported as copy_failed; restore reports failure and leaves files untouched', async () => {
+    const workspaceDir = await createTempDir('dsh-checkpoint-ws-')
+    const dataRoot = await createTempDir('dsh-checkpoint-data-')
+    const nodeWriter = createNodeFsRestoreWorkspaceWriter()
+    const writer: RestoreWorkspaceWriter = {
+      ...nodeWriter,
+      async writeFile() {
+        throw new Error('injected restore write failure')
+      },
+    }
+    const service = new CheckpointService(
+      {
+        dataRoot,
+        maxCheckpoints: -1,
+        excludeProfiles: {},
+        excludePatterns: [],
+        maxFileSizeBytes: 50 * 1024 * 1024,
+        blobGracePeriodDays: 7,
+        restoreProtectionPoint: false,
+      },
+      writer,
+    )
+    await service.initialize()
+    try {
+      await writeFile(workspaceDir, 'a.txt', 'snapshot')
+      const created = await service.createCheckpoint(workspaceDir)
+      expect(created).not.toBeNull()
+      await writeFile(workspaceDir, 'a.txt', 'changed')
+
+      const preview = await service.previewRestore(workspaceDir, created!.checkpointId)
+      expect(preview.preview.success).toBe(true)
+      const restored = await service.restoreCheckpoint(workspaceDir, created!.checkpointId, preview.previewToken!)
+      // 写失败 → copy_failed 失败清单，success=false；目标文件保持当前内容（未被破坏）
+      expect(restored.success).toBe(false)
+      expect(restored.restored).toBe(0)
+      expect(restored.failures).toHaveLength(1)
+      expect(restored.failures![0]!.reason).toBe('copy_failed')
+      expect(restored.failures![0]!.path).toBe('a.txt')
+      expect(await fs.readFile(path.join(workspaceDir, 'a.txt'), 'utf-8')).toBe('changed')
+    } finally {
+      service.dispose()
+      await cleanup(workspaceDir, dataRoot)
+    }
+  })
+})
+
+describe('CheckpointService cross-workspace chain isolation (4.12-L2)', () => {
+  test('getChainRecords ignores records from other workspaces when walking base ids (verify path)', async () => {
+    const wsA = await createTempDir('dsh-checkpoint-wsA-')
+    const wsB = await createTempDir('dsh-checkpoint-wsB-')
+    const { service } = await makeEnv()
+    try {
+      await writeFile(wsA, 'a.txt', 'A')
+      await writeFile(wsB, 'b.txt', 'B')
+      const cpA = await service.createCheckpoint(wsA)
+      const cpB = await service.createCheckpoint(wsB)
+      expect(cpA).not.toBeNull()
+      expect(cpB).not.toBeNull()
+
+      // 损坏记录：cpA（本为 full）改成 incremental 且 base 指向另一工作区的 cpB——
+      // 修复前 byId 图跨工作区捕获 cpB → 跨工作区混链（链上 manifest 从 cpB 的工作区
+      // 加载、工作区校验错位）；修复后按 conversationId 过滤 → cpB 不可达 → broken，
+      // verify 报「链断裂」而非误判通过。
+      const recordsFile = path.join(service.checkpointsDir, 'records.json')
+      const records = JSON.parse(await fs.readFile(recordsFile, 'utf-8'))
+      const corrupted = records.map((r: { id: string }) =>
+        r.id === cpA!.checkpointId ? { ...r, type: 'incremental', baseCheckpointId: cpB!.checkpointId } : r,
+      )
+      await fs.writeFile(recordsFile, JSON.stringify(corrupted, null, 2), 'utf-8')
+
+      const verified = await service.verifyCheckpoint(cpA!.checkpointId)
+      expect(verified.ok).toBe(false)
+      expect(verified.issues.some(issue => issue.includes('Incremental chain is broken'))).toBe(true)
+      // 链不跨工作区：损坏 base 找不到同工作区记录 → 只含目标自身，cpB 不计入
+      expect(verified.chainLength).toBe(1)
+    } finally {
+      service.dispose()
+      await cleanup(wsA, wsB)
+    }
+  })
+})
+
+describe('CheckpointService storage cache LRU (4.12-L5)', () => {
+  test('workspace storage cache is capped and evicts least-recently-used entries', async () => {
+    const { service } = await makeEnv()
+    try {
+      const svc = service as unknown as {
+        workspaceStorageFor: (id: string) => CheckpointWorkspaceStorage
+        storages: Map<string, CheckpointWorkspaceStorage>
+      }
+      const first = svc.workspaceStorageFor('ws_000')
+      // 访问 110 个不同工作区：超过上限（100）后驱逐最久未用（ws_000 最早访问且未被再访问）
+      for (let i = 1; i < 110; i += 1) {
+        svc.workspaceStorageFor(`ws_${String(i).padStart(3, '0')}`)
+      }
+      expect(svc.storages.size).toBe(100)
+      expect(svc.storages.has('ws_000')).toBe(false)
+      expect(svc.storages.has('ws_109')).toBe(true)
+      // LRU 命中刷新：重访 ws_109（当前最新）不触发驱逐、不重建
+      const fresh109 = svc.workspaceStorageFor('ws_109')
+      expect(fresh109).toBe(svc.storages.get('ws_109'))
+      expect(svc.storages.size).toBe(100)
+      // 重访被驱逐条目 → 按需重建（新实例），并驱逐下一个最久未用（ws_010）
+      const recreated = svc.workspaceStorageFor('ws_000')
+      expect(recreated).not.toBe(first)
+      expect(svc.storages.size).toBe(100)
+      expect(svc.storages.has('ws_010')).toBe(false)
+    } finally {
+      service.dispose()
+    }
+  })
+})
+
+describe('CheckpointService batch/byNodeIds deletion lock wiring (3.11-M5)', () => {
+  test('deletion service uses the service lockManager and holds workspace-root key ∪ shell key', async () => {
+    const { workspaceDir, service } = await makeEnv()
+    try {
+      const conversationId = service.conversationIdFor(workspaceDir)
+      const svc = service as unknown as {
+        lockManager: unknown
+        deletionService: {
+          lock: unknown
+          deletionLockIds: (conversationId: string) => string[]
+        }
+      }
+      // 壳层已注入 this.lockManager：批删/按节点删与创建/恢复/单删/GC 共用同一跨进程锁
+      // 命名空间（同一 .locks 目录）——修复前缺省为进程级单例（系统临时目录命名空间），
+      // 即便锁键一致也不互斥（blob 引用竞态防线失效）。
+      expect(svc.deletionService.lock).toBe(svc.lockManager)
+      // 锁键 = 壳层键（checkpoint-global-storage）∪ 工作区根键（conversationId = 工作区根
+      // id，由 CheckpointDeletionService.deletionLockIds 追加）——与单删/创建/恢复/GC 的
+      // 工作区根键互斥。
+      const lockIds = svc.deletionService.deletionLockIds(conversationId)
+      expect(lockIds).toContain('checkpoint-global-storage')
+      expect(lockIds).toContain(conversationId)
     } finally {
       service.dispose()
       await cleanup(workspaceDir)

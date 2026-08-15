@@ -78,7 +78,19 @@ export function classifyPreviewFiles(preview: RestorePreviewWire, opts: Classify
     .map(cls => ({ cls, count: byClass[cls]!.count, items: byClass[cls]!.items }))
     .filter(group => group.count > 0)
 
-  const totalAffected = groups.reduce((sum, group) => sum + group.count, 0)
+  // 4.6-L3: `totalAffected` counts the DEDUPED affected-file set. When
+  // untracked deletion is CONFIRMED, the host's `deleted` count already
+  // includes the created-after-snapshot (untracked) paths (CP-PREV-1: deleted
+  // = snapshot paths + untracked), so adding the untracked group again would
+  // double-count them. The untracked group stays visible for the explicit
+  // deletion decision, but its files are only counted once in the total.
+  const totalAffected = (
+    (byClass.restore?.count ?? 0)
+    + (byClass.delete?.count ?? 0)
+    + (opts.deleteUntrackedFiles ? 0 : (byClass.untracked?.count ?? 0))
+    + (byClass.unbacked?.count ?? 0)
+    + (byClass.conflict?.count ?? 0)
+  )
   const operationCount = (byClass.restore?.count ?? 0) + (byClass.delete?.count ?? 0)
 
   return {

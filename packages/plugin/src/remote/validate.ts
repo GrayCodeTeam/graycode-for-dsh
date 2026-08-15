@@ -112,7 +112,18 @@ export function isAbsolutePath(value: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\')
 }
 
-/** 分页切片辅助：按 cursor（项 id 字符串）取下一页。 */
+/**
+ * 分页切片辅助：按 cursor（项 id）取下一页。
+ *
+ * 契约：cursor 是上一页返回的 nextCursor（恒为 `String(末项 id)`）；数值 id 的列表
+ * 调用方传回的数字/字符串 cursor 均按字符串比较归一化（L8），避免 3 === '3' 这类
+ * 严格比较导致游标永远匹配不上、分页提前终止。
+ *
+ * 稳定性说明（L8）：本函数依赖调用方按稳定排序键传入 items（各 adapter 已用
+ * id 等确定性 tie-breaker 排序）。若列表在翻页间因数据变化发生排序漂移，id 游标
+ * 分页会跳过/重复——这是 id 游标在可变排序列表上的固有限制；游标项已消失时按
+ * exhausted 处理（返回空页，绝不静默从第一页重启，避免客户端 append 重复/死循环）。
+ */
 export function slicePage<T extends { readonly id: string | number }>(
   items: readonly T[],
   cursor: string | number | undefined,
@@ -120,7 +131,10 @@ export function slicePage<T extends { readonly id: string | number }>(
 ): { page: T[]; nextCursor?: string } {
   let start = 0
   if (cursor !== undefined && cursor !== null) {
-    const index = items.findIndex(item => item.id === cursor)
+    // 字符串/数值 id 统一转字符串比较：nextCursor 恒为字符串，数值 id 列表回传时
+    // 不能因类型不同而永远匹配不上（L8）
+    const cursorKey = String(cursor)
+    const index = items.findIndex(item => String(item.id) === cursorKey)
     // 列表可能在两页之间发生删除。游标已消失时把本次分页视为 exhausted，
     // 不能静默从第一页重启，否则客户端 append 会产生重复项乃至无限循环。
     if (index < 0) return { page: [] }
