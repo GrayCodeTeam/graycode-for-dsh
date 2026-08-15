@@ -201,6 +201,12 @@
 
 ### Fixed（修复，来自审计批次）
 
+- **settings 分区页签渲染**：`GrayCodeSettingsSection` 此前以普通函数调用
+  （`active.page(props)`）渲染页签内容——页签页面一旦使用 hooks（活动统计 /
+  记忆面板的 `useMemo` transport），hooks 会记入 section 自身，切换页签时触发
+  Rules of Hooks 违约（"rendered more hooks than during the previous render"），
+  整块设置 UI 崩溃消失。改为以真实组件（JSX `<ActivePage />`）实例化，每个页签
+  拥有独立 hook 作用域与生命周期（修复点击「活动统计」后设置项全部消失的问题）。
 - **workflows**：`record_progress_milestone` 缺省 status 恢复为 `completed`（旧语义）；
   `compare_review_documents` finding 匹配 key 收窄为稳定身份（description/evidence 修改
   正确走 persisted + changes，`evidenceChanged` 恢复统计）；design 工具补 per-path 写锁

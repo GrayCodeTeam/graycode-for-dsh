@@ -64,6 +64,14 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorks
   )
   const [activeId, setActiveId] = useState<string>(CATEGORIES[0]!.id)
   const active = CATEGORIES.find(category => category.id === activeId) ?? CATEGORIES[0]!
+  // The page must render as a real component (JSX), not as a plain function
+  // call: pages may call hooks (e.g. `useMemo` for transports), and a plain
+  // call would register those hooks against the section itself — switching
+  // between a hook-free page and a hook-using page then violates the Rules of
+  // Hooks ("rendered more hooks than during the previous render") and nukes
+  // the whole settings tree. Keeping the element type stable per tab gives
+  // each page its own hook scope and lifecycle.
+  const ActivePage = active.page
 
   const handleChange = useCallback((path: readonly string[], value: unknown): void => {
     if (state.status !== 'ready') return
@@ -117,16 +125,18 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorks
             </button>
           </div>
         )}
-        {state.status === 'ready' && active.page({
-          t,
-          config: state.config,
-          onChange: handleChange,
-          onReset: handleReset,
-          remote,
-          defaultWorkspace,
-          activityT,
-          memoryT,
-        })}
+        {state.status === 'ready' && (
+          <ActivePage
+            t={t}
+            config={state.config}
+            onChange={handleChange}
+            onReset={handleReset}
+            remote={remote}
+            defaultWorkspace={defaultWorkspace}
+            activityT={activityT}
+            memoryT={memoryT}
+          />
+        )}
       </div>
     </div>
   )
