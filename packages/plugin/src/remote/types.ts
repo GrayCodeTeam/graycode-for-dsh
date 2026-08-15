@@ -222,6 +222,50 @@ export interface GrayMemoryForgetResult {
   readonly firstId?: string
 }
 
+/**
+ * memory/scopes 枚举项（M-02；与 service.ts MemoryScopeDescriptor 同构，
+ * 序列化边界显式化）。`global` 恒在；每个已初始化的 workspace store 贡献一项。
+ */
+export interface GrayMemoryScopeInfo {
+  readonly scope: GrayMemoryScope
+  /** 稳定作用域 id：global 恒为 'global'；workspace 为存储目录名（stableId）。 */
+  readonly id: string
+  /** 展示名：global 'Global'；workspace 取 scope.json.name（缺失时兜底目录名）。 */
+  readonly name: string
+  /** 存储目录路径（scope.json.fsPath，缺失时兜底目录绝对路径）。 */
+  readonly path: string
+  /** workspace 记忆的原始 cwd（scope.json 可得时）。 */
+  readonly cwd?: string
+}
+
+/** memory/scopes 返回（M-02）。 */
+export interface GrayMemoryScopesResult {
+  readonly items: readonly GrayMemoryScopeInfo[]
+}
+
+/**
+ * memory/forgetBatch 入参（M-03）：按 id 列表批量删除原始记忆。ids 是
+ * store 内位置 id（每个 store 独立重编号），作用域随其他端点显式传递。
+ */
+export interface GrayMemoryForgetBatchParams {
+  /** 待删除条目 id（非空、非负安全整数；重复 id 去重）。 */
+  readonly ids: readonly number[]
+  /** memory/list 返回的完整快照 revision（锁内 CAS 断言）。 */
+  readonly expectedRevision: string
+  /** 破坏性确认：必须为 true，否则 GRAY_APPROVAL_REQUIRED。 */
+  readonly confirm: boolean
+  /** 缺省 global。 */
+  readonly scope?: GrayMemoryScope
+  /** scope=workspace 时的 workspace 根（绝对路径）。 */
+  readonly workspace?: string
+}
+
+/** memory/forgetBatch 返回（M-03）：实际删除数 + 不存在 id（部分成功）。 */
+export interface GrayMemoryForgetBatchResult {
+  readonly removed: number
+  readonly notFound: readonly number[]
+}
+
 // ==================== checkpoints（P4-04/05 列表与恢复预览） ====================
 
 import type {
