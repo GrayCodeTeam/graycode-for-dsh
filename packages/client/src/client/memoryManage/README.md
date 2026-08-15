@@ -17,6 +17,8 @@ implemented in `packages/plugin/src/memory/adapters/dsh/remote.ts`):
 | `memory/note` | `{ scope?, workspace?, text }` | created `GrayMemoryEntryView` — manual add, equivalent to the `memory_note` tool write path (single line + entryChars byte limit; write path creates a missing workspace store) |
 | `memory/edit` | `{ scope?, workspace?, id, text, expectedRevision }` | updated `GrayMemoryEntryView` (id/date preserved) |
 | `memory/forget` | `{ scope?, workspace?, blockId, expectedRevision?, confirm }` | `{ mode: 'single'\|'range'\|'summary', removed?/gone?/firstId? }` — raw deletion returns the list revision; `confirm: true` is required |
+| `memory/forgetBatch` | `{ ids: number[], expectedRevision, confirm, scope?, workspace? }` | `{ removed, notFound }` — batch delete of selected ids (partial success reports skipped ids); `confirm: true` required (M-03) |
+| `memory/scopes` | `{}` | `{ items: [{ scope: 'global'\|'workspace', id, name, path, cwd? }] }` — global + initialized workspaces for the scope dropdown (M-02) |
 | `memory/configGet` | `{ scope?, workspace? }` | effective `MemoryConfig`; the panel uses its validated `entryChars` and safely falls back to the native settings snapshot |
 
 Host registration: `memory/index.ts` calls
@@ -55,12 +57,13 @@ no dependency). `types.ts` carries a hand-synced STRUCTURAL contract snapshot
 | --- | --- |
 | `types.ts` | Contract snapshot (mirror of plugin remote types) + defensive wire readers |
 | `api.ts` | Endpoint names, `MemoryManageTransport`, `createRemoteMemoryTransport(invoker)`, `createMockMemoryTransport(seed)` |
-| `logic.ts` | Pure logic: query params, view models + highlight ranges, edit diff (token LCS), forget state machine, error-code mapping |
+| `logic.ts` | Pure logic: query params, view models + highlight ranges, edit diff (token LCS), forget + batch-forget state machines, selection helpers, scope enumeration, error-code mapping |
 | `locales.ts` | `graycode.memoryManage` namespace (zh/en balanced + ja placeholder) |
-| `MemoryManagePanel.tsx` | Panel orchestrator: search, scope switch, empty/error states, pagination footer |
-| `MemoryEntryList.tsx` | Entry rows: content (+highlight), date, source marker, edit/forget actions |
+| `MemoryManagePanel.tsx` | Panel orchestrator: search, scope dropdown (global + workspaces, M-02), multi-select toolbar, empty/error states, pagination footer |
+| `MemoryEntryList.tsx` | Entry rows: content (+highlight), date, source marker, per-row checkbox + select-all, edit/forget actions |
 | `MemoryEditOverlay.tsx` | Modal edit with live diff preview |
 | `ForgetConfirm.tsx` | Inline two-step forget confirm bar (warning + confirm/cancel, error retry) |
+| `BatchForgetConfirm.tsx` | Modal two-step batch-forget confirm (count warning, submitting lock, error retry) |
 
 ## Wiring (mounted in the native settings section)
 
@@ -114,12 +117,17 @@ client-side with `GRAY_INVALID_INPUT` (the host remains authoritative).
 
 ## Known limits
 
-- Workspace scope requires a `workspace` root prop; without it the host
-  returns `GRAY_INVALID_INPUT` (surfaced via the error banner).
+- The dropdown's workspace options come from `memory/scopes`; a failed/absent
+  enumeration degrades to `[global, current workspace]` with a hint (M-02) —
+  the panel never blocks on it.
+- Workspace scope requires a workspace root; without one the host returns
+  `GRAY_INVALID_INPUT` (surfaced via the error banner).
+- Select-all covers the currently loaded page only (the hint says so);
+  batch delete sends the selected ids to `memory/forgetBatch` with the list
+  revision and `confirm: true` (M-03).
 - The surface only issues entry-level forget (`blockId = "<id>"`); the
   `summary`/`range` forget modes exist on the contract but are not exposed
-  by this UI (the original web panel's arbitrary-set batch delete is not
-  ported — the host forget contract deletes single ids or closed ranges).
+  by this UI.
 - The mock transport has no summary tree (blockIds like `"16-31"` are
   rejected with `GRAY_INVALID_INPUT`).
 - No debounced-server search debounce beyond the local 250 ms input timer.

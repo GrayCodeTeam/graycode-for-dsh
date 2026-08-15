@@ -20,6 +20,9 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'searchPlaceholder'
   | 'scope.global'
   | 'scope.workspace'
+  | 'scope.select'
+  | 'scope.path'
+  | 'scope.loadFailed'
   | 'add.placeholder'
   | 'add.button'
   | 'add.busy'
@@ -28,6 +31,8 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'list.emptyHint'
   | 'list.total'
   | 'list.end'
+  | 'list.selectAll'
+  | 'list.selectAllHint'
   | 'loading'
   | 'loadMore'
   | 'retry'
@@ -52,6 +57,14 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'forget.cancel'
   | 'forget.submitting'
   | 'forget.done'
+  | 'batchForget.button'
+  | 'batchForget.title'
+  | 'batchForget.warning'
+  | 'batchForget.confirm'
+  | 'batchForget.cancel'
+  | 'batchForget.submitting'
+  | 'batchForget.done'
+  | 'batchForget.partial'
   | 'error.title'
   | 'error.invalidInput'
   | 'error.conflict'
@@ -84,6 +97,9 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     searchPlaceholder: '搜索记忆…',
     'scope.global': '全局',
     'scope.workspace': '工作区',
+    'scope.select': '记忆作用域',
+    'scope.path': '路径',
+    'scope.loadFailed': '作用域列表加载失败，已保留当前作用域',
     'add.placeholder': '写入一条新的记忆…（Ctrl/Cmd + Enter 提交）',
     'add.button': '新增',
     'add.busy': '写入中…',
@@ -92,6 +108,8 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'list.emptyHint': '换个关键词，或切换作用域后再试',
     'list.total': '共',
     'list.end': '没有更多了',
+    'list.selectAll': '全选',
+    'list.selectAllHint': '选择当前已加载的全部条目',
     loading: '加载中…',
     loadMore: '加载更多',
     retry: '重试',
@@ -116,6 +134,14 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'forget.cancel': '取消',
     'forget.submitting': '删除中…',
     'forget.done': '已删除 1 条记忆',
+    'batchForget.button': '删除所选',
+    'batchForget.title': '批量删除记忆',
+    'batchForget.warning': '此操作不可撤销，将永久删除选中的 {n} 条记忆。',
+    'batchForget.confirm': '确认删除',
+    'batchForget.cancel': '取消',
+    'batchForget.submitting': '删除中…',
+    'batchForget.done': '已删除 {n} 条记忆',
+    'batchForget.partial': '其中 {n} 条已不存在，已跳过',
     'error.title': '出错了',
     'error.invalidInput': '请求参数无效',
     'error.conflict': '并发冲突，请刷新后重试',
@@ -132,6 +158,9 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     searchPlaceholder: 'Search memories…',
     'scope.global': 'Global',
     'scope.workspace': 'Workspace',
+    'scope.select': 'Memory scope',
+    'scope.path': 'Path',
+    'scope.loadFailed': 'Failed to load the scope list — kept the current scope',
     'add.placeholder': 'Write a new memory… (Ctrl/Cmd + Enter to submit)',
     'add.button': 'Add',
     'add.busy': 'Saving…',
@@ -140,6 +169,8 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'list.emptyHint': 'Try a different keyword or switch scope',
     'list.total': 'Total',
     'list.end': 'No more',
+    'list.selectAll': 'Select all',
+    'list.selectAllHint': 'Selects all currently loaded entries',
     loading: 'Loading…',
     loadMore: 'Load more',
     retry: 'Retry',
@@ -164,6 +195,14 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     'forget.cancel': 'Cancel',
     'forget.submitting': 'Forgetting…',
     'forget.done': '1 memory forgotten',
+    'batchForget.button': 'Delete selected',
+    'batchForget.title': 'Delete selected memories',
+    'batchForget.warning': 'This cannot be undone — the {n} selected memories will be permanently deleted.',
+    'batchForget.confirm': 'Confirm delete',
+    'batchForget.cancel': 'Cancel',
+    'batchForget.submitting': 'Deleting…',
+    'batchForget.done': '{n} memories forgotten',
+    'batchForget.partial': '{n} entries no longer exist — skipped',
     'error.title': 'Something went wrong',
     'error.invalidInput': 'Invalid request parameters',
     'error.conflict': 'Concurrent change — refresh and retry',
@@ -188,6 +227,9 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   searchPlaceholder: 'メモリを検索…',
   'scope.global': 'グローバル',
   'scope.workspace': 'ワークスペース',
+  'scope.select': 'メモリのスコープ',
+  'scope.path': 'パス',
+  'scope.loadFailed': 'スコープ一覧の読み込みに失敗しました。現在のスコープを維持します',
   'add.placeholder': '新しいメモリを入力…（Ctrl/Cmd + Enter で送信）',
   'add.button': '追加',
   'add.busy': '保存中…',
@@ -196,6 +238,8 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'list.emptyHint': '別のキーワードまたはスコープをお試しください',
   'list.total': '合計',
   'list.end': 'これ以上ありません',
+  'list.selectAll': 'すべて選択',
+  'list.selectAllHint': '現在読み込まれているエントリをすべて選択します',
   loading: '読み込み中…',
   loadMore: 'さらに読み込む',
   retry: '再試行',
@@ -220,6 +264,14 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   'forget.cancel': 'キャンセル',
   'forget.submitting': '削除中…',
   'forget.done': '1 件のメモリを削除しました',
+  'batchForget.button': '選択を削除',
+  'batchForget.title': 'メモリを一括削除',
+  'batchForget.warning': 'この操作は元に戻せません。選択した {n} 件のメモリは完全に削除されます。',
+  'batchForget.confirm': '削除を確定',
+  'batchForget.cancel': 'キャンセル',
+  'batchForget.submitting': '削除中…',
+  'batchForget.done': '{n} 件のメモリを削除しました',
+  'batchForget.partial': '{n} 件はすでに存在しないためスキップしました',
   'error.title': 'エラーが発生しました',
   'error.invalidInput': 'リクエストパラメータが無効です',
   'error.conflict': '競合が発生しました。更新して再試行してください',

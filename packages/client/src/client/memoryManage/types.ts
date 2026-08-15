@@ -114,6 +114,54 @@ export interface GrayMemoryForgetResult {
   readonly firstId?: string
 }
 
+/**
+ * One enumerated memory scope (mirrors the host `memory/scopes` item; audit
+ * M-02「ScopeInfo」). `global` is always present; each initialized workspace
+ * store contributes one `workspace` entry.
+ */
+export interface GrayMemoryScopeInfo {
+  readonly scope: GrayMemoryScope
+  /** Stable scope id: 'global' for the global store, directory name for workspaces. */
+  readonly id: string
+  /** Human-readable display name. */
+  readonly name: string
+  /** Workspace root (absolute path) for workspace scopes; '' for global. */
+  readonly path: string
+  /** Optional working-directory hint for workspace scopes. */
+  readonly cwd?: string
+}
+
+/** `memory/scopes` result (mirrors the host enumeration). */
+export interface GrayMemoryScopesResult {
+  readonly items: readonly GrayMemoryScopeInfo[]
+}
+
+/**
+ * `memory/forgetBatch` params (mirrors the host endpoint; audit M-03). The
+ * ids are store-local (each workspace store renumbers independently), so the
+ * current view's scope travels explicitly like every other memory endpoint.
+ */
+export interface GrayMemoryForgetBatchParams {
+  /** Entry ids to delete (this surface never issues summary/range ids). */
+  readonly ids: readonly number[]
+  /** `memory/list` full-store revision captured with the selected rows. */
+  readonly expectedRevision: string
+  /** Destructive confirmation: must be true, else GRAY_APPROVAL_REQUIRED. */
+  readonly confirm: boolean
+  /** Scope the ids belong to (default 'global'). */
+  readonly scope?: GrayMemoryScope
+  /** Workspace root when scope = 'workspace'. */
+  readonly workspace?: string
+}
+
+/** `memory/forgetBatch` result (mirrors the host response). */
+export interface GrayMemoryForgetBatchResult {
+  /** Entries actually removed. */
+  readonly removed: number
+  /** Requested ids that were not present in the store (partial success). */
+  readonly notFound: readonly number[]
+}
+
 // ==================== Remote envelope (mirrors remote/types.ts) ====================
 
 /** Stable Remote error machine codes (mirrors `GRAY_REMOTE_ERROR_CODES`). */
@@ -257,4 +305,51 @@ export function readMemoryForgetResult(value: unknown): GrayMemoryForgetResult |
     ...(typeof record.gone === 'number' && Number.isSafeInteger(record.gone) ? { gone: record.gone } : {}),
     ...(typeof record.firstId === 'string' && record.firstId.length > 0 ? { firstId: record.firstId } : {}),
   }
+}
+
+/** Narrow an unknown value to one scope-info entry (strict). */
+export function readMemoryScopeInfo(value: unknown): GrayMemoryScopeInfo | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if (record.scope !== 'global' && record.scope !== 'workspace') return null
+  if (typeof record.id !== 'string' || record.id.trim().length === 0) return null
+  if (typeof record.name !== 'string') return null
+  if (typeof record.path !== 'string') return null
+  return {
+    scope: record.scope,
+    id: record.id,
+    name: record.name,
+    path: record.path,
+    ...(typeof record.cwd === 'string' && record.cwd.length > 0 ? { cwd: record.cwd } : {}),
+  }
+}
+
+/** Narrow an unknown value to the `memory/scopes` result (strict: one bad item voids it). */
+export function readMemoryScopesResult(value: unknown): GrayMemoryScopesResult | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.items)) return null
+  const items: GrayMemoryScopeInfo[] = []
+  for (const item of record.items) {
+    const info = readMemoryScopeInfo(item)
+    if (info === null) return null
+    items.push(info)
+  }
+  return { items }
+}
+
+/** Narrow an unknown value to a `memory/forgetBatch` result (strict). */
+export function readMemoryForgetBatchResult(value: unknown): GrayMemoryForgetBatchResult | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  if (typeof record.removed !== 'number' || !Number.isSafeInteger(record.removed) || record.removed < 0) {
+    return null
+  }
+  if (!Array.isArray(record.notFound)) return null
+  const notFound: number[] = []
+  for (const id of record.notFound) {
+    if (typeof id !== 'number' || !Number.isSafeInteger(id)) return null
+    notFound.push(id)
+  }
+  return { removed: record.removed, notFound }
 }

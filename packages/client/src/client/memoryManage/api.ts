@@ -20,22 +20,28 @@ import {
   makeInternalFailure,
   readMemoryConfig,
   readMemoryEntryView,
+  readMemoryForgetBatchResult,
   readMemoryForgetResult,
   readMemoryListResult,
+  readMemoryScopesResult,
   type GrayMemoryConfig,
   type GrayMemoryConfigGetParams,
   type GrayMemoryEditParams,
   type GrayMemoryEntryView,
+  type GrayMemoryForgetBatchParams,
+  type GrayMemoryForgetBatchResult,
   type GrayMemoryForgetParams,
   type GrayMemoryForgetResult,
   type GrayMemoryListParams,
   type GrayMemoryListResult,
   type GrayMemoryNoteParams,
   type GrayMemoryScope,
+  type GrayMemoryScopeInfo,
+  type GrayMemoryScopesResult,
   type GrayRemoteArgs,
   type GrayRemoteResult,
 } from './types.ts'
-import { normalizeMemoryLimit, toMemoryFailure } from './logic.ts'
+import { normalizeMemoryLimit, toMemoryFailure, workspacePathName } from './logic.ts'
 
 /** Endpoint names consumed by the memory surface (namespace `memory`). */
 export const MEMORY_ENDPOINTS = {
@@ -43,6 +49,8 @@ export const MEMORY_ENDPOINTS = {
   note: 'memory/note',
   edit: 'memory/edit',
   forget: 'memory/forget',
+  forgetBatch: 'memory/forgetBatch',
+  scopes: 'memory/scopes',
   configGet: 'memory/configGet',
 } as const
 
@@ -69,6 +77,10 @@ export interface MemoryManageTransport {
   add(params: GrayMemoryNoteParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryEntryView>>
   edit(params: GrayMemoryEditParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryEntryView>>
   forget(params: GrayMemoryForgetParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryForgetResult>>
+  /** M-03: batch forget of selected ids (partial successes surface `notFound`). */
+  forgetBatch(params: GrayMemoryForgetBatchParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryForgetBatchResult>>
+  /** M-02: enumerate all memory scopes (global + initialized workspaces). */
+  listScopes(signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryScopesResult>>
   /** Optional for compatibility with replay/custom transports predating configGet. */
   configGet?(params: GrayMemoryConfigGetParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryConfig>>
 }
@@ -105,6 +117,10 @@ export function createRemoteMemoryTransport(
       callMemoryEndpoint(invoker, 'memory', 'edit', params, signal, readMemoryEntryView, timeoutMs),
     forget: (params, signal) =>
       callMemoryEndpoint(invoker, 'memory', 'forget', params, signal, readMemoryForgetResult, timeoutMs),
+    forgetBatch: (params, signal) =>
+      callMemoryEndpoint(invoker, 'memory', 'forgetBatch', params, signal, readMemoryForgetBatchResult, timeoutMs),
+    listScopes: (signal) =>
+      callMemoryEndpoint(invoker, 'memory', 'scopes', {}, signal, readMemoryScopesResult, timeoutMs),
     configGet: (params, signal) =>
       callMemoryEndpoint(invoker, 'memory', 'configGet', params, signal, readMemoryConfig, timeoutMs),
   }
@@ -161,6 +177,8 @@ function withMemoryTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 /** Seed entry for the mock store; entries without a scope default to 'global'. */
 export interface MockMemorySeedEntry extends GrayMemoryEntryView {
   readonly scope?: GrayMemoryScope
+  /** Mock-only: workspace root when scope = 'workspace' (defaults to `options.workspace`). */
+  readonly workspace?: string
 }
 
 export interface MockMemoryTransportOptions {
@@ -168,6 +186,11 @@ export interface MockMemoryTransportOptions {
   readonly workspace?: string
   /** Effective config returned by `memory/configGet`. */
   readonly config?: GrayMemoryConfig
+  /**
+   * Scope enumeration returned by `memory/scopes` (defaults to global + the
+   * `workspace` root; multi-workspace demos seed several entries here).
+   */
+  readonly scopes?: readonly GrayMemoryScopeInfo[]
 }
 
 const DEFAULT_MOCK_MEMORY_CONFIG: GrayMemoryConfig = {
@@ -187,18 +210,52 @@ export function createMockMemoryTransport(
   seed: readonly MockMemorySeedEntry[],
   options: MockMemoryTransportOptions = {},
 ): MemoryManageTransport {
-  // Internal store: mutable copies (the mock simulates the host store).
-  const store: Array<{ id: number; date: string; text: string; scope: GrayMemoryScope }> = seed.map(entry => ({
-    id: entry.id,
-    date: entry.date,
-    text: entry.text,
-    scope: entry.scope ?? 'global',
-  }))
+  // Internal store: mutable copies (the mock simulates the host store; each
+  // workspace store renumbers ids independently, mirroring the host).
+  const store: Array<{ id: number; date: string; text: string; scope: GrayMemoryScope; workspace?: string }> =
+    seed.map(entry => ({
+      id: entry.id,
+      date: entry.date,
+      text: entry.text,
+      scope: entry.scope ?? 'global',
+      ...(entry.scope === 'workspace' ? { workspace: entry.workspace ?? options.workspace } : {}),
+    }))
   const workspaceRoot = options.workspace
   const config = options.config ?? DEFAULT_MOCK_MEMORY_CONFIG
   let storeRevision = 0
   let cursorSequence = 0
   const cursors = new Map<string, { readonly revision: number; readonly context: string; readonly offset: number }>()
+
+  /** Workspace root of a stored entry (seeds may omit it and inherit the mock root). */
+  const entryWorkspace = (entry: { readonly scope: GrayMemoryScope; readonly workspace?: string }): string | undefined =>
+    entry.scope === 'workspace' ? entry.workspace ?? workspaceRoot : undefined
+
+  /** Workspace root a call targets (param wins; falls back to the mock root). */
+  const targetWorkspaceOf = (params: { readonly workspace?: string }): string | undefined =>
+    workspaceRoot === undefined ? undefined : params.workspace ?? workspaceRoot
+
+  /** Store membership test: scope + (for workspace) the workspace root. */
+  const inStore = (
+    entry: { readonly scope: GrayMemoryScope; readonly workspace?: string },
+    scope: GrayMemoryScope,
+    workspace: string | undefined,
+  ): boolean => entry.scope === scope && (scope !== 'workspace' || entryWorkspace(entry) === workspace)
+
+  /** Scope enumeration served by `memory/scopes` (global + the mock workspace root). */
+  const scopeOptions: readonly GrayMemoryScopeInfo[] = options.scopes !== undefined
+    ? options.scopes.map(info => ({ ...info }))
+    : [
+        { scope: 'global', id: 'global', name: 'Global', path: '' },
+        ...(workspaceRoot !== undefined
+          ? [{
+              scope: 'workspace' as const,
+              id: workspacePathName(workspaceRoot),
+              name: workspacePathName(workspaceRoot),
+              path: workspaceRoot,
+              cwd: workspaceRoot,
+            }]
+          : []),
+      ]
 
   const cancelled = (): GrayRemoteResult<never> => ({
     ok: false,
@@ -235,8 +292,9 @@ export function createMockMemoryTransport(
 
   const currentRevision = () => `mock:${storeRevision}`
 
-  const renumberScope = (scope: GrayMemoryScope): void => {
-    const entries = store.filter(entry => entry.scope === scope).sort((a, b) => a.id - b.id)
+  /** Renumber ids within one store (scope + workspace; mirroring the host's per-store ids). */
+  const renumberStore = (scope: GrayMemoryScope, workspace: string | undefined): void => {
+    const entries = store.filter(entry => inStore(entry, scope, workspace)).sort((a, b) => a.id - b.id)
     entries.forEach((entry, id) => { entry.id = id })
   }
 
@@ -244,11 +302,12 @@ export function createMockMemoryTransport(
     wired: false,
     async list(params, signal) {
       if (signal?.aborted) return cancelled()
-      if (params.scope === 'workspace' && workspaceRoot === undefined) {
+      const targetScope = params.scope ?? 'global'
+      const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
+      if (targetScope === 'workspace' && workspace === undefined) {
         return invalid('workspace scope requires a workspace (absolute path)', {})
       }
-      const targetScope = params.scope ?? 'global'
-      let entries = store.filter(entry => entry.scope === targetScope)
+      let entries = store.filter(entry => inStore(entry, targetScope, workspace))
       const search = params.search?.trim()
       if (search !== undefined && search.length > 0) {
         const needle = search.toLowerCase()
@@ -258,7 +317,7 @@ export function createMockMemoryTransport(
       const limit = normalizeMemoryLimit(params.limit)
       const context = JSON.stringify([
         params.scope ?? 'global',
-        params.scope === 'workspace' ? params.workspace ?? workspaceRoot ?? '' : '',
+        params.scope === 'workspace' ? workspace ?? '' : '',
         search ?? '',
       ])
       let start = 0
@@ -294,15 +353,16 @@ export function createMockMemoryTransport(
       if (text.length === 0) {
         return invalid('text must be a non-empty string', { field: 'text' })
       }
-      if (params.scope === 'workspace' && workspaceRoot === undefined) {
+      const scope = params.scope ?? 'global'
+      const workspace = scope === 'workspace' ? targetWorkspaceOf(params) : undefined
+      if (scope === 'workspace' && workspace === undefined) {
         return invalid('workspace scope requires a workspace (absolute path)', {})
       }
-      const scope = params.scope ?? 'global'
       const id = store
-        .filter(entry => entry.scope === scope)
+        .filter(entry => inStore(entry, scope, workspace))
         .reduce((max, entry) => Math.max(max, entry.id), -1) + 1
       const date = new Date().toISOString().slice(0, 10)
-      store.push({ id, date, text, scope })
+      store.push({ id, date, text, scope, ...(workspace !== undefined ? { workspace } : {}) })
       storeRevision += 1
       return { ok: true, value: { id, date, text } }
     },
@@ -312,10 +372,14 @@ export function createMockMemoryTransport(
       if (params.text.trim().length === 0) {
         return invalid('text must be a non-empty string', { field: 'text' })
       }
-      if (params.expectedRevision !== currentRevision()) return staleRevision()
       const targetScope = params.scope ?? 'global'
+      const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
+      if (targetScope === 'workspace' && workspace === undefined) {
+        return invalid('workspace scope requires a workspace (absolute path)', {})
+      }
+      if (params.expectedRevision !== currentRevision()) return staleRevision()
       const entry = store.find(
-        item => item.id === params.id && item.scope === targetScope,
+        item => item.id === params.id && inStore(item, targetScope, workspace),
       )
       if (entry === undefined) {
         return notFound(`memory entry #${params.id} not found`, { id: params.id })
@@ -338,40 +402,93 @@ export function createMockMemoryTransport(
         }
       }
       if (/^\d+$/.test(params.blockId)) {
-        if (params.expectedRevision !== currentRevision()) return staleRevision()
         const targetScope = params.scope ?? 'global'
+        const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
+        if (targetScope === 'workspace' && workspace === undefined) {
+          return invalid('workspace scope requires a workspace (absolute path)', {})
+        }
+        if (params.expectedRevision !== currentRevision()) return staleRevision()
         const id = parseInt(params.blockId, 10)
         const index = store.findIndex(
-          item => item.id === id && item.scope === targetScope,
+          item => item.id === id && inStore(item, targetScope, workspace),
         )
         if (index < 0) return notFound(`memory entry #${id} not found`, { id })
-        const storedScope = store[index]!.scope
         store.splice(index, 1)
-        renumberScope(storedScope)
+        renumberStore(targetScope, workspace)
         storeRevision += 1
         return { ok: true, value: { mode: 'single', removed: 1 } }
       }
       if (/^\d+,\d+$/.test(params.blockId)) {
-        if (params.expectedRevision !== currentRevision()) return staleRevision()
         const targetScope = params.scope ?? 'global'
+        const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
+        if (targetScope === 'workspace' && workspace === undefined) {
+          return invalid('workspace scope requires a workspace (absolute path)', {})
+        }
+        if (params.expectedRevision !== currentRevision()) return staleRevision()
         const [loRaw, hiRaw] = params.blockId.split(',')
         const lo = parseInt(loRaw!, 10)
         const hi = parseInt(hiRaw!, 10)
         if (lo > hi) return invalid(`invalid range: lo(${lo}) > hi(${hi})`, { blockId: params.blockId })
         const kept = store.filter(item => {
-          const inScope = item.scope === targetScope
           const inRange = item.id >= lo && item.id <= hi
-          return !(inScope && inRange)
+          return !(inStore(item, targetScope, workspace) && inRange)
         })
         const removed = store.length - kept.length
         if (removed === 0) return notFound(`no memories in range #${lo}-#${hi}`, { blockId: params.blockId })
         store.splice(0, store.length, ...kept)
-        renumberScope(targetScope)
+        renumberStore(targetScope, workspace)
         storeRevision += 1
         return { ok: true, value: { mode: 'range', removed } }
       }
       // Summary mode ("lo-hi") — the mock store has no summary tree.
       return invalid('invalid blockId (mock has no summary tree)', { blockId: params.blockId })
+    },
+
+    async forgetBatch(params, signal) {
+      if (signal?.aborted) return cancelled()
+      // Confirmation gate mirrors `memory/forget`.
+      if (params.confirm !== true) {
+        return {
+          ok: false,
+          error: {
+            code: GRAY_REMOTE_ERROR_CODES.APPROVAL_REQUIRED,
+            message: 'memory.forgetBatch is destructive; pass confirm: true',
+            details: { ids: params.ids },
+          },
+        }
+      }
+      if (!Array.isArray(params.ids) || params.ids.length === 0 || params.ids.some(id => !Number.isSafeInteger(id))) {
+        return invalid('ids must be a non-empty array of integers', { field: 'ids' })
+      }
+      const targetScope = params.scope ?? 'global'
+      const workspace = targetScope === 'workspace' ? targetWorkspaceOf(params) : undefined
+      if (targetScope === 'workspace' && workspace === undefined) {
+        return invalid('workspace scope requires a workspace (absolute path)', {})
+      }
+      if (params.expectedRevision !== currentRevision()) return staleRevision()
+      // One pass over the requested ids (deduplicated): remove what exists,
+      // report the rest as notFound — partial success is a normal result.
+      const removed: number[] = []
+      const notFound: number[] = []
+      for (const id of [...new Set(params.ids)]) {
+        const index = store.findIndex(item => item.id === id && inStore(item, targetScope, workspace))
+        if (index < 0) {
+          notFound.push(id)
+          continue
+        }
+        store.splice(index, 1)
+        removed.push(id)
+      }
+      if (removed.length > 0) {
+        renumberStore(targetScope, workspace)
+        storeRevision += 1
+      }
+      return { ok: true, value: { removed: removed.length, notFound } }
+    },
+
+    async listScopes(signal) {
+      if (signal?.aborted) return cancelled()
+      return { ok: true, value: { items: scopeOptions.map(info => ({ ...info })) } }
     },
 
     async configGet(params, signal) {

@@ -14,34 +14,52 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  EMPTY_MEMORY_SELECTION,
+  GLOBAL_MEMORY_SCOPE_FALLBACK,
+  IDLE_BATCH_FORGET_STATE,
   appendMemoryListPage,
+  applyMemoryTextCount,
   buildMemoryListParams,
   buildMemoryEntryView,
   buildMemoryListViewModel,
+  buildMemoryScopeOptions,
+  cancelBatchForget,
   cancelForget,
+  confirmBatchForget,
   confirmForget,
+  defaultMemoryScopeSelection,
   diffMemoryText,
+  dismissBatchForget,
   dismissForget,
+  excludeMemorySelection,
   findMatchRanges,
   IDLE_FORGET_STATE,
   INITIAL_MEMORY_SEARCH_SETTLE,
   MemoryAddInFlightGate,
   isCurrentMemoryConfigResponse,
+  isMemoryPageSelected,
   isStaleMemoryCursorFailure,
   isStaleMemoryRevisionFailure,
   mapMemoryFailure,
   memoryEntryCharsExceededFailure,
   memoryRequestContextKey,
+  memoryScopeOptionKey,
   MEMORY_DIFF_MAX_CELLS,
   normalizeMemoryLimit,
   normalizeMemoryEntryChars,
   parseMemoryNextCursor,
+  rejectBatchForget,
   rejectForget,
+  requestBatchForget,
   requestForget,
+  resolveBatchForget,
   resolveForget,
+  selectMemoryPage,
   settleMemorySearch,
   startMemoryAddRequest,
   toMemoryFailure,
+  toggleMemorySelection,
+  workspacePathName,
 } from '../src/client/memoryManage/logic.ts'
 import {
   MEMORY_ENDPOINTS,
@@ -58,9 +76,13 @@ import {
   readGrayRemoteFailure,
   readMemoryConfig,
   readMemoryEntryView,
+  readMemoryForgetBatchResult,
   readMemoryForgetResult,
   readMemoryListResult,
+  readMemoryScopeInfo,
+  readMemoryScopesResult,
   type GrayMemoryEntryView,
+  type GrayMemoryScopeInfo,
 } from '../src/client/memoryManage/types.ts'
 import {
   GRAYCODE_MEMORY_MANAGE_NS,
@@ -457,6 +479,187 @@ describe('forget confirmation state machine', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Scope enumeration (M-02 workspace dropdown)
+// ---------------------------------------------------------------------------
+
+describe('workspacePathName', () => {
+  it('returns the last non-empty path segment', () => {
+    expect(workspacePathName('C:\\repo\\my-ws')).toBe('my-ws')
+    expect(workspacePathName('/home/user/ws/')).toBe('ws')
+    expect(workspacePathName('C:\\')).toBe('C:')
+    expect(workspacePathName('')).toBe('')
+  })
+})
+
+describe('buildMemoryScopeOptions', () => {
+  const global: GrayMemoryScopeInfo = { scope: 'global', id: 'global', name: 'Global', path: '' }
+  const wsA: GrayMemoryScopeInfo = { scope: 'workspace', id: 'a', name: 'A', path: 'C:\\a', cwd: 'C:\\a' }
+
+  it('keeps the enumeration unchanged when the current workspace is covered (by path or cwd)', () => {
+    expect(buildMemoryScopeOptions([global, wsA], 'C:\\a')).toEqual([global, wsA])
+    const withCwd: GrayMemoryScopeInfo = { scope: 'workspace', id: 'b', name: 'B', path: 'C:\\b', cwd: 'C:\\b\\sub' }
+    expect(buildMemoryScopeOptions([global, withCwd], 'C:\\b\\sub')).toEqual([global, withCwd])
+  })
+
+  it('appends the current workspace as a degraded fallback when the enumeration is missing or does not cover it', () => {
+    const options = buildMemoryScopeOptions(null, 'C:\\ws')
+    expect(options).toHaveLength(2)
+    expect(options[0]).toEqual(global)
+    expect(options[1]).toMatchObject({ scope: 'workspace', id: 'current', name: 'ws', path: 'C:\\ws', cwd: 'C:\\ws' })
+    const appended = buildMemoryScopeOptions([global], 'C:\\other')
+    expect(appended).toHaveLength(2)
+    expect(appended[1]).toMatchObject({ scope: 'workspace', path: 'C:\\other' })
+  })
+
+  it('always guarantees a global option, even without an enumeration', () => {
+    expect(buildMemoryScopeOptions(null, undefined)).toEqual([global])
+    expect(buildMemoryScopeOptions(null, '   ')).toEqual([global])
+    expect(buildMemoryScopeOptions([], '')).toEqual([global])
+  })
+})
+
+describe('memoryScopeOptionKey / defaultMemoryScopeSelection', () => {
+  const global: GrayMemoryScopeInfo = { scope: 'global', id: 'global', name: 'Global', path: '' }
+  const wsA: GrayMemoryScopeInfo = { scope: 'workspace', id: 'a', name: 'A', path: 'C:\\a' }
+  const wsB: GrayMemoryScopeInfo = { scope: 'workspace', id: 'b', name: 'B', path: 'C:\\b' }
+
+  it('keys workspace options by path so the fallback and the real entry share one key', () => {
+    const fallback: GrayMemoryScopeInfo = { scope: 'workspace', id: 'current', name: 'ws', path: 'C:\\ws', cwd: 'C:\\ws' }
+    const real: GrayMemoryScopeInfo = { scope: 'workspace', id: 'ws', name: 'ws', path: 'C:\\ws', cwd: 'C:\\ws' }
+    expect(memoryScopeOptionKey(fallback)).toBe(memoryScopeOptionKey(real))
+    expect(memoryScopeOptionKey(global)).toBe('global\u0000global')
+    expect(memoryScopeOptionKey(wsA)).not.toBe(memoryScopeOptionKey(wsB))
+  })
+
+  it('defaults to the current session workspace when present, else global', () => {
+    expect(defaultMemoryScopeSelection([global, wsA, wsB], 'C:\\b')).toEqual(wsB)
+    expect(defaultMemoryScopeSelection([global, wsA], undefined)).toEqual(global)
+    expect(defaultMemoryScopeSelection([global, wsA], 'D:\\missing')).toEqual(global)
+  })
+
+  it('degrades to the global fallback for an empty option list', () => {
+    expect(defaultMemoryScopeSelection([], undefined)).toEqual(GLOBAL_MEMORY_SCOPE_FALLBACK)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Selection helpers (M-03 multi-select / select-all)
+// ---------------------------------------------------------------------------
+
+describe('memory selection helpers', () => {
+  it('toggles ids in and out of the selection order-preservingly', () => {
+    expect(toggleMemorySelection(EMPTY_MEMORY_SELECTION, 1)).toEqual([1])
+    expect(toggleMemorySelection([1, 3], 2)).toEqual([1, 3, 2])
+    expect(toggleMemorySelection([1, 3, 2], 3)).toEqual([1, 2])
+  })
+
+  it('selects a whole page as a union; empty pages are no-ops', () => {
+    expect(selectMemoryPage(EMPTY_MEMORY_SELECTION, [5, 6, 7])).toEqual([5, 6, 7])
+    expect(selectMemoryPage([1, 5], [5, 6])).toEqual([1, 5, 6])
+    expect(selectMemoryPage([1], [])).toEqual([1])
+  })
+
+  it('excludes reported notFound ids from the selection', () => {
+    expect(excludeMemorySelection([1, 2, 3], [2])).toEqual([1, 3])
+    expect(excludeMemorySelection([1, 2], [])).toEqual([1, 2])
+    expect(excludeMemorySelection(EMPTY_MEMORY_SELECTION, [1])).toEqual([])
+  })
+
+  it('reports page-selection state for the header checkbox', () => {
+    expect(isMemoryPageSelected([1, 2, 3], [1, 2, 3])).toBe(true)
+    expect(isMemoryPageSelected([1, 2], [1, 2, 3])).toBe(false)
+    expect(isMemoryPageSelected([], [1])).toBe(false)
+    expect(isMemoryPageSelected([], [])).toBe(false)
+  })
+})
+
+describe('applyMemoryTextCount', () => {
+  it('substitutes the {n} placeholder only when a count is given', () => {
+    expect(applyMemoryTextCount('delete {n} memories', 3)).toBe('delete 3 memories')
+    expect(applyMemoryTextCount('delete {n} memories', undefined)).toBe('delete {n} memories')
+    expect(applyMemoryTextCount('no placeholder', 2)).toBe('no placeholder')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Batch forget confirmation state machine (M-03)
+// ---------------------------------------------------------------------------
+
+describe('batch forget confirmation state machine', () => {
+  const target = { ids: [1, 2, 3], revision: REVISION, scope: 'global' as const }
+  const outcome = { removed: 2, notFound: [3] }
+
+  it('starts idle and frozen', () => {
+    expect(IDLE_BATCH_FORGET_STATE).toEqual({ phase: 'idle', target: null, outcome: null, error: null })
+    expect(Object.isFrozen(IDLE_BATCH_FORGET_STATE)).toBe(true)
+  })
+
+  it('request arms the target with the captured ids (idle → confirming)', () => {
+    const state = requestBatchForget(IDLE_BATCH_FORGET_STATE, target)
+    expect(state.phase).toBe('confirming')
+    expect(state.target).toEqual(target)
+  })
+
+  it('request is a no-op while already armed', () => {
+    const armed = requestBatchForget(IDLE_BATCH_FORGET_STATE, target)
+    expect(requestBatchForget(armed, { ids: [9], revision: REVISION, scope: 'workspace' })).toBe(armed)
+  })
+
+  it('cancel abandons from confirming, submitting and error; no-op from idle', () => {
+    const armed = requestBatchForget(IDLE_BATCH_FORGET_STATE, target)
+    expect(cancelBatchForget(armed).phase).toBe('idle')
+    const submitting = confirmBatchForget(armed)
+    expect(cancelBatchForget(submitting).phase).toBe('idle')
+    const errored = rejectBatchForget(submitting, failure(CODES.INTERNAL))
+    expect(cancelBatchForget(errored).phase).toBe('idle')
+    expect(cancelBatchForget(IDLE_BATCH_FORGET_STATE)).toBe(IDLE_BATCH_FORGET_STATE)
+  })
+
+  it('confirm is the only path to submitting (double-submit guarded)', () => {
+    const armed = requestBatchForget(IDLE_BATCH_FORGET_STATE, target)
+    const submitting = confirmBatchForget(armed)
+    expect(submitting.phase).toBe('submitting')
+    expect(submitting.target).toEqual(target)
+    expect(confirmBatchForget(submitting)).toBe(submitting)
+    expect(confirmBatchForget(IDLE_BATCH_FORGET_STATE)).toBe(IDLE_BATCH_FORGET_STATE)
+  })
+
+  it('resolve lands the outcome including a partial notFound (submitting → done)', () => {
+    const state = resolveBatchForget(confirmBatchForget(requestBatchForget(IDLE_BATCH_FORGET_STATE, target)), outcome)
+    expect(state.phase).toBe('done')
+    expect(state.outcome).toEqual(outcome)
+    expect(state.error).toBeNull()
+  })
+
+  it('reject maps the failure to a stable-code view (submitting → error)', () => {
+    const state = rejectBatchForget(confirmBatchForget(requestBatchForget(IDLE_BATCH_FORGET_STATE, target)), failure(CODES.CONFLICT))
+    expect(state.phase).toBe('error')
+    expect(state.error).toMatchObject({ code: CODES.CONFLICT, localeKey: 'error.conflict' })
+    expect(state.outcome).toBeNull()
+  })
+
+  it('resolve/reject are no-ops outside submitting', () => {
+    const armed = requestBatchForget(IDLE_BATCH_FORGET_STATE, target)
+    expect(resolveBatchForget(armed, outcome)).toBe(armed)
+    expect(rejectBatchForget(armed, failure(CODES.INTERNAL))).toBe(armed)
+    expect(resolveBatchForget(IDLE_BATCH_FORGET_STATE, outcome)).toBe(IDLE_BATCH_FORGET_STATE)
+  })
+
+  it('retries from error via confirm (error → submitting)', () => {
+    const errored = rejectBatchForget(confirmBatchForget(requestBatchForget(IDLE_BATCH_FORGET_STATE, target)), failure(CODES.INTERNAL))
+    const retried = confirmBatchForget(errored)
+    expect(retried.phase).toBe('submitting')
+    expect(retried.target).toEqual(target)
+  })
+
+  it('dismiss resets done → idle and is a no-op elsewhere', () => {
+    const done = resolveBatchForget(confirmBatchForget(requestBatchForget(IDLE_BATCH_FORGET_STATE, target)), outcome)
+    expect(dismissBatchForget(done)).toBe(IDLE_BATCH_FORGET_STATE)
+    expect(dismissBatchForget(IDLE_BATCH_FORGET_STATE)).toBe(IDLE_BATCH_FORGET_STATE)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Error code mapping
 // ---------------------------------------------------------------------------
 
@@ -638,6 +841,32 @@ describe('defensive wire readers', () => {
     expect(readMemoryForgetResult({ mode: 'single', removed: 1 })).toEqual({ mode: 'single', removed: 1 })
     expect(readMemoryForgetResult({ mode: 'summary', gone: 2, firstId: '0-3' })).toEqual({ mode: 'summary', gone: 2, firstId: '0-3' })
     expect(readMemoryForgetResult({ mode: 'bogus' })).toBeNull()
+  })
+
+  it('reads scope info and scopes results strictly', () => {
+    const info: GrayMemoryScopeInfo = { scope: 'workspace', id: 'ws', name: 'WS', path: 'C:\\ws', cwd: 'C:\\ws\\sub' }
+    expect(readMemoryScopeInfo(info)).toEqual(info)
+    expect(readMemoryScopeInfo({ scope: 'workspace', id: 'ws', name: 'WS', path: 'C:\\ws' }))
+      .toEqual({ scope: 'workspace', id: 'ws', name: 'WS', path: 'C:\\ws' })
+    // Optional fields with a wrong type are dropped, required fields are strict.
+    expect(readMemoryScopeInfo({ scope: 'workspace', id: 'x', name: 'X', path: 'p', cwd: 5 }))
+      .toEqual({ scope: 'workspace', id: 'x', name: 'X', path: 'p' })
+    expect(readMemoryScopeInfo({ scope: 'global', id: '', name: 'G', path: '' })).toBeNull()
+    expect(readMemoryScopeInfo({ scope: 'bogus', id: 'x', name: 'X', path: 'p' })).toBeNull()
+    expect(readMemoryScopeInfo(null)).toBeNull()
+
+    expect(readMemoryScopesResult({ items: [info] })).toEqual({ items: [info] })
+    expect(readMemoryScopesResult({ items: [{ scope: 'bogus', id: 'x', name: 'X', path: 'p' }] })).toBeNull()
+    expect(readMemoryScopesResult({ items: 'nope' })).toBeNull()
+    expect(readMemoryScopesResult({})).toBeNull()
+  })
+
+  it('reads forgetBatch results (including partial notFound)', () => {
+    expect(readMemoryForgetBatchResult({ removed: 2, notFound: [3, 4] })).toEqual({ removed: 2, notFound: [3, 4] })
+    expect(readMemoryForgetBatchResult({ removed: 0, notFound: [] })).toEqual({ removed: 0, notFound: [] })
+    expect(readMemoryForgetBatchResult({ removed: -1, notFound: [] })).toBeNull()
+    expect(readMemoryForgetBatchResult({ removed: 1, notFound: ['x'] })).toBeNull()
+    expect(readMemoryForgetBatchResult({ removed: 1 })).toBeNull()
   })
 })
 
@@ -867,6 +1096,159 @@ describe('createMockMemoryTransport', () => {
   })
 })
 
+describe('createMockMemoryTransport — M-02/M-03 endpoints', () => {
+  const seed: GrayMemoryEntryView[] = [
+    { id: 0, date: '2025-01-01', text: 'Alpha note' },
+    { id: 1, date: '2025-01-02', text: 'beta design' },
+    { id: 2, date: '2025-01-03', text: 'ALPHA plan' },
+  ]
+
+  it('enumerates scopes: global alone, or global + the mock workspace root', async () => {
+    const globalOnly = createMockMemoryTransport(seed)
+    const g = await globalOnly.listScopes()
+    expect(g.ok && g.value.items).toEqual([{ scope: 'global', id: 'global', name: 'Global', path: '' }])
+
+    const withWs = createMockMemoryTransport(seed, { workspace: 'C:\\repo' })
+    const s = await withWs.listScopes()
+    expect(s.ok && s.value.items).toEqual([
+      { scope: 'global', id: 'global', name: 'Global', path: '' },
+      { scope: 'workspace', id: 'repo', name: 'repo', path: 'C:\\repo', cwd: 'C:\\repo' },
+    ])
+  })
+
+  it('serves a custom scope enumeration from the options', async () => {
+    const scopes: GrayMemoryScopeInfo[] = [
+      { scope: 'global', id: 'global', name: 'Global', path: '' },
+      { scope: 'workspace', id: 'one', name: 'One', path: 'C:\\one' },
+      { scope: 'workspace', id: 'two', name: 'Two', path: 'C:\\two' },
+    ]
+    const transport = createMockMemoryTransport(seed, { scopes })
+    const result = await transport.listScopes()
+    expect(result.ok && result.value.items).toEqual(scopes)
+  })
+
+  it('gates forgetBatch behind confirm: true (APPROVAL_REQUIRED otherwise)', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const unconfirmed = await transport.forgetBatch({ ids: [1], expectedRevision: before.value.revision, confirm: false })
+    expect(unconfirmed.ok).toBe(false)
+    if (unconfirmed.ok) return
+    expect(unconfirmed.error.code).toBe(CODES.APPROVAL_REQUIRED)
+    const missing = await transport.forgetBatch({ ids: [1], expectedRevision: before.value.revision })
+    expect(missing.ok).toBe(false)
+    if (missing.ok) return
+    expect(missing.error.code).toBe(CODES.APPROVAL_REQUIRED)
+  })
+
+  it('rejects empty/non-integer id arrays and stale revisions', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const empty = await transport.forgetBatch({ ids: [], expectedRevision: before.value.revision, confirm: true })
+    expect(empty.ok).toBe(false)
+    if (empty.ok) return
+    expect(empty.error.code).toBe(CODES.INVALID_INPUT)
+    const bad = await transport.forgetBatch({ ids: [1.5], expectedRevision: before.value.revision, confirm: true })
+    expect(bad.ok).toBe(false)
+    if (bad.ok) return
+    expect(bad.error.code).toBe(CODES.INVALID_INPUT)
+    const stale = await transport.forgetBatch({ ids: [1], expectedRevision: 'mock:old', confirm: true })
+    expect(stale.ok).toBe(false)
+    if (stale.ok) return
+    expect(stale.error).toMatchObject({
+      code: CODES.CONFLICT,
+      details: { kind: 'memory-revision', reason: 'stale' },
+    })
+  })
+
+  it('removes selected ids, renumbers the store and reports notFound (partial success)', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const result = await transport.forgetBatch({
+      ids: [1, 99],
+      expectedRevision: before.value.revision,
+      confirm: true,
+    })
+    expect(result).toEqual({ ok: true, value: { removed: 1, notFound: [99] } })
+    const after = await transport.list({})
+    expect(after.ok && after.value.items.map(item => item.id)).toEqual([1, 0])
+    expect(after.ok && after.value.total).toBe(2)
+    if (!after.ok) throw new Error('expected refreshed list')
+    // The store revision advanced, so the old revision is now stale.
+    const again = await transport.forgetBatch({ ids: [0], expectedRevision: before.value.revision, confirm: true })
+    expect(again.ok).toBe(false)
+    if (again.ok) return
+    expect(again.error.code).toBe(CODES.CONFLICT)
+  })
+
+  it('deduplicates ids and removes them all in one pass', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const before = await transport.list({})
+    if (!before.ok) throw new Error('expected list')
+    const result = await transport.forgetBatch({
+      ids: [2, 2, 0],
+      expectedRevision: before.value.revision,
+      confirm: true,
+    })
+    expect(result).toEqual({ ok: true, value: { removed: 2, notFound: [] } })
+    const after = await transport.list({})
+    expect(after.ok && after.value.items.map(item => item.id)).toEqual([0])
+  })
+
+  it('scopes the batch to the current workspace store and keeps global untouched', async () => {
+    const transport = createMockMemoryTransport([
+      ...seed,
+      { id: 0, date: '2025-01-04', text: 'ws note', scope: 'workspace', workspace: 'C:\\ws' },
+    ], { workspace: 'C:\\ws' })
+    const before = await transport.list({ scope: 'workspace' })
+    if (!before.ok) throw new Error('expected workspace list')
+    const result = await transport.forgetBatch({
+      ids: [0],
+      expectedRevision: before.value.revision,
+      confirm: true,
+      scope: 'workspace',
+      workspace: 'C:\\ws',
+    })
+    expect(result).toEqual({ ok: true, value: { removed: 1, notFound: [] } })
+    const global = await transport.list({})
+    expect(global.ok && global.value.items).toHaveLength(3)
+    if (!global.ok) throw new Error('expected global list')
+    const missing = await transport.forgetBatch({
+      ids: [99],
+      expectedRevision: global.value.revision,
+      confirm: true,
+      scope: 'global',
+    })
+    expect(missing).toEqual({ ok: true, value: { removed: 0, notFound: [99] } })
+  })
+
+  it('rejects a workspace-scoped forgetBatch without a workspace root', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const result = await transport.forgetBatch({
+      ids: [1],
+      expectedRevision: REVISION,
+      confirm: true,
+      scope: 'workspace',
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.code).toBe(CODES.INVALID_INPUT)
+  })
+
+  it('lists per-workspace entries in a multi-workspace mock', async () => {
+    const transport = createMockMemoryTransport([
+      { id: 0, date: '2025-01-01', text: 'one note', scope: 'workspace', workspace: 'C:\\one' },
+      { id: 0, date: '2025-01-02', text: 'two note', scope: 'workspace', workspace: 'C:\\two' },
+    ], { workspace: 'C:\\one' })
+    const one = await transport.list({ scope: 'workspace', workspace: 'C:\\one' })
+    expect(one.ok && one.value.items.map(item => item.text)).toEqual(['one note'])
+    const two = await transport.list({ scope: 'workspace', workspace: 'C:\\two' })
+    expect(two.ok && two.value.items.map(item => item.text)).toEqual(['two note'])
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Remote transport adapter
 // ---------------------------------------------------------------------------
@@ -910,12 +1292,26 @@ describe('createRemoteMemoryTransport', () => {
     await transport.add({ text: 'new note' })
     await transport.edit({ id: 1, text: 't', expectedRevision: REVISION })
     await transport.forget({ blockId: '1', expectedRevision: REVISION, confirm: true })
+    await transport.forgetBatch({
+      ids: [1, 2],
+      expectedRevision: REVISION,
+      confirm: true,
+      scope: 'workspace',
+      workspace: 'C:\\ws',
+    })
+    await transport.listScopes()
     await transport.configGet?.({ scope: 'workspace', workspace: 'C:\\ws' })
     expect(calls).toEqual([
       { namespace: 'memory', method: 'list', args: { scope: 'global', search: 'x' } },
       { namespace: 'memory', method: 'note', args: { text: 'new note' } },
       { namespace: 'memory', method: 'edit', args: { id: 1, text: 't', expectedRevision: REVISION } },
       { namespace: 'memory', method: 'forget', args: { blockId: '1', expectedRevision: REVISION, confirm: true } },
+      {
+        namespace: 'memory',
+        method: 'forgetBatch',
+        args: { ids: [1, 2], expectedRevision: REVISION, confirm: true, scope: 'workspace', workspace: 'C:\\ws' },
+      },
+      { namespace: 'memory', method: 'scopes', args: {} },
       { namespace: 'memory', method: 'configGet', args: { scope: 'workspace', workspace: 'C:\\ws' } },
     ])
     expect(MEMORY_ENDPOINTS).toEqual({
@@ -923,6 +1319,8 @@ describe('createRemoteMemoryTransport', () => {
       note: 'memory/note',
       edit: 'memory/edit',
       forget: 'memory/forget',
+      forgetBatch: 'memory/forgetBatch',
+      scopes: 'memory/scopes',
       configGet: 'memory/configGet',
     })
   })
@@ -985,6 +1383,45 @@ describe('createRemoteMemoryTransport', () => {
   })
 })
 
+describe('createRemoteMemoryTransport — M-02/M-03 endpoints', () => {
+  it('narrows scopes and forgetBatch values; malformed ones become INTERNAL', async () => {
+    const scopesValue = { items: [{ scope: 'global', id: 'global', name: 'Global', path: '' }] }
+    const okScopes = createRemoteMemoryTransport(async () => ({ ok: true, value: scopesValue }))
+    expect(await okScopes.listScopes()).toEqual({ ok: true, value: scopesValue })
+
+    const okBatch = createRemoteMemoryTransport(async () => ({ ok: true, value: { removed: 1, notFound: [2] } }))
+    expect(await okBatch.forgetBatch({ ids: [1], expectedRevision: REVISION, confirm: true }))
+      .toEqual({ ok: true, value: { removed: 1, notFound: [2] } })
+
+    const malformedScopes = createRemoteMemoryTransport(async () => ({ ok: true, value: { items: [{ scope: 'bogus' }] } }))
+    const s = await malformedScopes.listScopes()
+    expect(s.ok).toBe(false)
+    if (s.ok) return
+    expect(s.error.code).toBe(CODES.INTERNAL)
+
+    const malformedBatch = createRemoteMemoryTransport(async () => ({ ok: true, value: { removed: 'x' } }))
+    const b = await malformedBatch.forgetBatch({ ids: [1], expectedRevision: REVISION, confirm: true })
+    expect(b.ok).toBe(false)
+    if (b.ok) return
+    expect(b.error.code).toBe(CODES.INTERNAL)
+  })
+
+  it('passes scopes/forgetBatch host failures through untouched', async () => {
+    const failing = createRemoteMemoryTransport(async () => ({
+      ok: false,
+      error: { code: CODES.APPROVAL_REQUIRED, message: 'confirm required', details: {} },
+    }))
+    const scopes = await failing.listScopes()
+    expect(scopes.ok).toBe(false)
+    if (scopes.ok) return
+    expect(scopes.error.code).toBe(CODES.APPROVAL_REQUIRED)
+    const batch = await failing.forgetBatch({ ids: [1], expectedRevision: REVISION, confirm: true })
+    expect(batch.ok).toBe(false)
+    if (batch.ok) return
+    expect(batch.error.code).toBe(CODES.APPROVAL_REQUIRED)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Locale alignment
 // ---------------------------------------------------------------------------
@@ -1039,5 +1476,42 @@ describe('graycode.memoryManage locale dictionaries', () => {
     for (const label of ['forget.warning', 'forget.confirm', 'forget.cancel', 'forget.submitting', 'forget.done']) {
       expect(en[label as keyof typeof en]).toBeDefined()
     }
+  })
+
+  it('covers the M-02/M-03 UI keys in every shipped locale', () => {
+    const keys = [
+      'scope.select',
+      'scope.path',
+      'scope.loadFailed',
+      'list.selectAll',
+      'list.selectAllHint',
+      'batchForget.button',
+      'batchForget.title',
+      'batchForget.warning',
+      'batchForget.confirm',
+      'batchForget.cancel',
+      'batchForget.submitting',
+      'batchForget.done',
+      'batchForget.partial',
+    ]
+    for (const dict of Object.values(graycodeMemoryManageDictionaries)) {
+      for (const key of keys) {
+        expect((dict as Record<string, string>)[key], key).toBeDefined()
+      }
+    }
+    for (const key of keys) {
+      expect((graycodeMemoryManageJaPlaceholder as Record<string, string>)[key], key).toBeDefined()
+    }
+  })
+
+  it('keeps the {n} count placeholders in the batch copy', () => {
+    const en = graycodeMemoryManageDictionaries.en
+    const zh = graycodeMemoryManageDictionaries.zh
+    for (const key of ['batchForget.warning', 'batchForget.done'] as const) {
+      expect(en[key]).toContain('{n}')
+      expect(zh[key]).toContain('{n}')
+    }
+    expect(graycodeMemoryManageJaPlaceholder['batchForget.warning']).toContain('{n}')
+    expect(graycodeMemoryManageJaPlaceholder['batchForget.done']).toContain('{n}')
   })
 })

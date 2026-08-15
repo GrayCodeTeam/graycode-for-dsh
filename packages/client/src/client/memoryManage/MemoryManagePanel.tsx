@@ -1,18 +1,19 @@
 /**
  * Memory management panel (P4-03).
  *
- * Top-level surface: search box, scope switch (global/workspace), entry list
- * with cursor pagination, edit overlay, forget flow (two-step confirm), and
- * empty/error states. All data flows through the injected
+ * Top-level surface: search box, scope dropdown (global + workspaces, M-02),
+ * multi-select toolbar with batch delete (M-03), entry list with cursor
+ * pagination, edit overlay, forget flow (two-step confirm), and empty/error
+ * states. All data flows through the injected
  * {@link MemoryManageTransport} — the panel itself never performs I/O.
  *
  * CLIENT BOUNDARY RULES (PLAN_V2 §5.6):
  * - Replay/unwired mode: without a transport the panel renders read-only
  *   (`replayOnly` hint, controls disabled). With a `wired:false` (mock)
  *   transport it shows the `degraded` demo badge.
- * - Deletion/edit are explicit user actions: forget requires the two-step
- *   confirm state machine, edit requires reviewing the diff and pressing
- *   Save.
+ * - Deletion/edit are explicit user actions: forget (single and batch)
+ *   requires the two-step confirm state machine, edit requires reviewing the
+ *   diff and pressing Save.
  * - Pagination is cursor-based (`nextCursor` from the host page).
  * - Errors surface via stable machine codes mapped to locale keys
  *   (`mapMemoryFailure`) — never raw host message text.
@@ -22,32 +23,49 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MemoryManageTransport } from './api.ts'
 import {
+  EMPTY_MEMORY_SELECTION,
+  GLOBAL_MEMORY_SCOPE_FALLBACK,
+  IDLE_BATCH_FORGET_STATE,
   IDLE_FORGET_STATE,
   INITIAL_MEMORY_SEARCH_SETTLE,
   MemoryAddInFlightGate,
   appendMemoryListPage,
+  applyMemoryTextCount,
   buildMemoryEntryView,
   buildMemoryListParams,
   buildMemoryListViewModel,
+  buildMemoryScopeOptions,
+  cancelBatchForget,
   cancelForget,
+  confirmBatchForget,
   confirmForget,
+  defaultMemoryScopeSelection,
+  dismissBatchForget,
   dismissForget,
   isCurrentMemoryConfigResponse,
+  isMemoryPageSelected,
   isStaleMemoryCursorFailure,
   isStaleMemoryRevisionFailure,
   isWorkspaceStoreMissingFailure,
   mapMemoryFailure,
   memoryEntryCharsExceededFailure,
   memoryRequestContextKey,
+  memoryScopeOptionKey,
   normalizeMemoryEntryChars,
   normalizeMemoryLimit,
   parseMemoryNextCursor,
+  rejectBatchForget,
   rejectForget,
+  requestBatchForget,
   requestForget,
+  resolveBatchForget,
   resolveForget,
+  selectMemoryPage,
   settleMemorySearch,
   startMemoryAddRequest,
   toMemoryFailure,
+  toggleMemorySelection,
+  type BatchForgetState,
   type ForgetState,
   type MemoryEntryViewModel,
   type MemoryErrorView,
@@ -56,7 +74,8 @@ import {
   type MemoryQueryState,
   type MemorySearchSettle,
 } from './logic.ts'
-import { GRAY_MEMORY_SCOPES, GRAY_REMOTE_ERROR_CODES, type GrayMemoryScope } from './types.ts'
+import { GRAY_REMOTE_ERROR_CODES, type GrayMemoryScope, type GrayMemoryScopeInfo } from './types.ts'
+import { BatchForgetConfirm } from './BatchForgetConfirm.tsx'
 import { MemoryEntryList } from './MemoryEntryList.tsx'
 import { MemoryEditOverlay } from './MemoryEditOverlay.tsx'
 
@@ -130,25 +149,20 @@ const searchStyle: CSSProperties = {
   fontSize: '12px',
 }
 
-const scopeGroupStyle: CSSProperties = {
-  display: 'flex',
-  gap: '0.25rem',
-}
-
-const scopeStyle: CSSProperties = {
-  padding: '0.25rem 0.625rem',
+const scopeSelectStyle: CSSProperties = {
+  padding: '0.25rem 0.375rem',
   borderRadius: '0.25rem',
   border: '1px solid var(--dsh-border-color, #333)',
-  background: 'transparent',
+  background: 'rgba(0, 0, 0, 0.25)',
   color: 'inherit',
   fontSize: '11px',
-  cursor: 'pointer',
+  maxWidth: '16rem',
 }
 
-const activeScopeStyle: CSSProperties = {
-  ...scopeStyle,
-  borderColor: '#58a6ff',
-  color: '#58a6ff',
+const scopeNoteStyle: CSSProperties = {
+  fontSize: '10px',
+  opacity: 0.65,
+  flexBasis: '100%',
 }
 
 const hintStyle: CSSProperties = {
@@ -230,6 +244,12 @@ const buttonStyle: CSSProperties = {
   cursor: 'pointer',
 }
 
+const dangerButtonStyle: CSSProperties = {
+  ...buttonStyle,
+  borderColor: '#f85149',
+  color: '#f85149',
+}
+
 const buttonDisabledStyle: CSSProperties = {
   ...buttonStyle,
   opacity: 0.45,
@@ -281,6 +301,7 @@ function MemoryErrorBanner({
 }): ReactNode {
   const color = ERROR_TONE_COLOR[error.tone]
   const informational = error.localeKey === 'error.workspaceNotInitialized'
+  const text = applyMemoryTextCount(t(error.localeKey), error.count)
   return (
     <div
       data-graycode-memory={informational ? 'info' : 'error'}
@@ -289,7 +310,7 @@ function MemoryErrorBanner({
       style={{ ...errorBannerStyle, color }}
     >
       <span>
-        {informational ? t(error.localeKey) : `${t('error.title')}: ${t(error.localeKey)}`}
+        {informational ? text : `${t('error.title')}: ${text}`}
       </span>
       {error.retryable && (
         <button type="button" data-graycode-memory="retry" style={buttonStyle} onClick={onRetry}>
@@ -315,7 +336,25 @@ export function MemoryManagePanel({
   const pageLimit = normalizeMemoryLimit(pageSize)
   const [queryText, setQueryText] = useState('')
   const [searchSettle, setSearchSettle] = useState<MemorySearchSettle>(INITIAL_MEMORY_SEARCH_SETTLE)
-  const [scope, setScope] = useState<GrayMemoryScope>(initialScope)
+  const workspaceRoot = workspace?.trim() || undefined
+  // M-02: the selected scope is one entry of the enumeration (global or a
+  // specific workspace). Default = the current session workspace when the
+  // panel has one, otherwise `initialScope` (default 'global'). Keys are
+  // stable across the fallback/real enumeration (workspaces key by path).
+  const [selectedScopeKey, setSelectedScopeKey] = useState<string>(() => {
+    const options = buildMemoryScopeOptions(null, workspaceRoot)
+    const optionsList = options.length > 0 ? options : [GLOBAL_MEMORY_SCOPE_FALLBACK]
+    if (workspaceRoot === undefined) {
+      // No session workspace: honor the host's `initialScope` (default 'global').
+      const info = optionsList.find(option => option.scope === initialScope)
+        ?? optionsList[0]
+        ?? GLOBAL_MEMORY_SCOPE_FALLBACK
+      return memoryScopeOptionKey(info)
+    }
+    return memoryScopeOptionKey(defaultMemoryScopeSelection(optionsList, workspaceRoot))
+  })
+  const [scopes, setScopes] = useState<readonly GrayMemoryScopeInfo[] | null>(null)
+  const [scopesFailed, setScopesFailed] = useState(false)
   const [list, setList] = useState<MemoryListViewModel | null>(null)
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
   const [error, setError] = useState<MemoryErrorView | null>(null)
@@ -324,13 +363,23 @@ export function MemoryManagePanel({
   const [editSaving, setEditSaving] = useState(false)
   const [editError, setEditError] = useState<MemoryErrorView | null>(null)
   const [forget, setForget] = useState<ForgetState>(IDLE_FORGET_STATE)
+  const [batchForget, setBatchForget] = useState<BatchForgetState>(IDLE_BATCH_FORGET_STATE)
+  const [selection, setSelection] = useState<readonly number[]>(EMPTY_MEMORY_SELECTION)
   const [addText, setAddText] = useState('')
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<MemoryErrorView | null>(null)
   const [addNote, setAddNote] = useState<string | null>(null)
-  const workspaceRoot = workspace?.trim() || undefined
   const fallbackEntryChars = normalizeMemoryEntryChars(entryChars)
-  const configContextKey = memoryRequestContextKey({ text: '', scope, workspace: workspaceRoot })
+  // Dropdown options: the host enumeration plus the current session workspace
+  // when it is not covered (degraded load keeps the panel operational).
+  const scopeOptions = buildMemoryScopeOptions(scopes, workspaceRoot)
+  const scopeSelectOptions = scopeOptions.length > 0 ? scopeOptions : [GLOBAL_MEMORY_SCOPE_FALLBACK]
+  const selectedScopeInfo = scopeSelectOptions.find(
+    info => memoryScopeOptionKey(info) === selectedScopeKey,
+  ) ?? GLOBAL_MEMORY_SCOPE_FALLBACK
+  const scope = selectedScopeInfo.scope
+  const activeWorkspace = selectedScopeInfo.scope === 'workspace' ? selectedScopeInfo.path : undefined
+  const configContextKey = memoryRequestContextKey({ text: '', scope, workspace: activeWorkspace })
   const [configSnapshot, setConfigSnapshot] = useState<{
     readonly transport: MemoryManageTransport
     readonly contextKey: string
@@ -344,7 +393,7 @@ export function MemoryManagePanel({
   // The raw search text participates immediately, before the debounce applies
   // it, so an old write/list response cannot briefly restore the previous
   // query's rows after the user has started typing a new query.
-  const viewContextKey = memoryRequestContextKey({ text: queryText, scope, workspace: workspaceRoot })
+  const viewContextKey = memoryRequestContextKey({ text: queryText, scope, workspace: activeWorkspace })
   /** Latest rendered context; updated during render to close the pre-effect race window. */
   const currentContextKeyRef = useRef(viewContextKey)
   currentContextKeyRef.current = viewContextKey
@@ -356,6 +405,8 @@ export function MemoryManagePanel({
   const addSeqRef = useRef(0)
   const editSeqRef = useRef(0)
   const forgetSeqRef = useRef(0)
+  const batchForgetSeqRef = useRef(0)
+  const scopesSeqRef = useRef(0)
   const configSeqRef = useRef(0)
   const addGateRef = useRef<MemoryAddInFlightGate>()
   if (addGateRef.current === undefined) addGateRef.current = new MemoryAddInFlightGate()
@@ -375,6 +426,8 @@ export function MemoryManagePanel({
       addSeqRef.current += 1
       editSeqRef.current += 1
       forgetSeqRef.current += 1
+      batchForgetSeqRef.current += 1
+      scopesSeqRef.current += 1
       configSeqRef.current += 1
     }
   }, [])
@@ -425,11 +478,11 @@ export function MemoryManagePanel({
   }, [transport])
 
   useEffect(() => {
-    void fetchEffectiveConfig(scope, workspaceRoot)
+    void fetchEffectiveConfig(scope, activeWorkspace)
     return () => {
       configSeqRef.current += 1
     }
-  }, [fetchEffectiveConfig, scope, workspaceRoot, fallbackEntryChars])
+  }, [fetchEffectiveConfig, scope, activeWorkspace, fallbackEntryChars])
 
   // Debounce the search box into the applied query (pure UI timing).
   //
@@ -458,12 +511,15 @@ export function MemoryManagePanel({
   const fetchFirstPage = useCallback(async (
     q: string,
     s: GrayMemoryScope,
-    targetWorkspace = workspaceRoot,
+    targetWorkspace = s === 'workspace' ? activeWorkspace : undefined,
   ) => {
     const contextKey = memoryRequestContextKey({ text: q, scope: s, workspace: targetWorkspace })
     const seq = ++seqRef.current
     loadMoreSeqRef.current += 1
     setLoadingMore(false)
+    // Any refresh renumbers the store ids; a stale multi-select would target
+    // the wrong rows after the refresh (M-03).
+    setSelection(EMPTY_MEMORY_SELECTION)
     if (transport === undefined) {
       if (contextKey !== currentContextKeyRef.current) return
       setList(null)
@@ -509,7 +565,39 @@ export function MemoryManagePanel({
         setPhase('error')
       }
     }
-  }, [transport, workspaceRoot, pageLimit]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, activeWorkspace, pageLimit]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch the scope enumeration (M-02). Failure degrades: the dropdown falls
+  // back to [global, current workspace] and the panel keeps its selection.
+  useEffect(() => {
+    const requestTransport = transport
+    if (requestTransport === undefined) {
+      setScopes(null)
+      setScopesFailed(false)
+      return
+    }
+    const requestId = ++scopesSeqRef.current
+    let cancelled = false
+    void (async () => {
+      let result
+      try {
+        result = await requestTransport.listScopes()
+      } catch (err) {
+        result = { ok: false as const, error: toMemoryFailure(err) }
+      }
+      if (cancelled || !mountedRef.current || requestId !== scopesSeqRef.current || requestTransport !== currentTransportRef.current) {
+        return
+      }
+      if (result.ok) {
+        setScopes(result.value.items)
+        setScopesFailed(false)
+      } else {
+        setScopes(null)
+        setScopesFailed(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [transport])
 
   // A visible scope/workspace/search change invalidates how pending actions
   // render. It deliberately does not release the add gate: the host write is
@@ -520,6 +608,7 @@ export function MemoryManagePanel({
     addSeqRef.current += 1
     editSeqRef.current += 1
     forgetSeqRef.current += 1
+    batchForgetSeqRef.current += 1
     setList(null)
     if (transport !== undefined) setPhase('loading')
     setLoadingMore(false)
@@ -527,6 +616,8 @@ export function MemoryManagePanel({
     setEditTarget(null)
     setEditError(null)
     setForget(IDLE_FORGET_STATE)
+    setBatchForget(IDLE_BATCH_FORGET_STATE)
+    setSelection(EMPTY_MEMORY_SELECTION)
     setAddError(null)
     setAddNote(null)
   }, [viewContextKey])
@@ -544,7 +635,7 @@ export function MemoryManagePanel({
     const requestId = ++loadMoreSeqRef.current
     const targetQuery = searchSettle.appliedQuery
     const targetScope = scope
-    const targetWorkspace = workspaceRoot
+    const targetWorkspace = activeWorkspace
     const contextKey = currentContextKeyRef.current
     setLoadingMore(true)
     const cursor = parseMemoryNextCursor(list.nextCursor)
@@ -587,10 +678,12 @@ export function MemoryManagePanel({
       // Keep the accumulated list; surface the failure as a banner.
       setError(mapMemoryFailure(result.error))
     }
-  }, [transport, list, loadingMore, searchSettle, scope, workspaceRoot, fetchFirstPage]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, list, loadingMore, searchSettle, scope, activeWorkspace, fetchFirstPage]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onScopeChange = (next: GrayMemoryScope) => {
-    if (next === scope) return
+  /** M-02: switch the active scope (dropdown option → view reload). */
+  const onScopeSelect = (info: GrayMemoryScopeInfo) => {
+    const nextKey = memoryScopeOptionKey(info)
+    if (nextKey === selectedScopeKey) return
     // Invalidate synchronously; a promise microtask may settle before React
     // commits the state update below.
     seqRef.current += 1
@@ -598,11 +691,13 @@ export function MemoryManagePanel({
     addSeqRef.current += 1
     editSeqRef.current += 1
     forgetSeqRef.current += 1
+    batchForgetSeqRef.current += 1
     configSeqRef.current += 1
+    const nextWorkspace = info.scope === 'workspace' ? info.path : undefined
     currentConfigContextKeyRef.current = memoryRequestContextKey({
       text: '',
-      scope: next,
-      workspace: workspaceRoot,
+      scope: info.scope,
+      workspace: nextWorkspace,
     })
     setList(null)
     setLoadingMore(false)
@@ -610,9 +705,11 @@ export function MemoryManagePanel({
     setEditTarget(null)
     setEditError(null)
     setForget(IDLE_FORGET_STATE)
+    setBatchForget(IDLE_BATCH_FORGET_STATE)
+    setSelection(EMPTY_MEMORY_SELECTION)
     setAddError(null)
     setAddNote(null)
-    setScope(next)
+    setSelectedScopeKey(nextKey)
   }
 
   const submitAdd = useCallback(async () => {
@@ -631,12 +728,12 @@ export function MemoryManagePanel({
     const requestTransport = transport
     const request = startMemoryAddRequest(addGate, () => requestTransport.add({
       scope,
-      workspace: workspaceRoot,
+      workspace: activeWorkspace,
       text,
     }))
     if (!request.started) return
     const targetScope = scope
-    const targetWorkspace = workspaceRoot
+    const targetWorkspace = activeWorkspace
     const contextKey = currentContextKeyRef.current
     const requestId = ++addSeqRef.current
     setAdding(true)
@@ -669,7 +766,7 @@ export function MemoryManagePanel({
     } else {
       setAddError(mapMemoryFailure(result.error))
     }
-  }, [transport, addText, effectiveEntryChars, scope, workspaceRoot, fetchFirstPage, fetchEffectiveConfig, t]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [transport, addText, effectiveEntryChars, scope, activeWorkspace, fetchFirstPage, fetchEffectiveConfig, t]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
@@ -799,6 +896,94 @@ export function MemoryManagePanel({
     setForget(cancelForget(forget))
   }, [forget])
 
+  /** M-03: arm the batch delete from the current selection. */
+  const onBatchForgetRequest = () => {
+    if (transport === undefined || selection.length === 0 || list === null) return
+    batchForgetSeqRef.current += 1
+    setAddNote(null)
+    setForget(current => current.phase === 'done' ? IDLE_FORGET_STATE : current)
+    // Abandon a batch whose host response is still pending: the seq bump
+    // supersedes it, and the response guard drops its resolution (H-7b).
+    const current = batchForget.phase === 'submitting' || batchForget.phase === 'done'
+      ? IDLE_BATCH_FORGET_STATE
+      : batchForget
+    setBatchForget(requestBatchForget(current, {
+      ids: [...selection],
+      revision: list.revision,
+      scope,
+      workspace: activeWorkspace,
+    }))
+  }
+
+  const onBatchForgetConfirm = useCallback(async () => {
+    if (transport === undefined || batchForget.target === null) return
+    const submitting = confirmBatchForget(batchForget)
+    setBatchForget(submitting)
+    const target = submitting.target!
+    const requestId = ++batchForgetSeqRef.current
+    const contextKey = currentContextKeyRef.current
+    let result
+    try {
+      result = await transport.forgetBatch({
+        ids: target.ids,
+        expectedRevision: target.revision,
+        confirm: true,
+        scope: target.scope,
+        ...(target.workspace !== undefined ? { workspace: target.workspace } : {}),
+      })
+    } catch (err) {
+      result = { ok: false as const, error: toMemoryFailure(err) }
+    }
+    if (!mountedRef.current || requestId !== batchForgetSeqRef.current || contextKey !== currentContextKeyRef.current) return
+    if (result.ok) {
+      // Success (or partial success): the store renumbered, so any selection
+      // is stale — clear it and refresh. Skipped ids surface as a warning
+      // banner after the refresh (the banner is cleared by fetchFirstPage).
+      const notFoundCount = result.value.notFound.length
+      setSelection(EMPTY_MEMORY_SELECTION)
+      setBatchForget(resolveBatchForget(submitting, result.value))
+      await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
+      if (
+        mountedRef.current
+        && requestId === batchForgetSeqRef.current
+        && contextKey === currentContextKeyRef.current
+        && notFoundCount > 0
+      ) {
+        setError({
+          code: GRAY_REMOTE_ERROR_CODES.NOT_FOUND,
+          localeKey: 'batchForget.partial',
+          tone: 'warning',
+          retryable: false,
+          count: notFoundCount,
+        })
+      }
+    } else if (
+      isStaleMemoryRevisionFailure(result.error)
+      || result.error.code === GRAY_REMOTE_ERROR_CODES.NOT_FOUND
+    ) {
+      // The selection is based on an obsolete snapshot (or the rows are
+      // already gone): drop it, refresh, and surface the mapped failure.
+      await fetchFirstPage(currentAppliedQueryRef.current, target.scope, target.workspace)
+      if (
+        mountedRef.current
+        && requestId === batchForgetSeqRef.current
+        && contextKey === currentContextKeyRef.current
+      ) {
+        setBatchForget(IDLE_BATCH_FORGET_STATE)
+        setSelection(EMPTY_MEMORY_SELECTION)
+        setError(mapMemoryFailure(result.error))
+      }
+    } else {
+      // Transient failure: keep the armed overlay so the user can retry.
+      setBatchForget(rejectBatchForget(submitting, result.error))
+    }
+  }, [transport, batchForget, fetchFirstPage])
+
+  const onBatchForgetCancel = useCallback(() => {
+    batchForgetSeqRef.current += 1
+    setBatchForget(cancelBatchForget(batchForget))
+  }, [batchForget])
+
   // Auto-dismiss the forget success note (pure UI timing).
   useEffect(() => {
     if (forget.phase !== 'done') return
@@ -806,7 +991,17 @@ export function MemoryManagePanel({
     return () => clearTimeout(handle)
   }, [forget])
 
+  // Auto-dismiss the batch-forget success note (pure UI timing).
+  useEffect(() => {
+    if (batchForget.phase !== 'done') return
+    const handle = setTimeout(() => setBatchForget(dismissBatchForget(batchForget)), FORGET_NOTE_MS)
+    return () => clearTimeout(handle)
+  }, [batchForget])
+
   const wired = transport !== undefined
+  const allSelected = list !== null && isMemoryPageSelected(selection, list.items.map(item => item.id))
+  const batchBusy = batchForget.phase === 'submitting'
+  const canBatchForget = wired && selection.length > 0 && !batchBusy && batchForget.phase !== 'confirming'
 
   return (
     <div data-graycode-memory="panel" style={panelStyle}>
@@ -839,24 +1034,44 @@ export function MemoryManagePanel({
             addSeqRef.current += 1
             editSeqRef.current += 1
             forgetSeqRef.current += 1
+            batchForgetSeqRef.current += 1
             setQueryText(event.target.value)
           }}
         />
-        <div style={scopeGroupStyle} role="group" aria-label={t('scope.global')}>
-          {GRAY_MEMORY_SCOPES.map(s => (
-            <button
-              key={s}
-              type="button"
-              data-graycode-memory="scope"
-              data-scope={s}
-              disabled={!wired}
-              style={s === scope ? activeScopeStyle : scopeStyle}
-              onClick={() => onScopeChange(s)}
-            >
-              {t(`scope.${s}`)}
-            </button>
+        <select
+          data-graycode-memory="scope-select"
+          aria-label={t('scope.select')}
+          value={memoryScopeOptionKey(selectedScopeInfo)}
+          disabled={!wired}
+          style={scopeSelectStyle}
+          onChange={event => {
+            const option = scopeSelectOptions.find(info => memoryScopeOptionKey(info) === event.target.value)
+            if (option !== undefined) onScopeSelect(option)
+          }}
+        >
+          {scopeSelectOptions.map(option => (
+            <option key={memoryScopeOptionKey(option)} value={memoryScopeOptionKey(option)} data-scope={option.scope}>
+              {option.scope === 'global'
+                ? t('scope.global')
+                : `${option.name}${option.path.length > 0 ? ` — ${option.path}` : ''}`}
+            </option>
           ))}
-        </div>
+        </select>
+        <button
+          type="button"
+          data-graycode-memory="batch-forget"
+          style={canBatchForget ? dangerButtonStyle : buttonDisabledStyle}
+          disabled={!canBatchForget}
+          title={selection.length === 0 ? t('list.selectAllHint') : undefined}
+          onClick={onBatchForgetRequest}
+        >
+          {t('batchForget.button')}（{selection.length}）
+        </button>
+        {scopesFailed && (
+          <span data-graycode-memory="scope-degraded" style={scopeNoteStyle}>
+            {t('scope.loadFailed')}
+          </span>
+        )}
       </div>
 
       {error !== null && (
@@ -870,7 +1085,7 @@ export function MemoryManagePanel({
             rows={3}
             placeholder={t('add.placeholder')}
             value={addText}
-            disabled={adding || (scope === 'workspace' && workspaceRoot === undefined)}
+            disabled={adding || (scope === 'workspace' && activeWorkspace === undefined)}
             style={addTextareaStyle}
             onChange={event => setAddText(event.target.value)}
             onKeyDown={event => {
@@ -891,8 +1106,8 @@ export function MemoryManagePanel({
             <button
               type="button"
               data-graycode-memory="add-submit"
-              style={adding || addText.trim().length === 0 || (scope === 'workspace' && workspaceRoot === undefined) ? buttonDisabledStyle : buttonStyle}
-              disabled={adding || addText.trim().length === 0 || (scope === 'workspace' && workspaceRoot === undefined)}
+              style={adding || addText.trim().length === 0 || (scope === 'workspace' && activeWorkspace === undefined) ? buttonDisabledStyle : buttonStyle}
+              disabled={adding || addText.trim().length === 0 || (scope === 'workspace' && activeWorkspace === undefined)}
               onClick={() => void submitAdd()}
             >
               {adding ? t('add.busy') : t('add.button')}
@@ -928,6 +1143,9 @@ export function MemoryManagePanel({
           items={list.items}
           wired={wired}
           forget={forget}
+          selectedIds={selection}
+          allSelected={allSelected}
+          selectionDisabled={batchBusy}
           onEdit={entry => {
             setAddNote(null)
             setForget(current => current.phase === 'done' ? IDLE_FORGET_STATE : current)
@@ -937,6 +1155,14 @@ export function MemoryManagePanel({
           onForgetRequest={onForgetRequest}
           onForgetConfirm={() => void onForgetConfirm()}
           onForgetCancel={onForgetCancel}
+          onToggleSelect={id => setSelection(prev => toggleMemorySelection(prev, id))}
+          onToggleSelectAll={() => {
+            if (allSelected) {
+              setSelection(EMPTY_MEMORY_SELECTION)
+            } else {
+              setSelection(prev => selectMemoryPage(prev, list.items.map(item => item.id)))
+            }
+          }}
         />
       )}
 
@@ -962,7 +1188,21 @@ export function MemoryManagePanel({
               {t('forget.done')}
             </span>
           )}
+          {batchForget.phase === 'done' && batchForget.outcome !== null && batchForget.outcome.notFound.length === 0 && (
+            <span data-graycode-memory="batch-forget-done" style={doneStyle}>
+              {applyMemoryTextCount(t('batchForget.done'), batchForget.outcome.removed)}
+            </span>
+          )}
         </div>
+      )}
+
+      {(batchForget.phase === 'confirming' || batchForget.phase === 'submitting' || batchForget.phase === 'error') && (
+        <BatchForgetConfirm
+          t={t}
+          state={batchForget}
+          onConfirm={() => void onBatchForgetConfirm()}
+          onCancel={onBatchForgetCancel}
+        />
       )}
 
       {editTarget !== null && (

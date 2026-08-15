@@ -23,10 +23,12 @@ import {
   GRAY_REMOTE_ERROR_CODES,
   makeInternalFailure,
   type GrayMemoryEntryView,
+  type GrayMemoryForgetBatchResult,
   type GrayMemoryForgetResult,
   type GrayMemoryListParams,
   type GrayMemoryListResult,
   type GrayMemoryScope,
+  type GrayMemoryScopeInfo,
   type GrayRemoteErrorCode,
   type GrayRemoteFailure,
 } from './types.ts'
@@ -116,6 +118,82 @@ export function buildMemoryListParams(state: MemoryQueryState): GrayMemoryListPa
       : {}),
     limit: normalizeMemoryLimit(state.limit),
   }
+}
+
+// ==================== Scope enumeration (M-02 workspace dropdown) ====================
+
+/** Last non-empty path segment of a workspace root (display fallback for the dropdown). */
+export function workspacePathName(path: string): string {
+  const trimmed = path.trim().replace(/[\\/]+$/, '')
+  if (trimmed.length === 0) return path
+  const parts = trimmed.split(/[\\/]/)
+  return parts[parts.length - 1] ?? trimmed
+}
+
+/** Global fallback option used when even the degraded enumeration is empty. */
+export const GLOBAL_MEMORY_SCOPE_FALLBACK: GrayMemoryScopeInfo = Object.freeze({
+  scope: 'global',
+  id: 'global',
+  name: 'Global',
+  path: '',
+})
+
+/**
+ * Dropdown option list for the scope selector (M-02): the host `memory/scopes`
+ * enumeration, guaranteed to contain a global option, plus the current session
+ * workspace when it is not covered. A missing/failed enumeration therefore
+ * still yields `[global, current workspace]`, so the panel keeps operating on
+ * the current scope instead of blocking (degrade rule).
+ */
+export function buildMemoryScopeOptions(
+  scopes: readonly GrayMemoryScopeInfo[] | null | undefined,
+  currentWorkspace: string | undefined,
+): readonly GrayMemoryScopeInfo[] {
+  const root = currentWorkspace?.trim()
+  const base = scopes ?? []
+  const list = base.some(info => info.scope === 'global')
+    ? base
+    : [GLOBAL_MEMORY_SCOPE_FALLBACK, ...base]
+  if (root === undefined || root.length === 0) return list
+  const covered = list.some(
+    info => info.scope === 'workspace' && (info.path === root || info.cwd === root),
+  )
+  if (covered) return list
+  return [...list, {
+    scope: 'workspace',
+    id: 'current',
+    name: workspacePathName(root),
+    path: root,
+    cwd: root,
+  }]
+}
+
+/**
+ * Stable dropdown value for one scope option. Workspaces key by path so the
+ * degraded fallback entry and the real enumeration entry for the same
+ * workspace share one value (selection survives the enumeration arriving).
+ */
+export function memoryScopeOptionKey(info: GrayMemoryScopeInfo): string {
+  return info.scope === 'workspace' ? `workspace\u0000${info.path}` : 'global\u0000global'
+}
+
+/**
+ * Default selection (M-02): the current session workspace when present in the
+ * options, otherwise the global scope. `options` is expected non-empty (the
+ * panel falls back to {@link GLOBAL_MEMORY_SCOPE_FALLBACK} first).
+ */
+export function defaultMemoryScopeSelection(
+  options: readonly GrayMemoryScopeInfo[],
+  currentWorkspace: string | undefined,
+): GrayMemoryScopeInfo {
+  const root = currentWorkspace?.trim()
+  if (root !== undefined && root.length > 0) {
+    const current = options.find(
+      info => info.scope === 'workspace' && (info.path === root || info.cwd === root),
+    )
+    if (current !== undefined) return current
+  }
+  return options.find(info => info.scope === 'global') ?? options[0] ?? GLOBAL_MEMORY_SCOPE_FALLBACK
 }
 
 // ==================== View models ====================
@@ -460,6 +538,114 @@ export function dismissForget(state: ForgetState): ForgetState {
   return IDLE_FORGET_STATE
 }
 
+// ==================== Selection helpers (M-03 multi-select / select-all) ====================
+
+/** Empty selection (frozen so callers cannot mutate it). */
+export const EMPTY_MEMORY_SELECTION: readonly number[] = Object.freeze([])
+
+/** Toggle one entry id in/out of the selection (order-preserving). */
+export function toggleMemorySelection(prev: readonly number[], id: number): readonly number[] {
+  return prev.includes(id) ? prev.filter(selected => selected !== id) : [...prev, id]
+}
+
+/** Union-select a visible page (select-all of the currently loaded rows). */
+export function selectMemoryPage(prev: readonly number[], visibleIds: readonly number[]): readonly number[] {
+  if (visibleIds.length === 0) return prev
+  const next = new Set<number>(prev)
+  for (const id of visibleIds) next.add(id)
+  return [...next]
+}
+
+/** Drop ids from the selection (e.g. notFound ids reported by forgetBatch). */
+export function excludeMemorySelection(prev: readonly number[], excluded: readonly number[]): readonly number[] {
+  if (excluded.length === 0) return prev
+  const drop = new Set<number>(excluded)
+  return prev.filter(id => !drop.has(id))
+}
+
+/** Whether the whole visible page is selected (header checkbox state). */
+export function isMemoryPageSelected(selected: readonly number[], visibleIds: readonly number[]): boolean {
+  return visibleIds.length > 0 && visibleIds.every(id => selected.includes(id))
+}
+
+// ==================== Batch forget confirmation state machine (M-03) ====================
+
+export type BatchForgetPhase = 'idle' | 'confirming' | 'submitting' | 'done' | 'error'
+
+/** Batch forget target: the selected ids under the current list revision. */
+export interface BatchForgetTarget {
+  readonly ids: readonly number[]
+  readonly revision: string
+  readonly scope: GrayMemoryScope
+  readonly workspace?: string
+}
+
+/**
+ * Immutable batch-forget flow state, mirroring the single-entry
+ * {@link ForgetState} machine. `outcome` (done) and `error` (error) carry the
+ * terminal results; a done state whose `outcome.notFound` is non-empty means a
+ * partial success (the panel then drops the stale selection and refreshes).
+ */
+export interface BatchForgetState {
+  readonly phase: BatchForgetPhase
+  readonly target: BatchForgetTarget | null
+  readonly outcome: GrayMemoryForgetBatchResult | null
+  readonly error: MemoryErrorView | null
+}
+
+/** Initial batch-forget state (idle). Frozen so callers cannot mutate it. */
+export const IDLE_BATCH_FORGET_STATE: BatchForgetState = Object.freeze({
+  phase: 'idle',
+  target: null,
+  outcome: null,
+  error: null,
+})
+
+/** Arm the destructive action: idle → confirming (count captured at arm time). */
+export function requestBatchForget(state: BatchForgetState, target: BatchForgetTarget): BatchForgetState {
+  if (state.phase !== 'idle') return state
+  return { phase: 'confirming', target, outcome: null, error: null }
+}
+
+/**
+ * Abandon: confirming|submitting|error → idle. Submitting is included so a
+ * cancel (or a superseded flow) can never leave the machine stuck (H-7b).
+ */
+export function cancelBatchForget(state: BatchForgetState): BatchForgetState {
+  if (state.phase !== 'confirming' && state.phase !== 'submitting' && state.phase !== 'error') return state
+  return IDLE_BATCH_FORGET_STATE
+}
+
+/**
+ * The explicit user confirmation: confirming|error → submitting (error allows
+ * retry after a transient failure). Double-submit guard: no-op while already
+ * submitting. This is the ONLY way to reach submitting — a batch forget
+ * request can never go out without an explicit confirm.
+ */
+export function confirmBatchForget(state: BatchForgetState): BatchForgetState {
+  if (state.phase !== 'confirming' && state.phase !== 'error') return state
+  if (state.target === null) return state
+  return { phase: 'submitting', target: state.target, outcome: null, error: null }
+}
+
+/** Success: submitting → done with the host outcome. */
+export function resolveBatchForget(state: BatchForgetState, outcome: GrayMemoryForgetBatchResult): BatchForgetState {
+  if (state.phase !== 'submitting') return state
+  return { phase: 'done', target: state.target, outcome, error: null }
+}
+
+/** Failure: submitting → error with the mapped stable-code view. */
+export function rejectBatchForget(state: BatchForgetState, failure: GrayRemoteFailure): BatchForgetState {
+  if (state.phase !== 'submitting') return state
+  return { phase: 'error', target: state.target, outcome: null, error: mapMemoryFailure(failure) }
+}
+
+/** Dismiss the result note: done → idle. */
+export function dismissBatchForget(state: BatchForgetState): BatchForgetState {
+  if (state.phase !== 'done') return state
+  return IDLE_BATCH_FORGET_STATE
+}
+
 // ==================== Error code mapping ====================
 
 export type MemoryErrorTone = 'danger' | 'warning' | 'info' | 'neutral'
@@ -475,10 +661,12 @@ export type MemoryErrorLocaleKey =
   | 'error.workspaceNotInitialized'
   | 'error.endpointNotFound'
   | 'error.internal'
+  | 'batchForget.partial'
 
 /**
  * Stable-code error view: the UI renders `localeKey` (localized copy) and the
  * machine code — never the host's raw `failure.message` text (PLAN_V2 §5.6).
+ * `count` (optional) is interpolated into the locale text's `{n}` placeholder.
  */
 export interface MemoryErrorView {
   readonly code: GrayRemoteErrorCode | 'UNKNOWN'
@@ -486,6 +674,8 @@ export interface MemoryErrorView {
   readonly tone: MemoryErrorTone
   /** Whether the banner offers a retry entry. */
   readonly retryable: boolean
+  /** Optional count substituted into the locale text (`{n}` placeholder). */
+  readonly count?: number
 }
 
 const ERROR_VIEWS: Readonly<Record<GrayRemoteErrorCode, MemoryErrorView>> = {
@@ -594,6 +784,11 @@ export function normalizeMemoryEntryChars(value: unknown): number | undefined {
     && value <= 1_000
     ? value
     : undefined
+}
+
+/** Substitute a count into a locale text's `{n}` placeholder (no-op without a count). */
+export function applyMemoryTextCount(text: string, count: number | undefined): string {
+  return count !== undefined ? text.replace('{n}', String(count)) : text
 }
 
 /** Stable local validation failure matching the host's over-limit response. */
