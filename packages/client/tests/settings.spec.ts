@@ -10,7 +10,17 @@ import {
   zh,
 } from '../src/client/settings/locales.ts'
 import { CATEGORIES } from '../src/client/settings/pages.tsx'
-import { inputStyle, switchWrapStyle, tabActiveStyle, tabStyle, tokens } from '../src/client/settings/styles.ts'
+import {
+  buttonStyle,
+  checkpointCreateActionsStyle,
+  checkpointCreateRowStyle,
+  checkpointTitleInputStyle,
+  inputStyle,
+  switchWrapStyle,
+  tabActiveStyle,
+  tabStyle,
+  tokens,
+} from '../src/client/settings/styles.ts'
 import type { GrayCodeConfig } from '../src/client/settings/types.ts'
 
 function makeConnection(call: ReturnType<typeof vi.fn>): ConnectionHandle {
@@ -168,6 +178,17 @@ describe('native settings theme styles', () => {
       width: '32px',
       height: '18px',
     })
+  })
+
+  it('keeps checkpoint action labels inside their buttons at narrow widths', () => {
+    expect(buttonStyle).toMatchObject({
+      boxSizing: 'border-box',
+      flexShrink: 0,
+      whiteSpace: 'nowrap',
+    })
+    expect(checkpointCreateRowStyle.flexWrap).toBe('wrap')
+    expect(checkpointTitleInputStyle).toMatchObject({ flex: '1 1 220px', width: 'auto' })
+    expect(checkpointCreateActionsStyle.flex).toBe('none')
   })
 })
 

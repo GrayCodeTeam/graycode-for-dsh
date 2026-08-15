@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { GcTranslate } from './fields.tsx'
-import { buttonDangerStyle, buttonRowStyle, buttonStyle, inputStyle, noteStyle, tokens } from './styles.ts'
+import {
+  buttonDangerStyle,
+  buttonRowStyle,
+  buttonStyle,
+  checkpointCreateActionsStyle,
+  checkpointCreateRowStyle,
+  checkpointTitleInputStyle,
+  inputStyle,
+  noteStyle,
+  tokens,
+} from './styles.ts'
 import type {
   CheckpointGcResult,
   CheckpointItem,
@@ -229,15 +239,17 @@ export function CheckpointManager({ t, remote, defaultWorkspace = '' }: Checkpoi
           }}
         />
       </label>
-      <div style={{ display: 'flex', gap: '8px' }}>
+      <div style={checkpointCreateRowStyle}>
         <input
-          style={inputStyle}
+          style={checkpointTitleInputStyle}
           value={title}
           placeholder={t('checkpoint.titlePlaceholder')}
           onChange={event => setTitle(event.target.value)}
         />
-        <button type="button" style={buttonStyle} disabled={busy} onClick={() => void create()}>{t('checkpoint.create')}</button>
-        <button type="button" style={buttonStyle} disabled={busy} onClick={() => void load()}>{t('checkpoint.refresh')}</button>
+        <div style={checkpointCreateActionsStyle}>
+          <button type="button" style={buttonStyle} disabled={busy} onClick={() => void create()}>{t('checkpoint.create')}</button>
+          <button type="button" style={buttonStyle} disabled={busy} onClick={() => void load()}>{t('checkpoint.refresh')}</button>
+        </div>
       </div>
       <label style={metaStyle}>
         <input

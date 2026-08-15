@@ -302,8 +302,11 @@ export const chipOnStyle: CSSProperties = {
 }
 
 export const buttonStyle: CSSProperties = {
+  boxSizing: 'border-box',
   display: 'inline-flex',
   alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
   gap: '6px',
   height: '30px',
   padding: '0 14px',
@@ -315,6 +318,8 @@ export const buttonStyle: CSSProperties = {
   cursor: 'pointer',
   font: 'inherit',
   fontSize: '12.5px',
+  lineHeight: '1.2',
+  whiteSpace: 'nowrap',
 }
 
 export const buttonGhostStyle: CSSProperties = {
@@ -334,6 +339,30 @@ export const buttonRowStyle: CSSProperties = {
   display: 'flex',
   flexWrap: 'wrap',
   gap: '8px',
+}
+
+/**
+ * Checkpoint creation toolbar. The text input owns the flexible space while
+ * the action buttons remain an indivisible group. On narrow hosts the group
+ * moves below the input instead of squeezing its labels onto multiple lines.
+ */
+export const checkpointCreateRowStyle: CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  gap: '8px',
+}
+
+export const checkpointTitleInputStyle: CSSProperties = {
+  ...inputStyle,
+  flex: '1 1 220px',
+  width: 'auto',
+  minWidth: 'min(220px, 100%)',
+}
+
+export const checkpointCreateActionsStyle: CSSProperties = {
+  ...buttonRowStyle,
+  flex: 'none',
 }
 
 export const fileInputStyle: CSSProperties = {
