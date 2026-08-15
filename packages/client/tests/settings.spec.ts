@@ -10,6 +10,7 @@ import {
   zh,
 } from '../src/client/settings/locales.ts'
 import { CATEGORIES } from '../src/client/settings/pages.tsx'
+import { inputStyle, switchWrapStyle, tabActiveStyle, tabStyle, tokens } from '../src/client/settings/styles.ts'
 import type { GrayCodeConfig } from '../src/client/settings/types.ts'
 
 function makeConnection(call: ReturnType<typeof vi.fn>): ConnectionHandle {
@@ -141,6 +142,32 @@ describe('real settings surface', () => {
     ])
     expect(new Set(CATEGORIES.map(category => category.id)).size).toBe(CATEGORIES.length)
     for (const category of CATEGORIES) expect(zh).toHaveProperty(category.labelKey)
+  })
+})
+
+describe('native settings theme styles', () => {
+  it('tracks the DSH color-scheme instead of relying on unavailable aliases', () => {
+    for (const color of [tokens.bg, tokens.bgSubtle, tokens.fg, tokens.fgSecondary, tokens.border, tokens.accent]) {
+      expect(color).toContain('light-dark(')
+      expect(color).not.toContain('--dsw-alias-')
+    }
+    expect(tokens.fontFamily).toContain('--dsw-font-family')
+    expect(tokens.fontMono).toContain('--ds-font-family-code')
+    expect(inputStyle.colorScheme).toBe('inherit')
+  })
+
+  it('restores an inactive tab border after the active longhand was applied', () => {
+    expect(tabStyle.borderColor).toBe('transparent')
+    expect(tabActiveStyle.borderColor).not.toBe(tabStyle.borderColor)
+  })
+
+  it('gives the custom switch a real containing block for its track and knob', () => {
+    expect(switchWrapStyle).toMatchObject({
+      display: 'inline-block',
+      position: 'relative',
+      width: '32px',
+      height: '18px',
+    })
   })
 })
 

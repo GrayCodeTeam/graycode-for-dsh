@@ -55,6 +55,7 @@ import {
   switchTrackStyle,
   switchWrapStyle,
   textareaStyle,
+  tokens,
 } from './styles.ts'
 import type { GrayCodeConfig } from './types.ts'
 
@@ -223,7 +224,7 @@ function Field({ spec, value, onChange, t }: FieldRenderProps): ReactNode {
                 <label key={severity.value} style={checked ? chipOnStyle : chipStyle}>
                   <input
                     type="checkbox"
-                    style={{ accentColor: 'var(--dsw-alias-accent, #2563eb)' }}
+                    style={{ accentColor: tokens.accent }}
                     checked={checked}
                     onChange={event => {
                       const next = new Set(selected)

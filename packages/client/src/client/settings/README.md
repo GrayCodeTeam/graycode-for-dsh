@@ -44,4 +44,7 @@ adapter.
 | `GrayCodeSettingsSection.tsx` | Native settings slot root |
 
 All styling is inline because the browser package has no CSS asset pipeline.
-It uses DSH `--dsw-alias-*` tokens with neutral fallbacks.
+DSH rc.6 exposes its font variables and switches `color-scheme`, but does not
+publish color aliases. The panel therefore uses the DSH font variables plus
+`light-dark()` colors so native controls and custom surfaces follow the host
+theme without maintaining a second theme toggle.

@@ -3,26 +3,27 @@
  *
  * 本包 tsc + tsdown 构建没有 css 管线（bundle 纯度门也禁止 `.css` 资源），
  * 所以旧版 `graycode.css` 被改造为一组 `CSSProperties` 常量。设计 token 沿用
- * DSH 的 `--dsw-alias-*` 别名面并配中性 fallback：外壳不定义这些变量时面板
- * 优雅降级。伪元素/属性选择器（`:focus`、`::after` 等）无法用内联样式表达，
+ * DSH rc.6 通过根节点的 `color-scheme` 切换明暗主题，但并不公开颜色 token。
+ * 因此颜色使用 `light-dark()` 跟随宿主主题，字体则复用 DSH 已公开的变量。
+ * 伪元素/属性选择器（`:focus`、`::after` 等）无法用内联样式表达，
  * 对应交互改为组件状态驱动（见 fields.tsx 的开关与折叠卡片）。
  */
 
 import type { CSSProperties } from 'react'
 
-/** 设计 token：DSH alias 面 + fallback（变量缺省时面板仍可读）。 */
+/** 设计 token：跟随 DSH 根节点 `color-scheme`，与原生设置面板保持同一明暗状态。 */
 export const tokens = {
-  bg: 'var(--dsw-alias-bg-elevated, #ffffff)',
-  bgSubtle: 'var(--dsw-alias-bg-elevated-2, #f7f8fa)',
-  fg: 'var(--dsw-alias-text-primary, #1f2329)',
-  fgSecondary: 'var(--dsw-alias-text-secondary, #646a73)',
-  fgMuted: 'var(--dsw-alias-text-tertiary, #8a919c)',
-  border: 'var(--dsw-alias-border-subtle, #e5e6eb)',
-  accent: 'var(--dsw-alias-accent, #2563eb)',
-  accentBg: 'var(--dsw-alias-accent-weak-bg, #eef4ff)',
-  danger: 'var(--dsw-alias-danger, #d92d20)',
-  fontFamily: 'var(--dsw-alias-font-family, inherit)',
-  fontMono: 'var(--dsw-alias-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)',
+  bg: 'light-dark(#ffffff, #343437)',
+  bgSubtle: 'light-dark(#f7f8fa, #252528)',
+  fg: 'light-dark(#1f2329, #f9fafb)',
+  fgSecondary: 'light-dark(#646a73, #adb2b8)',
+  fgMuted: 'light-dark(#8a919c, #8e949d)',
+  border: 'light-dark(#e5e6eb, rgba(255, 255, 255, 0.14))',
+  accent: 'light-dark(#2563eb, #7aa2ff)',
+  accentBg: 'light-dark(#eef4ff, rgba(81, 126, 255, 0.18))',
+  danger: 'light-dark(#d92d20, #ff7b72)',
+  fontFamily: 'var(--dsw-font-family, inherit)',
+  fontMono: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)',
 } as const
 
 /** 主题色参与 border-color/background 时的混合。 */
@@ -73,6 +74,9 @@ export const tabStyle: CSSProperties = {
   height: '28px',
   padding: '0 10px',
   border: '1px solid transparent',
+  // Active style uses the borderColor longhand. Keep the base longhand too so
+  // React restores transparent instead of removing it to currentColor.
+  borderColor: 'transparent',
   borderRadius: '999px',
   background: 'transparent',
   color: tokens.fgSecondary,
@@ -166,6 +170,7 @@ export const inputStyle: CSSProperties = {
   borderRadius: '8px',
   background: tokens.bg,
   color: tokens.fg,
+  colorScheme: 'inherit',
   font: 'inherit',
 }
 
@@ -228,10 +233,12 @@ export const rowDescriptionStyle: CSSProperties = {
 
 /** 自定义开关：隐藏原生 checkbox + 轨道 + 旋钮（状态驱动，见 Switch 组件）。 */
 export const switchWrapStyle: CSSProperties = {
+  display: 'inline-block',
   position: 'relative',
   flex: 'none',
   width: '32px',
   height: '18px',
+  verticalAlign: 'middle',
 }
 
 export const switchInputStyle: CSSProperties = {
@@ -278,6 +285,7 @@ export const chipStyle: CSSProperties = {
   height: '26px',
   padding: '0 10px',
   border: `1px solid ${tokens.border}`,
+  borderColor: tokens.border,
   borderRadius: '999px',
   background: tokens.bg,
   color: tokens.fgSecondary,
@@ -300,6 +308,7 @@ export const buttonStyle: CSSProperties = {
   height: '30px',
   padding: '0 14px',
   border: `1px solid ${tokens.border}`,
+  borderColor: tokens.border,
   borderRadius: '8px',
   background: tokens.bg,
   color: tokens.fg,

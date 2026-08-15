@@ -90,6 +90,10 @@ export function GrayCodeSettingsSection({ t, store, locale, remote, defaultWorks
               aria-selected={selected}
               style={selected ? tabActiveStyle : tabStyle}
               onClick={() => setActiveId(category.id)}
+              // Mouse clicks should not leave a persistent focus ring. Keyboard
+              // navigation does not emit mouseup, so :focus-visible remains
+              // available to Tab/Enter users.
+              onMouseUp={event => event.currentTarget.blur()}
             >
               <span style={tabIconStyle}>{category.icon}</span>
               <span>{t(category.labelKey)}</span>
