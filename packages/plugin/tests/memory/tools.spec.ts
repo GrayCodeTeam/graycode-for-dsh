@@ -321,4 +321,93 @@ describe('memory 工具（经 service 闭包）', () => {
       fs.rmSync(dataRoot, { recursive: true, force: true })
     }
   })
+
+  test('memory_wake scope="global"：只读全局段，工作区段不出现且不建目录', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-scope-'))
+    try {
+      const globalMgr = await service.getGlobal()
+      await globalMgr.note('global-scoped-mem')
+      await tools.get('memory_note')!.execute({ text: 'ws-scoped-mem' }, fakeExec(wsDir))
+
+      const wake = tools.get('memory_wake')!
+      const woke = (await wake.execute({ scope: 'global' }, fakeExec(wsDir))) as WakeToolResult
+      expect(woke.text).toContain('global-scoped-mem')
+      expect(woke.text).not.toContain('Workspace memory')
+      expect(woke.workspace).toBeUndefined()
+      expect(woke.totalMemories).toBe(1)
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_wake scope="workspace"：只读工作区段，全局段不出现；无 cwd 报错', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-scope2-'))
+    try {
+      const globalMgr = await service.getGlobal()
+      await globalMgr.note('global-should-not-appear')
+      await tools.get('memory_note')!.execute({ text: 'ws-only-mem' }, fakeExec(wsDir))
+
+      const wake = tools.get('memory_wake')!
+      const woke = (await wake.execute({ scope: 'workspace' }, fakeExec(wsDir))) as WakeToolResult
+      expect(woke.text).toContain('ws-only-mem')
+      expect(woke.text).not.toContain('Global memory')
+      expect(woke.workspace).toEqual({ cwd: wsDir, totalMemories: 1 })
+
+      const noCwd = (await wake.execute({ scope: 'workspace' }, fakeExecNoCwd()).catch(e => e as Error)) as Error
+      expect(noCwd.message).toBe('Workspace scope requires an active workspace.')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_note scope="global"：有工作区上下文仍写全局；scope="workspace" 无 cwd 报错', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-scope3-'))
+    try {
+      const note = tools.get('memory_note')!
+      const noted = (await note.execute({ text: 'explicit-global', scope: 'global' }, fakeExec(wsDir))) as NoteToolResult
+      expect(noted.id).toBe(0)
+      const globalMgr = await service.getGlobal()
+      expect((await globalMgr.listEntries()).map(e => e.text)).toEqual(['explicit-global'])
+      // 工作区未被隐式创建
+      expect(fs.existsSync(path.join(dataRoot, 'memory-workspaces'))).toBe(false)
+
+      const noCwd = (await note.execute({ text: 'x', scope: 'workspace' }, fakeExecNoCwd()).catch(e => e as Error)) as Error
+      expect(noCwd.message).toBe('Workspace scope requires an active workspace.')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
+  test('memory_recall scope 参数：global 只搜全局、workspace 只搜工作区、无 cwd 报错', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-scope4-'))
+    try {
+      const globalMgr = await service.getGlobal()
+      await globalMgr.note('topic-global-only')
+      await tools.get('memory_note')!.execute({ text: 'topic-workspace-only' }, fakeExec(wsDir))
+
+      const recall = tools.get('memory_recall')!
+      const globalHit = (await recall.execute({ regex: 'topic', scope: 'global' }, fakeExec(wsDir))) as RecallToolResult
+      expect(globalHit.totalHits).toBe(1)
+      expect(globalHit.text).toContain('topic-global-only')
+      expect(globalHit.text).not.toContain('Workspace memory')
+
+      const wsHit = (await recall.execute({ regex: 'topic', scope: 'workspace' }, fakeExec(wsDir))) as RecallToolResult
+      expect(wsHit.totalHits).toBe(1)
+      expect(wsHit.text).toContain('topic-workspace-only')
+      expect(wsHit.text).not.toContain('Global memory')
+
+      const noCwd = (await recall.execute({ regex: 'topic', scope: 'workspace' }, fakeExecNoCwd()).catch(e => e as Error)) as Error
+      expect(noCwd.message).toBe('Workspace scope requires an active workspace.')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
 })

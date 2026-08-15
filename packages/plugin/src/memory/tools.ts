@@ -102,10 +102,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Output has two parts: global memory and current workspace memory (isolated per workspace), marked with --- Global memory --- / --- Workspace memory ---.\n' +
       'Recent memories appear verbatim; older ones appear as compressed summaries.\n' +
       'If output is split into parts, read them in order until you see "You are awake."\n' +
-      'Parameters: part (optional, 1-based part number); snapshotT (optional, memory count at snapshot time).',
+      'Parameters: part (optional, 1-based part number); snapshotT (optional, memory count at snapshot time); scope (optional, "global" or "workspace" to read a single scope instead of both).',
     parameters: {
       part: { type: 'integer', description: 'Part number to read (1-based). Omit to start at part 1.' },
       snapshotT: { type: 'integer', description: 'Total memory count at snapshot time. Omit to use the current count. Keeps multi-call wake reads consistent.' },
+      scope: { ...scopeEnum, description: 'Memory scope to read. Omit to read both global and current workspace memory; "global" reads only global; "workspace" reads only the current workspace (requires an active workspace).' },
     },
     output: {
       schema: {
@@ -133,7 +134,12 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
     },
     async execute(args, exec) {
       const cwd = cwdOf(exec)
-      const globalMgr = await service.getGlobal()
+      const scope: MemoryScope | undefined = args.scope === 'global' || args.scope === 'workspace' ? args.scope : undefined
+      if (scope === 'workspace' && !cwd) {
+        throw new Error('Workspace scope requires an active workspace.')
+      }
+      const readGlobal = scope !== 'workspace'
+      const readWorkspace = scope !== 'global'
 
       // Continue-reading scenario (part > 1): a scope that already returned
       // "No part" is fully read and skipped; a stale snapshotT (the log holds
@@ -161,10 +167,10 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
         }
       }
 
-      const globalResult = await wakeScope(globalMgr)
+      const globalResult = readGlobal ? await wakeScope(await service.getGlobal()) : null
       let wsResult: WakeResult | null = null
       let wsAvailable = false
-      if (cwd) {
+      if (readWorkspace && cwd) {
         const wsMgr = await service.getWorkspace(cwd, false)
         if (wsMgr) {
           wsAvailable = true
@@ -196,24 +202,28 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
 
       const lines: string[] = []
       if (globalEmpty && wsEmpty) {
-        if (globalSkipped || wsSkipped) {
+        if ((readGlobal && globalSkipped) || (readWorkspace && wsSkipped)) {
           throw new Error(`No part ${args.part}: memory already fully read. Run memory_wake.`)
         }
         lines.push('No memories yet. Record the first with memory_note.')
         lines.push('You are awake.')
       } else {
-        if (globalResult && !globalEmpty) {
-          if (!wsEmpty) lines.push('--- Global memory ---')
-          appendSection(lines, globalResult, 'Global')
-        } else if (globalSkipped && !wsEmpty) {
-          lines.push('(Global memory already fully read)')
+        if (readGlobal) {
+          if (globalResult && !globalEmpty) {
+            if (!wsEmpty) lines.push('--- Global memory ---')
+            appendSection(lines, globalResult, 'Global')
+          } else if (globalSkipped && !wsEmpty) {
+            lines.push('(Global memory already fully read)')
+          }
         }
-        if (wsResult && !wsEmpty) {
-          const wsName = cwd ? service.getWorkspaceFolderName(cwd) : null
-          lines.push(wsName ? `--- Workspace memory (${wsName}) ---` : '--- Workspace memory ---')
-          appendSection(lines, wsResult, 'Workspace')
-        } else if (wsSkipped && !globalEmpty) {
-          lines.push('(Workspace memory already fully read)')
+        if (readWorkspace) {
+          if (wsResult && !wsEmpty) {
+            const wsName = cwd ? service.getWorkspaceFolderName(cwd) : null
+            lines.push(wsName ? `--- Workspace memory (${wsName}) ---` : '--- Workspace memory ---')
+            appendSection(lines, wsResult, 'Workspace')
+          } else if (wsSkipped && !globalEmpty) {
+            lines.push('(Workspace memory already fully read)')
+          }
         }
 
         if (!awake) {
@@ -258,9 +268,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Memories are saved to the current workspace memory store (separate from global memory; memory_wake reads both).\n' +
       'One line of text, bounded by the memory_config entryChars limit (default 280 bytes max; accented characters take 2 bytes; raise up to 1000 via memory_config).\n' +
       'Do not record redundant content, things you already know, or things recorded moments ago.\n' +
-      'If a compression prompt (pendingCompression) is returned, run memory_compress before the next operation.',
+      'If a compression prompt (pendingCompression) is returned, run memory_compress before the next operation.\n' +
+      'Scope: with a workspace the current workspace memory is used by default; pass scope="global" to write global memory explicitly.',
     parameters: {
       text: { type: 'string', required: true, description: 'Memory text to record. One line, bounded by the memory_config entryChars limit (default 280 bytes).' },
+      scope: { ...scopeEnum, description: 'Memory scope to write. Omit to use the current workspace memory when a workspace is active (global otherwise); "global" writes global memory; "workspace" requires an active workspace.' },
     },
     output: {
       schema: {
@@ -276,7 +288,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
     },
     async execute(args, exec) {
       const cwd = cwdOf(exec)
-      const mgr = await service.getForTool(cwd, undefined)
+      const scope: MemoryScope | undefined = args.scope === 'global' || args.scope === 'workspace' ? args.scope : undefined
+      if (scope === 'workspace' && !cwd) {
+        throw new Error('Workspace scope requires an active workspace.')
+      }
+      const mgr = await service.getForTool(cwd, scope)
       if (!mgr) {
         throw new Error('MemoryManager is not initialized.')
       }
@@ -308,9 +324,11 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Search all permanent memories (verbatim match). Regular expressions are supported.\n' +
       'Searches both global memory and current workspace memory (isolated per workspace); hits are labeled with --- Global memory --- / --- Workspace memory ---.\n' +
       'Compressed summaries are included — compression never loses information.\n' +
-      'Results are capped at one output part; if truncated, a hint tells you to narrow the regex.',
+      'Results are capped at one output part; if truncated, a hint tells you to narrow the regex.\n' +
+      'Scope: pass scope="global" or scope="workspace" to search a single scope instead of both.',
     parameters: {
       regex: { type: 'string', required: true, description: 'Search regular expression (case-insensitive). IDs and dates are searchable too.' },
+      scope: { ...scopeEnum, description: 'Memory scope to search. Omit to search both global and current workspace memory; "global" searches only global; "workspace" searches only the current workspace (requires an active workspace).' },
     },
     output: {
       schema: {
@@ -327,14 +345,19 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
     },
     async execute(args, exec) {
       const cwd = cwdOf(exec)
-      const globalMgr = await service.getGlobal()
-      const globalResult = await globalMgr.recall(args.regex)
+      const scope: MemoryScope | undefined = args.scope === 'global' || args.scope === 'workspace' ? args.scope : undefined
+      if (scope === 'workspace' && !cwd) {
+        throw new Error('Workspace scope requires an active workspace.')
+      }
+      const readGlobal = scope !== 'workspace'
+      const readWorkspace = scope !== 'global'
+      const globalResult = readGlobal ? await (await service.getGlobal()).recall(args.regex) : null
 
       let wsResult: RecallResult | null = null
       let workspaceNotInitialized = false
       // No cwd -> no workspace context: only global memory is searched (the
       // hint is only shown when a workspace is expected but not initialized).
-      if (cwd) {
+      if (readWorkspace && cwd) {
         const wsMgr = await service.getWorkspace(cwd, false)
         if (wsMgr) {
           wsResult = await wsMgr.recall(args.regex)
@@ -354,10 +377,10 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       }
 
       const lines: string[] = []
-      if (globalResult.totalHits > 0) {
+      if (readGlobal && globalResult && globalResult.totalHits > 0) {
         appendSection(lines, globalResult, 'Global')
       }
-      if (wsResult && wsResult.totalHits > 0) {
+      if (readWorkspace && wsResult && wsResult.totalHits > 0) {
         appendSection(lines, wsResult, 'Workspace', cwd ? service.getWorkspaceFolderName(cwd) : null)
       }
       if (lines.length === 0) {
@@ -369,8 +392,8 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
 
       return omitUndefined({
         text: lines.join('\n'),
-        totalHits: globalResult.totalHits + (wsResult?.totalHits ?? 0),
-        truncated: globalResult.truncated || !!wsResult?.truncated,
+        totalHits: (globalResult?.totalHits ?? 0) + (wsResult?.totalHits ?? 0),
+        truncated: (globalResult?.truncated ?? false) || (wsResult?.truncated ?? false),
         workspaceNotInitialized: workspaceNotInitialized || undefined,
       })
     },
