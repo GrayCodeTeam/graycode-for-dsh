@@ -261,6 +261,42 @@ describe('upgradeReviewDocumentToV4', () => {
     expect(upgradedValidation.isValid).toBe(true)
     expect(upgradedValidation.reviewSnapshot?.findings[0]?.title).toBe('发现一个问题')
   })
+
+  it('legacy milestone with Reviewed Modules after Summary keeps the module list（4.17-L5）', () => {
+    const v2 = [
+      '# Legacy Review',
+      '- Date: 2026-04-03',
+      '- Status: in_progress',
+      '',
+      '## Review Scope',
+      '审查范围说明',
+      '',
+      '## Review Summary',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_START -->',
+      '- 当前状态：进行中',
+      '<!-- GRAYCODE_REVIEW_SUMMARY_END -->',
+      '',
+      '## Review Findings',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_START -->',
+      '<!-- GRAYCODE_REVIEW_FINDINGS_END -->',
+      '',
+      '## Review Milestones',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_START -->',
+      '### M1 · 第一轮',
+      '- Status: completed',
+      '- Summary:',
+      '  第一轮摘要',
+      '- Reviewed Modules: mod-a, mod-b',
+      '<!-- GRAYCODE_REVIEW_MILESTONES_END -->',
+    ].join('\n')
+
+    expect(detectReviewDocumentFormat(v2)).toBe('v2')
+    const upgraded = upgradeReviewDocumentToV4(v2)
+    const validation = validateReviewDocument(upgraded)
+    expect(validation.isValid).toBe(true)
+    // 修复前：`- Reviewed Modules:` 被 Summary 收集吞掉，模块清单丢失
+    expect(validation.reviewSnapshot?.summary.reviewedModules).toEqual(['mod-a', 'mod-b'])
+  })
 })
 
 describe('code fence pairing in review scope (BUG: unclosed fence)', () => {
@@ -300,6 +336,32 @@ describe('code fence pairing in review scope (BUG: unclosed fence)', () => {
       summary: '奇数围栏不应阻断 Snapshot 定位',
     }, 'en')
     expect(recorded.milestoneId).toBe('M1')
+    expect(validateReviewDocument(recorded.content).isValid).toBe(true)
+  })
+
+  it('scope 含字面 `## Review Snapshot` 标题：转义后仍能创建、校验与记录（3.17-M4）', () => {
+    const content = buildInitialReviewDocument({
+      title: 'Literal Heading Scope',
+      review: '范围说明\n## Review Snapshot\n这是正文段落',
+    }, 'en')
+    expect(detectReviewDocumentFormat(content)).toBe('v4')
+
+    // 正文 scope 里该字面行被转义（行首反斜杠），不再是 H2 heading
+    const scopeSection = content.slice(
+      content.indexOf('## Review Scope'),
+      content.indexOf('## Review Summary')
+    )
+    expect(scopeSection).toContain('\\## Review Snapshot')
+
+    const validation = validateReviewDocument(content)
+    expect(validation.isValid).toBe(true)
+    expect(validation.issues.some((item) => item.code === 'snapshot_section_count')).toBe(false)
+
+    // record 继续正常工作（修复前会被 snapshot_section_count 卡死）
+    const recorded = appendReviewMilestone(content, {
+      milestoneTitle: '第一轮',
+      summary: '摘要',
+    }, 'en')
     expect(validateReviewDocument(recorded.content).isValid).toBe(true)
   })
 

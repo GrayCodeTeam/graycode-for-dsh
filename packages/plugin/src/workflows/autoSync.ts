@@ -180,7 +180,7 @@ export async function syncProgressFromDesignArtifact(
 
       await writeProgress(deps, progressPath, nextMetadata, now)
       return []
-    })
+    }, deps.cwd)
   } catch (error) {
     return [`Failed to auto-sync progress after design write: ${error instanceof Error ? error.message : String(error)}`]
   }
@@ -249,7 +249,7 @@ export async function syncProgressFromPlanArtifact(
 
       await writeProgress(deps, progressPath, nextMetadata, now)
       return []
-    })
+    }, deps.cwd)
   } catch (error) {
     return [`Failed to auto-sync progress after plan write: ${error instanceof Error ? error.message : String(error)}`]
   }
@@ -306,7 +306,7 @@ export async function syncProgressFromReviewArtifact(
 
       await writeProgress(deps, progressPath, nextMetadata, now)
       return []
-    })
+    }, deps.cwd)
   } catch (error) {
     return [`Failed to auto-sync progress after review write: ${error instanceof Error ? error.message : String(error)}`]
   }

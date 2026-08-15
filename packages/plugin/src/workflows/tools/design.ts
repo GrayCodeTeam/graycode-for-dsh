@@ -126,7 +126,7 @@ export async function executeCreateDesign(
       ...(title ? { title } : {}),
     })
     return buildDesignResult({ path: outPath, content }, progressWarnings, outcome)
-  })
+  }, deps.cwd)
 }
 
 export async function executeUpdateDesign(
@@ -166,7 +166,7 @@ export async function executeUpdateDesign(
       progressWarnings,
       outcome
     )
-  })
+  }, deps.cwd)
 }
 
 function renderToolResult<A, V>(_args: A, value: V): Array<{ type: 'text'; text: string }> {

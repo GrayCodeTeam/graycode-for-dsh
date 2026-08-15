@@ -70,7 +70,8 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key)
 }
 
-/** staged-diff 接管 / 回退落盘的提示（warnings 通道；默认 disabled 时为 undefined） */
+/** staged-diff 接管提示（warnings 通道：staged 条目 id；默认 disabled / 直接落盘时为
+ *  undefined。3.17-M2 起 staging 失败不再回退落盘，outcome.warnings 分支仅为防御保留） */
 function buildProgressWriteWarnings(outcome: Awaited<ReturnType<typeof writeTargetText>>): string[] | undefined {
   const warnings: string[] = []
   if (outcome.staged && outcome.stagedEntryId) {
@@ -283,7 +284,7 @@ export async function executeCreateProgress(
       },
       warnings: buildProgressWriteWarnings(outcome),
     })
-  })
+  }, deps.cwd)
 }
 
 export async function executeUpdateProgress(
@@ -408,7 +409,7 @@ export async function executeUpdateProgress(
       },
       warnings: buildProgressWriteWarnings(outcome),
     })
-  })
+  }, deps.cwd)
 }
 
 export async function executeRecordProgressMilestone(
@@ -527,7 +528,7 @@ export async function executeRecordProgressMilestone(
       },
       warnings: buildProgressWriteWarnings(outcome),
     })
-  })
+  }, deps.cwd)
 }
 
 export async function executeValidateProgressDocument(

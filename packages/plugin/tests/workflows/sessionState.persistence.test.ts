@@ -12,7 +12,7 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   flushReviewSessionStore,
   initReviewSessionStore,
@@ -33,16 +33,15 @@ const STATE: ConversationReviewSessionState = {
   finalizedAt: null,
 }
 
-beforeAll(async () => {
+beforeEach(async () => {
+  // 3.20-M3：每用例独立 dataRoot——sidecar 整库文件（workflows/review-sessions.json）
+  // 不再跨用例共享，消除用例间通过同一磁盘文件产生的隐式顺序依赖。
   dataRoot = await mkdtemp(path.join(os.tmpdir(), 'graycode-session-state-'))
-})
-
-afterAll(async () => {
-  await rm(dataRoot, { recursive: true, force: true })
-})
-
-beforeEach(() => {
   resetReviewSessionStatesForTest()
+})
+
+afterEach(async () => {
+  await rm(dataRoot, { recursive: true, force: true })
 })
 
 /** 模拟一次进程重启：清空进程内状态后重新 init 同一 dataRoot */

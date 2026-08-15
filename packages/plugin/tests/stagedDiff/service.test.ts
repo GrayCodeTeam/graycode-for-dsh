@@ -128,6 +128,20 @@ describe('createEntry', () => {
     expect(second.status).toBe('pending')
   })
 
+  it('toolCallId 幂等覆盖非 done 状态：reject 后同 id 再 stage 返回被拒条目（不生成新条目）', async () => {
+    const { store, service } = setup()
+    await service.initialize()
+    const first = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x', toolCallId: 't-reject' })
+    await service.rejectEntry({ entryId: first.id, workspaceRoot: ROOT })
+    expect(store.entries).toHaveLength(1)
+
+    // 4.17-L4：同一 toolCallId 重试（reject 后）不得再生成新条目——幂等返回被拒条目
+    const second = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x', toolCallId: 't-reject' })
+    expect(second.id).toBe(first.id)
+    expect(second.status).toBe('rejected')
+    expect(store.entries).toHaveLength(1)
+  })
+
   it('拒绝非法路径（.. / 绝对路径）→ GRAY_STAGED_INVALID_PATH', async () => {
     const { service } = setup()
     await service.initialize()
@@ -324,6 +338,98 @@ describe('acceptEntry', () => {
     const done = await service.acceptEntry({ entryId: 'crash-entry', expectedRevision: needsReapply.revision, workspaceRoot: ROOT })
     expect(done.status).toBe('done')
     expect(applier.disk.get(path.join(ROOT, 'a.md'))).toBe('x')
+  })
+
+  it('冲突检测：目标文件已被其他流程修改且 before 存在 → GRAY_STAGED_ACCEPT_CONFLICT，不覆盖', async () => {
+    const { applier, service } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({
+      workspaceId: WS,
+      sessionId: SESSION,
+      path: 'a.md',
+      after: 'new',
+      before: 'original',
+    })
+    // 另一流程把磁盘内容改成了 v2（≠ before，也 ≠ after）
+    applier.disk.set(path.join(ROOT, 'a.md'), 'modified by another flow')
+
+    const error = await expectRejectCode(
+      service.acceptEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: ROOT }),
+      StagedDiffErrorCode.ACCEPT_CONFLICT,
+    )
+    expect(error.entry?.status).toBe('pending') // 条目未被推进，未被自动覆盖
+    expect(applier.applyCalls).toBe(0)
+    expect(applier.disk.get(path.join(ROOT, 'a.md'))).toBe('modified by another flow')
+  })
+
+  it('冲突检测放行路径：磁盘与 before 一致（无冲突）；磁盘已是 after（崩溃恢复重放）', async () => {
+    const { applier, service } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({
+      workspaceId: WS,
+      sessionId: SESSION,
+      path: 'a.md',
+      after: 'new',
+      before: 'original',
+    })
+    // 磁盘与 before 一致 → 正常接受并落盘
+    applier.disk.set(path.join(ROOT, 'a.md'), 'original')
+    const accepted = await service.acceptEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: ROOT })
+    expect(accepted.status).toBe('done')
+    expect(applier.disk.get(path.join(ROOT, 'a.md'))).toBe('new')
+  })
+
+  it('冲突检测放行路径：磁盘内容 === after（写盘已发生但 done 未持久化的崩溃窗口）', async () => {
+    const { applier, service } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({
+      workspaceId: WS,
+      sessionId: SESSION,
+      path: 'a.md',
+      after: 'new',
+      before: 'original',
+    })
+    // 崩溃窗口形态：磁盘已是 after（重放幂等，不误报冲突）
+    applier.disk.set(path.join(ROOT, 'a.md'), 'new')
+    const done = await service.acceptEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: ROOT })
+    expect(done.status).toBe('done')
+    expect(applier.applyCalls).toBe(1)
+  })
+
+  it('dispose 后到达落盘步骤的在途 accept：拒绝写盘（4.17-L2）', async () => {
+    const { applier, service, store } = setup()
+    await service.initialize()
+    const entry = await service.createEntry({ workspaceId: WS, sessionId: SESSION, path: 'a.md', after: 'x' })
+
+    // 门控 accept 的「accepted 持久化」步骤：让 accept 停在写盘前（模拟 HMR/卸载竞态）
+    let releaseGate!: () => void
+    const gate = new Promise<void>(resolve => { releaseGate = resolve })
+    let saveCount = 0
+    let acceptPersistEntered = false
+    const originalSave = store.save.bind(store)
+    store.save = async (entries: readonly StagedEntry[]) => {
+      saveCount += 1
+      // createEntry 的 pending 持久化发生在替换 save 之前（原始实现）；替换后
+      // save#1 = acceptEntry 的 accepted 持久化（落盘前），save#2 = done 持久化（落盘后）
+      if (saveCount === 1) {
+        acceptPersistEntered = true
+        await gate
+      }
+      await originalSave(entries)
+    }
+
+    const acceptPromise = service.acceptEntry({ entryId: entry.id, expectedRevision: 1, workspaceRoot: ROOT })
+    // 等待 accept 推进到 accepted 持久化（在门控处等待）
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(acceptPersistEntered).toBe(true)
+
+    service.dispose() // 写盘前弃用实例
+    releaseGate()
+
+    const error = await expectRejectCode(acceptPromise, StagedDiffErrorCode.STORAGE_CORRUPT)
+    expect(error.message).toMatch(/disposed/)
+    expect(applier.applyCalls).toBe(0) // 已弃用实例不得写盘
+    expect(applier.disk.size).toBe(0)
   })
 })
 

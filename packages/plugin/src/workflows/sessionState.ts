@@ -47,6 +47,8 @@ let storePath: string | undefined
 let hydrated = false
 /** 持久化串行链：hydration 与每次保存都进同一条链，单进程内顺序一致 */
 let persistChain: Promise<unknown> = Promise.resolve()
+/** 最近一次持久化失败（3.17-M5：不再静默吞掉；由 takeReviewSessionPersistError 消费上报） */
+let lastPersistError: string | null = null
 
 /**
  * 在 per-session 互斥内执行 `fn`（sessionId 缺省时退化为单条全局队列）。
@@ -80,6 +82,19 @@ export function resetReviewSessionStatesForTest(): void {
   storeDir = undefined
   storePath = undefined
   hydrated = false
+  lastPersistError = null
+}
+
+/**
+ * 取走并清除最近一次持久化失败（无失败返回 null）。
+ *
+ * 持久化是异步排队写盘，工具在 save 后 `await flushReviewSessionStore()` 再调用本
+ * 函数，即可把排队任务的写盘失败（若有）同步上报为 warnings，而不是静默吞掉。
+ */
+export function takeReviewSessionPersistError(): string | null {
+  const error = lastPersistError
+  lastPersistError = null
+  return error
 }
 
 /**
@@ -230,7 +245,9 @@ async function hydrateFromDisk(expectedStorePath: string): Promise<void> {
   if (storePath === expectedStorePath) hydrated = true
 }
 
-/** 把整库异步序列化写盘（tmp + rename；失败静默，进程内状态仍有效，下次保存重试） */
+/** 把整库异步序列化写盘（tmp + rename；3.17-M5：写盘失败记录到 lastPersistError，
+ * 供 takeReviewSessionPersistError 消费上报为 warnings，不再静默吞掉；
+ * 进程内状态仍有效，下次保存会重试整库覆盖写） */
 function queuePersist(): void {
   if (!storePath || !storeDir) return
   const targetPath = storePath
@@ -246,7 +263,11 @@ function queuePersist(): void {
       await fsp.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf8')
       await renameStoreOverwrite(tmpPath, targetPath)
     })
-    .catch(() => undefined)
+    .catch((error) => {
+      // 3.17-M5：写盘失败不再静默吞掉——记录供 takeReviewSessionPersistError 消费，
+      // 进程内会话状态仍有效（下次保存会重试整库覆盖写），不抛错阻断主流程。
+      lastPersistError = `Failed to persist review session state: ${error instanceof Error ? error.message : String(error)}`
+    })
 }
 
 function serializeStore(): ReviewSessionsStoreFile {

@@ -20,7 +20,10 @@ import { StagedDiffError, type StagedEntry } from '../../domain/types.ts'
 export { createStagedWorkspaceId } from '../../application/service.ts'
 
 function sessionIdOf(exec: ToolRunContext): string {
-  return exec.agent?.session?.id ?? ''
+  // 3.17-M7：与 stagedWriteHook 的 'unknown' 兜底保持一致——headless（无 agent 会话）
+  // 调用以 'unknown' 归组，而不是空串（空串会被 createEntry 以 GRAY_INVALID_INPUT 拒绝，
+  // 导致同一 headless 场景下工具与写前钩子行为不一致）。
+  return exec.agent?.session?.id || 'unknown'
 }
 
 function cwdOf(exec: ToolRunContext): string {
