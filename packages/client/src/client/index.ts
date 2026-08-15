@@ -5,9 +5,11 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 //   - dsh-client-locale/client   → `ctx.locale` (+ the `locale/change` event)
 //   - dsh-client-ui-layout/client → SlotMap['shell.overlay'] declaration
 //   - dsh-client-ui-settings/client → SlotMap['settings.section'] declaration
+//   - dsh-client-ui-conversation/client → SlotMap['conversation.session.header.actions'] declaration
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { GrayCodeBadge } from './GrayCodeBadge.tsx'
 import { GRAYCODE_NS, graycodeDictionaries, graycodeJaPlaceholder } from './locales.ts'
@@ -74,6 +76,12 @@ import { NotificationCenter } from './notifications/NotificationCenter.tsx'
 import { BrowserNotificationPresenter } from './notifications/presenter.ts'
 import { createNotificationBus } from './notifications/source.ts'
 import { notificationsFromWindow } from './notifications/fold.ts'
+import { SubagentBackButton, type SubagentBackInjected } from './subagentBack/SubagentBackButton.tsx'
+import {
+  GRAYCODE_SUBAGENT_BACK_NS,
+  graycodeSubagentBackDictionaries,
+  graycodeSubagentBackJaPlaceholder,
+} from './subagentBack/locales.ts'
 
 // Pluggable renderer surface for `kind: 'graycode.workflow'` chat nodes.
 // DSH rc.6 has no conversation-node renderer mount available to this package
@@ -209,6 +217,13 @@ export function apply(ctx: ClientContext): void {
   const disposeNotificationsJa = ctx.locale.register(GRAYCODE_NOTIFICATIONS_NS, 'ja', graycodeNotificationsJaPlaceholder)
   ctx.effect(() => disposeNotificationsJa)
 
+  // S1 subagent back-to-main action locale namespace (own ns, same pattern as
+  // the other surfaces).
+  const disposeSubagentBack = ctx.locale.register(GRAYCODE_SUBAGENT_BACK_NS, graycodeSubagentBackDictionaries)
+  ctx.effect(() => disposeSubagentBack)
+  const disposeSubagentBackJa = ctx.locale.register(GRAYCODE_SUBAGENT_BACK_NS, 'ja', graycodeSubagentBackJaPlaceholder)
+  ctx.effect(() => disposeSubagentBackJa)
+
   const disposeGraycode = ctx.locale.register(GRAYCODE_NS, graycodeDictionaries)
   ctx.effect(() => disposeGraycode)
   const disposeGraycodeJa = ctx.locale.register(GRAYCODE_NS, 'ja', graycodeJaPlaceholder)
@@ -218,6 +233,27 @@ export function apply(ctx: ClientContext): void {
       { name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS },
       GrayCodeBadge,
     ))
+
+  // S1: "back to main session" header action inside the subagent viewer. The
+  // `conversation.session.header.actions` list slot is session-scoped and
+  // additive (the host's subagent-catalog button sits in the same row); the
+  // action renders only for subagent sessions and opens the parent session via
+  // the sessions service — the same route the host breadcrumb uses. Absent
+  // sessions service (unwired host) degrades to skipping the registration.
+  const sessions = ctx.get('sessions') as { open(sessionId: string): void } | undefined
+  if (sessions !== undefined) {
+    ctx.slots.inject('conversation.session.header.actions', () =>
+      ctx.slots.register(
+        {
+          name: 'conversation.session.header.actions',
+          id: 'graycode.back-to-main',
+          order: 20,
+          locale: GRAYCODE_SUBAGENT_BACK_NS,
+          inject: (): SubagentBackInjected => ({ open: (sessionId) => sessions.open(sessionId) }),
+        },
+        SubagentBackButton,
+      ))
+  }
 
   // Gray Code settings panel: native settings section (slot `settings.section`,
   // id `graycode`). The panel's data does NOT ride ctx.settingsScope — the

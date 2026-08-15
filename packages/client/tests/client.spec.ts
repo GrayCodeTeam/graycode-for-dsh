@@ -15,7 +15,7 @@ import {
 } from '../src/client/workflowNode/locales.ts'
 
 /** Minimal client-context double covering exactly what apply() touches. */
-function makeFakeCtx() {
+function makeFakeCtx(options: { sessions?: { open: (sessionId: string) => void } } = {}) {
   const localeRegister = vi.fn(() => () => {})
   const localeBind = vi.fn(() => (key: string) => key)
   const slotInject = vi.fn((_key: string, callback: () => unknown) => {
@@ -38,7 +38,7 @@ function makeFakeCtx() {
     slots: { inject: slotInject, register: slotRegister },
     conversationEvents: { register: conversationEventsRegister },
     conversationViews: { register: conversationViewsRegister },
-    get: vi.fn(() => ({ rpc: { call: connectionCall } })),
+    get: vi.fn((key: string) => (key === 'sessions' ? options.sessions : { rpc: { call: connectionCall } })),
     on,
     effect,
   } as unknown as ClientContext
@@ -67,12 +67,13 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Twelve namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = twenty-four registrations. Covers the base `graycode` ns,
+    // Thirteen namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = twenty-six registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
     // activity heatmap surface (C6), the notifications surface (C4), the
-    // migration scope-map surface (D-1/D-2) and the settings panel ns.
-    expect(localeRegister).toHaveBeenCalledTimes(24)
+    // migration scope-map surface (D-1/D-2), the subagent back-to-main
+    // action (S1) and the settings panel ns.
+    expect(localeRegister).toHaveBeenCalledTimes(26)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -86,6 +87,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.activityHeatmap',
       'graycode.notifications',
       'graycode.scopeMap',
+      'graycode.subagentBack',
       'settings.graycode',
     ]) {
       // Each namespace is registered exactly twice: dict + ja placeholder.
@@ -111,9 +113,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the workflow Definition plus
-    // every locale namespace (12 × dict + ja placeholder) plus the
-    // connection/reset refresh subscription = 1 + 24 + 1.
-    expect(effect).toHaveBeenCalledTimes(26)
+    // every locale namespace (13 × dict + ja placeholder) plus the
+    // connection/reset refresh subscription = 1 + 26 + 1.
+    expect(effect).toHaveBeenCalledTimes(28)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -173,6 +175,28 @@ describe('@graycode/dsh-client browser half apply()', () => {
     expect(ctx.get).toHaveBeenCalledWith('connection')
     expect(on).toHaveBeenCalledWith('connection/reset', expect.any(Function))
     expect(connectionCall).not.toHaveBeenCalled()
+  })
+
+  it('registers the back-to-main header action when the sessions service is present', () => {
+    const open = vi.fn()
+    const { ctx, slotInject, slotRegister } = makeFakeCtx({ sessions: { open } })
+    apply(ctx)
+    expect(slotInject).toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
+    const actionCall = slotRegister.mock.calls.find((call) => (call[0] as { name?: string }).name === 'conversation.session.header.actions')
+    expect(actionCall).toBeDefined()
+    const options = actionCall?.[0] as { id?: string; order?: number; locale?: string; inject?: () => { open: (id: string) => void } }
+    expect(options.id).toBe('graycode.back-to-main')
+    expect(options.order).toBe(20)
+    expect(options.locale).toBe('graycode.subagentBack')
+    // The injected seat forwards to the sessions service.
+    options.inject?.().open('session-parent')
+    expect(open).toHaveBeenCalledWith('session-parent')
+  })
+
+  it('skips the back-to-main registration when the sessions service is absent', () => {
+    const { ctx, slotInject } = makeFakeCtx()
+    apply(ctx)
+    expect(slotInject).not.toHaveBeenCalledWith('conversation.session.header.actions', expect.any(Function))
   })
 })
 

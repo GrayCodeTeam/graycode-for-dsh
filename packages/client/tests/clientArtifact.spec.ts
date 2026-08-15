@@ -103,6 +103,7 @@ describe('dsh.client manifest ↔ tsdown output consistency (cache/roster)', () 
       'stagedDiffCard',
       'settingsContribution',
       'activityHeatmap',
+      'subagentBack',
     ]
     for (const surface of surfaces) {
       expect(existsSync(join(packageRoot, 'lib/client', surface, 'locales.js')), `${surface} locales.js`).toBe(true)

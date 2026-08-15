@@ -254,7 +254,7 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The twelve locale namespaces the entry registers (dict + ja placeholder each). */
+/** The thirteen locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
@@ -267,6 +267,7 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.activityHeatmap',
   'graycode.notifications',
   'graycode.scopeMap',
+  'graycode.subagentBack',
   'settings.graycode',
 ]
 
@@ -334,7 +335,7 @@ function createFiberHarness() {
     slots: { inject: slotInject, register: slotRegister },
     conversationEvents: { register: conversationEventsRegister },
     conversationViews: { register: vi.fn(() => () => {}) },
-    get: vi.fn(() => ({ rpc: { call: vi.fn(async () => ({ ok: true, value: {} })) } })),
+    get: vi.fn((key: string) => (key === 'sessions' ? { open: vi.fn() } : { rpc: { call: vi.fn(async () => ({ ok: true, value: {} })) } })),
     on: vi.fn(() => () => {}),
     effect,
   } as unknown as ClientContext
@@ -448,14 +449,15 @@ describe('HMR mount/unmount idempotency of apply()', () => {
   it('slot injection lifetime follows the shell.overlay declaration, not the fiber', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
-    // Two injections: the shell.overlay marker plus the settings.section entry.
-    expect(harness.overlayEntries).toHaveLength(2)
+    // Three injections: the shell.overlay marker, the settings.section entry
+    // and the subagent back-to-main header action.
+    expect(harness.overlayEntries).toHaveLength(3)
     // Declaration teardown calls the inject disposer (apply() leaves it to the
     // declaration lifetime by design — see the index.ts comment).
     const injectDisposer = harness.slotInject.mock.results[0]?.value as () => void
     expect(typeof injectDisposer).toBe('function')
     injectDisposer()
-    expect(harness.overlayEntries).toHaveLength(1)
+    expect(harness.overlayEntries).toHaveLength(2)
 
     // Fiber unload alone does NOT remove the injection while the declaration
     // lives — documented declaration-lifetime semantics.
@@ -463,6 +465,6 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     apply(other.ctx)
     other.unload()
     expect(other.definitions).toHaveLength(0)
-    expect(other.overlayEntries).toHaveLength(2)
+    expect(other.overlayEntries).toHaveLength(3)
   })
 })
