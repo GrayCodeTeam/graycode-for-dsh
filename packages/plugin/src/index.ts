@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { deepEqualJson } from '@deepseek-ai/dsh-settings'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import * as workflows from './workflows/index.ts'
 import * as memory from './memory/index.ts'
@@ -53,8 +54,6 @@ export interface Config {
   notifications: notifications.Config
   /** Thoughts request layer (A1): llm/stream rewrite, off by default. */
   thoughts: thoughts.Config
-  /** Gray Code 设置面板：graycode settings 命名空间 + /graycode 配置通道。 */
-  settings: settings.Config
 }
 
 export const Config: z<Config> = z.object({
@@ -74,42 +73,92 @@ export const Config: z<Config> = z.object({
   subagents: subagents.Config,
   notifications: notifications.Config,
   thoughts: thoughts.Config,
-  settings: settings.Config,
 })
+
+export type LiveConfigFibers = {
+  [K in keyof settings.GrayCodeConfig]: {
+    update(config: settings.GrayCodeConfig[K], noSave?: boolean): void | Promise<void>
+  }
+}
+
+/** Serialize native-settings commits and restart only fibers whose real config changed. */
+export function createLiveConfigUpdater(
+  fibers: LiveConfigFibers,
+  initial: settings.GrayCodeConfig,
+): (next: settings.GrayCodeConfig) => Promise<void> {
+  let appliedConfig = initial
+  let updateQueue: Promise<void> = Promise.resolve()
+  return (next: settings.GrayCodeConfig): Promise<void> => {
+    updateQueue = updateQueue.catch(() => undefined).then(async () => {
+      const keys = Object.keys(fibers) as Array<keyof LiveConfigFibers>
+      const updateOne = async <K extends keyof LiveConfigFibers>(key: K): Promise<void> => {
+        await fibers[key].update(next[key], true)
+      }
+      for (const key of keys) {
+        if (!deepEqualJson(appliedConfig[key], next[key])) {
+          await updateOne(key)
+        }
+      }
+      appliedConfig = next
+    })
+    return updateQueue
+  }
+}
 
 export function apply(ctx: Context, config: Config): void {
   const dataRoot = config.dataRoot === '' ? `${resolveDshHome()}/graycode` : config.dataRoot
+  const liveConfig: settings.GrayCodeConfig = {
+    workflows: { ...config.workflows, dataRoot },
+    memory: { ...config.memory, dataRoot },
+    checkpoints: { ...config.checkpoints, dataRoot },
+    branches: { ...config.branches, dataRoot },
+    persona: config.persona,
+    prompt: { ...config.prompt, dataRoot },
+    migration: { ...config.migration, dataRoot },
+    stagedDiff: { ...config.stagedDiff, dataRoot },
+    activity: { ...config.activity, dataRoot },
+    media: config.media,
+    file: config.file,
+    todo: config.todo,
+    subagents: config.subagents,
+    notifications: config.notifications,
+    thoughts: config.thoughts,
+  }
   // Phase 4 host 侧 Remote API（T8）：注册 `ctx.grayRemote` 分发服务并默认启用
   // 可回放投影日志（<dataRoot>/remote/projections.jsonl）。各域子插件在各自
   // apply() 中向它注册端点；DSH 升级到公开 Remote 注册面后，端点可平移为
   // Typert `@Remote` 方法（设计见 docs/PLAN_V2.md §5.6 与 docs/ADR-0002 §5）。
   new GrayRemoteService(ctx, { journalPath: `${dataRoot}/remote/projections.jsonl` })
-  ctx.plugin(workflows, { ...config.workflows, dataRoot })
-  ctx.plugin(memory, { ...config.memory, dataRoot })
-  ctx.plugin(checkpoints, { ...config.checkpoints, dataRoot })
-  ctx.plugin(branches, { ...config.branches, dataRoot })
-  ctx.plugin(persona, config.persona)
-  ctx.plugin(prompt, { ...config.prompt, dataRoot })
-  ctx.plugin(migration, { ...config.migration, dataRoot })
-  ctx.plugin(stagedDiff, { ...config.stagedDiff, dataRoot })
+  const fibers = {
+    workflows: ctx.plugin(workflows, liveConfig.workflows),
+    memory: ctx.plugin(memory, liveConfig.memory),
+    checkpoints: ctx.plugin(checkpoints, liveConfig.checkpoints),
+    branches: ctx.plugin(branches, liveConfig.branches),
+    persona: ctx.plugin(persona, liveConfig.persona),
+    prompt: ctx.plugin(prompt, liveConfig.prompt),
+    migration: ctx.plugin(migration, liveConfig.migration),
+    stagedDiff: ctx.plugin(stagedDiff, liveConfig.stagedDiff),
   // Activity domain: Config carries its own dataRoot field, forwarded from the composition root.
-  ctx.plugin(activity, { ...config.activity, dataRoot })
+    activity: ctx.plugin(activity, liveConfig.activity),
   // Media domain: Config has no dataRoot (no persistence under the plugin root).
-  ctx.plugin(media, { ...config.media })
+    media: ctx.plugin(media, liveConfig.media),
   // File domain: Config has no dataRoot (no persistence under the plugin root).
-  ctx.plugin(file, { ...config.file })
+    file: ctx.plugin(file, liveConfig.file),
   // Todo domain: Config has no dataRoot (no persistence under the plugin root).
-  ctx.plugin(todo, { ...config.todo })
+    todo: ctx.plugin(todo, liveConfig.todo),
   // Subagents thin adapter (C1): guards installed over the DSH `ctx.subagents` seam
   // (inject waits for `agents` + `subagents` services; absent seam degrades to a warn).
-  ctx.plugin(subagents, { ...config.subagents })
+    subagents: ctx.plugin(subagents, liveConfig.subagents),
   // Notifications domain (C4): notify tool + Windows native toast / noop backends.
-  ctx.plugin(notifications, { ...config.notifications })
+    notifications: ctx.plugin(notifications, liveConfig.notifications),
   // Thoughts request layer (A1): llm/stream waterfall rewrite (non-contract,
   // ADR-0002 §4b), off by default. Reads the prompt-mode service lazily via
   // ctx.get — prompt must mount first (it does, above) so the service exists.
-  ctx.plugin(thoughts, { ...config.thoughts })
+    thoughts: ctx.plugin(thoughts, liveConfig.thoughts),
+  }
+
+  const applyLiveConfig = createLiveConfigUpdater(fibers, liveConfig)
   // Settings 面板域：注册 graycode settings 命名空间（持久化）+ /graycode 配置
   // 通道（浏览器面板读写；connection 缺失时通道跳过，命名空间不受影响）。
-  ctx.plugin(settings, { ...config.settings })
+  ctx.plugin(settings, { base: liveConfig, onChange: applyLiveConfig })
 }

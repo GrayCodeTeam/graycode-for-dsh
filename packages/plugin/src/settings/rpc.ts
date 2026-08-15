@@ -1,48 +1,52 @@
-/**
- * Gray Code 配置 RPC 通道（`/graycode`）。
- *
- * 为什么需要这条通道：DSH rc.5/rc.6 的 api-proxy 通过硬编码命名空间白名单
- * （`WEB_SETTINGS_NAMESPACES`）向浏览器提供 settings——第三方命名空间无论是否
- * 正确经 `ctx.settings.register` 注册，都会在每次读写时得到 `settings-not-exposed`，
- * 面板能渲染但永远编辑不了。白名单没有官方扩展点（api-proxy 注释把「移入
- * settings.register()」列为 deferred 工作）。本插件因此让面板留在原生 settings
- * 页内，但读写走文档化的通用 Connection RPC 通道（`ctx.connection.rpc.handle`，
- * 无命名空间白名单）。持久化仍由原生 settings 文档承担：handler 驱动注册好的
- * `graycode` 命名空间 `SettingsScope.update/replace`，$DSH_HOME/settings.yaml
- * 保持唯一事实来源；未来 DSH 开放第三方命名空间后无需改插件即可平移。
- *
- * 设计为可测：handler 逻辑经 `createGrayCodeConfigHandler` 工厂导出，注入
- * scope 桩即可单测四个端点；`registerGrayCodeChannel` 只做 connection 守卫与
- * 注册接线，注入 ctx/connection 桩即可单测。
- */
+/** Browser bridge for native GrayCode settings and Gray Remote endpoints. */
 
+import type z from '@deepseek-ai/schemastery'
+import { redactSecrets } from '@deepseek-ai/dsh-settings'
 import { DEFAULTS } from './defaults.ts'
 import type { GrayCodeConfig, GrayCodePatch } from './types.ts'
 
-/** 线形结果（本地定义，不 import dsh-host-apiproxy 的类型）。 */
+interface RpcBadRequest {
+  code: 'bad-request'
+  message: string
+  details: { issues: unknown[] }
+}
+
+interface RpcInternalError {
+  code: 'internal'
+  message: string
+  details: Record<string, never>
+}
+
+/** DSH Connection RPC result envelope. Error details are required by its client parser. */
 export type RpcResult<T> =
   | { ok: true; value: T }
-  | { ok: false; error: { code: string; message: string } }
+  | { ok: false; error: RpcBadRequest | RpcInternalError }
 
-/** 本通道需要的 settings scope 表面（结构化子集）。 */
 export interface ConfigScope {
   get(): GrayCodeConfig
   update(patch: GrayCodePatch): Promise<void>
   replace(section: GrayCodePatch): Promise<void>
 }
 
-/** 本通道需要的 connection 服务表面（结构化子集，不依赖 dsh-client-connection 类型）。 */
+export interface GrayRemoteLike {
+  invoke(
+    namespace: string,
+    method: string,
+    args?: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown>
+}
+
 export interface GrayCodeConnection {
   readonly rpc: {
     handle(
       channel: string,
-      handler: (endpoint: string, payload: unknown) => Promise<RpcResult<unknown>>,
+      handler: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>>,
       options: { authority: 'trusted-host' | 'loopback' },
     ): () => Promise<void> | void
   }
 }
 
-/** 注册 /graycode 通道所需的 host 上下文表面（结构化子集，便于测试桩注入）。 */
 export interface ChannelHostContextLike {
   get(name: string): unknown
   readonly logger: {
@@ -51,19 +55,16 @@ export interface ChannelHostContextLike {
   }
 }
 
-/** 逻辑通道前缀，承载本插件的配置端点。 */
 export const GRAYCODE_CHANNEL = '/graycode'
 
 const TOP_LEVEL_KEYS = new Set(Object.keys(DEFAULTS))
 
-/**
- * 校验顶层 key 白名单：只接受普通对象、且所有 key 都在默认文档顶层
- * （未知 key / 非对象载荷在进入 settings seam 之前拒绝）。
- * @param payload - 通道载荷。
- * @returns 合法补丁，否则 undefined。
- */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function readPatch(payload: unknown): GrayCodePatch | undefined {
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+  if (!isRecord(payload)) return undefined
   const patch: GrayCodePatch = {}
   for (const [key, value] of Object.entries(payload)) {
     if (!TOP_LEVEL_KEYS.has(key)) return undefined
@@ -72,73 +73,99 @@ function readPatch(payload: unknown): GrayCodePatch | undefined {
   return patch
 }
 
+/** The documented update payload is `{ patch }`; direct patches remain compatible. */
+function readUpdatePatch(payload: unknown): GrayCodePatch | undefined {
+  if (isRecord(payload) && Object.keys(payload).length === 1 && 'patch' in payload) {
+    return readPatch(payload.patch)
+  }
+  return readPatch(payload)
+}
+
+function readRemoteCall(payload: unknown): {
+  namespace: string
+  method: string
+  args: Record<string, unknown>
+} | undefined {
+  if (!isRecord(payload)) return undefined
+  if (typeof payload.namespace !== 'string' || payload.namespace.trim() === '') return undefined
+  if (typeof payload.method !== 'string' || payload.method.trim() === '') return undefined
+  if (payload.args !== undefined && !isRecord(payload.args)) return undefined
+  return {
+    namespace: payload.namespace,
+    method: payload.method,
+    args: payload.args ?? {},
+  }
+}
+
 function badRequest(message: string): RpcResult<never> {
-  return { ok: false, error: { code: 'bad-request', message } }
+  return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
 }
 
 function internal(message: string): RpcResult<never> {
-  return { ok: false, error: { code: 'internal', message } }
+  return { ok: false, error: { code: 'internal', message, details: {} } }
 }
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * 创建 `/graycode` 通道 handler（config.get/update/replace/reset 四端点）。
- * 纯工厂：不触碰任何 host 服务，注入 scope 桩即可单测。
- * @param scope - 已注册 graycode 命名空间的 settings scope。
- * @returns 通道 handler（端点 → 载荷 → RpcResult）。
- */
-export function createGrayCodeConfigHandler(scope: ConfigScope): (endpoint: string, payload: unknown) => Promise<RpcResult<unknown>> {
-  return async (endpoint: string, payload: unknown): Promise<RpcResult<unknown>> => {
+export function createGrayCodeConfigHandler(
+  scope: ConfigScope,
+  schema: z<GrayCodeConfig>,
+  remote?: GrayRemoteLike,
+): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
+  const getForWire = (): GrayCodeConfig => redactSecrets(schema as z<never>, scope.get()).value as GrayCodeConfig
+
+  return async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
       if (endpoint === 'config.get') {
-        return { ok: true, value: scope.get() }
+        return { ok: true, value: getForWire() }
       }
       if (endpoint === 'config.update') {
-        const patch = readPatch(payload)
+        const patch = readUpdatePatch(payload)
         if (patch === undefined) {
-          return badRequest('graycode: config.update 期望普通对象补丁且 key 均为已知顶层字段')
+          return badRequest('graycode: config.update expects { patch } with known top-level keys')
         }
         await scope.update(patch)
-        return { ok: true, value: scope.get() }
-      }
-      if (endpoint === 'config.replace') {
-        const config = readPatch(payload)
-        if (config === undefined) {
-          return badRequest('graycode: config.replace 期望完整普通对象配置且 key 均为已知顶层字段')
-        }
-        await scope.replace(config as GrayCodePatch)
-        return { ok: true, value: scope.get() }
+        return { ok: true, value: getForWire() }
       }
       if (endpoint === 'config.reset') {
         await scope.replace({})
-        return { ok: true, value: scope.get() }
+        return { ok: true, value: getForWire() }
       }
-      return badRequest(`graycode: 未知端点 "${endpoint}"`)
+      if (endpoint === 'remote.invoke') {
+        const call = readRemoteCall(payload)
+        if (call === undefined) {
+          return badRequest('graycode: remote.invoke expects namespace, method and optional object args')
+        }
+        if (remote === undefined) {
+          return internal('graycode: Gray Remote service is unavailable')
+        }
+        return { ok: true, value: await remote.invoke(call.namespace, call.method, call.args, signal) }
+      }
+      return badRequest(`graycode: unknown endpoint "${endpoint}"`)
     } catch (error) {
       return internal(`graycode: ${messageOf(error)}`)
     }
   }
 }
 
-/**
- * 在携带 `connection` 的 fiber 上注册 `/graycode` 配置通道。connection 缺失
- * （未挂载/不可用）时仅告警并跳过——settings 命名空间注册不受影响。
- * @param ctx - fiber 上下文（已注入 settings）。
- * @param scope - graycode 命名空间的 settings scope。
- * @returns 注销函数（供 ctx.effect 收集；connection 缺失时为 no-op）。
- */
-export function registerGrayCodeChannel(ctx: ChannelHostContextLike, scope: ConfigScope): () => Promise<void> | void {
+export function registerGrayCodeChannel(
+  ctx: ChannelHostContextLike,
+  scope: ConfigScope,
+  schema: z<GrayCodeConfig>,
+): () => Promise<void> | void {
   const connection = ctx.get('connection') as GrayCodeConnection | undefined
   if (connection === undefined || connection.rpc === undefined) {
-    ctx.logger.warn('[graycode] connection 服务不可用，/graycode 配置通道未注册（settings 命名空间不受影响）')
+    ctx.logger.warn('[graycode] connection service unavailable; /graycode was not registered')
     return () => undefined
   }
-  const disposer = connection.rpc.handle(GRAYCODE_CHANNEL, createGrayCodeConfigHandler(scope), {
-    authority: 'trusted-host',
-  })
-  ctx.logger.info(`[graycode] 配置通道已注册: ${GRAYCODE_CHANNEL}`)
+  const remote = ctx.get('grayRemote') as GrayRemoteLike | undefined
+  const disposer = connection.rpc.handle(
+    GRAYCODE_CHANNEL,
+    createGrayCodeConfigHandler(scope, schema, remote),
+    { authority: 'trusted-host' },
+  )
+  ctx.logger.info(`[graycode] browser channel registered: ${GRAYCODE_CHANNEL}`)
   return disposer
 }

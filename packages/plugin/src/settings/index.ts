@@ -3,40 +3,51 @@
  *
  * 注册 `graycode` settings 命名空间（schemastery schema + DEFAULTS base 层，
  * 持久化到 $DSH_HOME/settings.yaml）并挂载 `/graycode` 配置通道（浏览器面板
- * 的 config.get/update/replace/reset 四端点，见 rpc.ts 为什么不用原生 settings
+ * 的 config.get/update/reset 与 Gray Remote bridge，见 rpc.ts 为什么不用原生 settings
  * 线）。通道随带 `settings` 注入的 fiber 一起卸载（disposal / reload）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULTS } from './defaults.ts'
 import { GRAYCODE_SETTINGS_NAMESPACE, GrayCodeSchema } from './schema.ts'
 import { registerGrayCodeChannel, type ConfigScope } from './rpc.ts'
 import type { GrayCodeConfig, GrayCodePatch } from './types.ts'
 
+export type { GrayCodeConfig, GrayCodePatch } from './types.ts'
+
 export const name = 'graycode-settings'
 
 export interface Config {
-  /** 组合层 base 覆盖：合并到默认文档之下、用户 section 之上（可选）。 */
-  base?: Partial<GrayCodeConfig>
+  /** Composition config projected from the real child-plugin fibers. */
+  base: GrayCodeConfig
+  /** Internal live-reload sink installed by the composition root. */
+  onChange?: (next: GrayCodeConfig, prev?: GrayCodeConfig) => void | Promise<void>
 }
 
 export const Config: z<Config> = z.object({
-  base: z.dict(z.any()).default({}),
+  base: GrayCodeSchema,
+  onChange: z.any().default(undefined),
 })
 
 export function apply(ctx: Context, config: Config): void {
-  // settings 服务存在时才注册命名空间与通道；服务不可用时整个 fiber 不启动。
-  ctx.inject(['settings'], (sctx) => {
-    const base = { ...DEFAULTS, ...config.base } as GrayCodeConfig
-    const scope = sctx.settings.register(GRAYCODE_SETTINGS_NAMESPACE, GrayCodeSchema, { base })
+  // Both services are hard dependencies of this browser-facing domain. Using
+  // inject instead of a one-shot ctx.get means a connection reload re-registers
+  // the channel automatically and HMR cannot leave the panel stranded.
+  ctx.inject(['settings', 'connection'], (sctx) => {
+    const scope = sctx.settings.register(GRAYCODE_SETTINGS_NAMESPACE, GrayCodeSchema, {
+      base: config.base,
+      applies: 'live',
+    })
     const configScope: ConfigScope = {
       get: () => scope.get(),
       update: (patch: GrayCodePatch) => scope.update(patch as object),
       replace: (section: GrayCodePatch) => scope.replace(section as object),
     }
-    // 通道注册随本 fiber 卸载（HMR：旧通道先注销，新实例可重新注册）。
-    sctx.effect(() => registerGrayCodeChannel(sctx, configScope), 'graycode: 配置通道')
+    sctx.effect(() => registerGrayCodeChannel(sctx, configScope, GrayCodeSchema), 'graycode: 配置通道')
+    sctx.effect(() => scope.watch((next, prev) => config.onChange?.(next, prev)))
+    void Promise.resolve()
+      .then(() => config.onChange?.(scope.get()))
+      .catch(error => sctx.logger.error('[graycode] initial settings apply failed', error))
     sctx.logger.info('[graycode] settings 命名空间已注册（graycode: 持久化于 settings.yaml）')
   })
 }

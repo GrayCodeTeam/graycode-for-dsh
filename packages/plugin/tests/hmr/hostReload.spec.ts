@@ -101,6 +101,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
       excludePatterns: [],
       maxFileSizeBytes: 50 * 1024 * 1024,
       blobGracePeriodDays: 7,
+      restoreProtectionPoint: true,
       agentScope: 'roots',
     },
     branches: { dataRoot, agentScope: 'roots' },
@@ -115,7 +116,6 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     subagents: { maxHopDepth: 5, maxConcurrent: 2 },
     notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
     thoughts: { enabled: false, sendHistoryThoughts: false },
-    settings: { base: {} },
   }
 }
 
