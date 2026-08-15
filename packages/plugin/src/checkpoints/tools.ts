@@ -15,6 +15,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { omitUndefined, type CheckpointService } from './service.ts'
+import { isAbsolutePath } from '../remote/validate.ts'
 
 /** 从执行上下文解析工作区 cwd（undefined 回退 process.cwd()） */
 function resolveCwd(exec: ToolRunContext): string {
@@ -117,6 +118,15 @@ function createTool(service: CheckpointService) {
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
+        // 4.12-L1：显式 workspace 必须是绝对路径（与服务端 requireWorkspace 同一
+        // isAbsolutePath 判定）——相对路径会按 process.cwd() 解析，语义含糊且可能
+        // 指向意外目录，直接拒绝。缺省回退会话 cwd 不受影响。
+        if (args.workspace !== undefined) {
+          const trimmed = String(args.workspace).trim()
+          if (!isAbsolutePath(trimmed)) {
+            throw new Error('checkpoint_list: workspace must be an absolute path')
+          }
+        }
         const cwd = args.workspace ?? resolveCwd(exec)
         return service.listCheckpoints(cwd, { cursor: args.cursor, limit: args.limit })
       },
@@ -224,10 +234,14 @@ function createTool(service: CheckpointService) {
     checkpoint_delete: defineTool({
       name: 'checkpoint_delete',
       description:
-        'Delete a checkpoint: removes its record and manifest and decrements blob reference counts (blobs are physically reclaimed later by checkpoint_gc once their refcount reaches zero past the grace period). Chain protection rejects deletion when another checkpoint references this one as its base snapshot (computeForcedKeepIds ancestor closure); pass force=true to bypass chain protection (successor checkpoints then restore as broken chains).',
+        'Delete a checkpoint: removes its record and manifest and decrements blob reference counts (blobs are physically reclaimed later by checkpoint_gc once their refcount reaches zero past the grace period). Chain protection rejects deletion when another checkpoint references this one as its base snapshot (computeForcedKeepIds ancestor closure); pass force=true to bypass chain protection (successor checkpoints then restore as broken chains). Destructive confirmation: confirm=true is required and deletion is denied otherwise.',
       parameters: {
         checkpointId: { type: 'string', required: true, description: 'Checkpoint id to delete.' },
         force: { type: 'boolean', description: 'Skip chain protection (default false).' },
+        confirm: {
+          type: 'boolean',
+          description: 'Explicit confirmation that this checkpoint should be deleted (must be true).',
+        },
       },
       output: {
         schema: {
@@ -244,6 +258,15 @@ function createTool(service: CheckpointService) {
       },
       isConcurrencySafe: () => false,
       async execute(args, exec) {
+        // M7：与 remote 端点 args.confirm 门闸一致——破坏性删除必须先显式 confirm；
+        // 缺失/非 true 一律结构化拒绝（不触碰服务），存档保持不变。
+        if (args.confirm !== true) {
+          return {
+            success: false,
+            deleted: false,
+            reason: 'Deletion denied: requires explicit confirmation (pass confirm=true)',
+          }
+        }
         return service.deleteCheckpoint(resolveCwd(exec), args.checkpointId, {
           force: args.force === true,
           signal: exec.signal,
@@ -310,7 +333,7 @@ function createTool(service: CheckpointService) {
               },
               description: 'Orphans still inside the grace period (not collected).',
             },
-            refsVerified: { type: 'integer', description: 'Blob reference entries verified against manifests.' },
+            blobsScanned: { type: 'integer', description: 'Blob pool files scanned during collection (listBlobs result count).' },
             issue: { type: 'string', description: 'Diagnostic issue (e.g. invalid blob filenames), when present.' },
           },
         },

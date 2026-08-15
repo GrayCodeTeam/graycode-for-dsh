@@ -3,7 +3,7 @@
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { CheckpointService } from '../../src/checkpoints/service.ts'
 import { createNodeFsRestoreWorkspaceWriter } from '../../src/checkpoints/domain/RestoreWorkspaceWriter.ts'
@@ -312,6 +312,87 @@ describe('checkpoints/create / delete / gc', () => {
         confirm: true,
       })
       expect(applied).toMatchObject({ ok: true, value: { dryRun: false } })
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+})
+describe('checkpoints remote error normalization (M6)', () => {
+  it('create lock-cancelled message maps to GRAY_CANCELLED, not GRAY_INTERNAL', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      // 领域取消消息（CHECKPOINT_LOCK_CANCELLED_MESSAGE）被 handler 归一化为取消，
+      // 不会在 dispatch 层被当作普通错误归类为 GRAY_INTERNAL。
+      const spy = vi
+        .spyOn(env.service, 'createCheckpoint')
+        .mockRejectedValue(new Error('Checkpoint operation was cancelled'))
+      const result = await env.invoke('checkpoints', 'create', { workspace: env.workspaceDir })
+      expectFailure(result, GRAY_REMOTE_ERROR_CODES.CANCELLED)
+      spy.mockRestore()
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+
+  it('restore unexpected failure maps to GRAY_INTERNAL; lock-cancelled message maps to GRAY_CANCELLED', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      const spy = vi.spyOn(env.service, 'restoreCheckpoint').mockRejectedValue(new Error('boom'))
+      const result = await env.invoke('checkpoints', 'restore', {
+        workspace: env.workspaceDir,
+        checkpointId: 'cp_x',
+        previewToken: 'any-token',
+      })
+      expectFailure(result, GRAY_REMOTE_ERROR_CODES.INTERNAL)
+      spy.mockRestore()
+
+      const cancelSpy = vi
+        .spyOn(env.service, 'restoreCheckpoint')
+        .mockRejectedValue(new Error('Checkpoint operation was cancelled'))
+      const cancelled = await env.invoke('checkpoints', 'restore', {
+        workspace: env.workspaceDir,
+        checkpointId: 'cp_x',
+        previewToken: 'any-token',
+      })
+      expectFailure(cancelled, GRAY_REMOTE_ERROR_CODES.CANCELLED)
+      cancelSpy.mockRestore()
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+
+  it('verify unexpected failure maps to GRAY_INTERNAL (no raw exception leak)', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      const spy = vi.spyOn(env.service, 'verifyCheckpoint').mockRejectedValue(new Error('boom'))
+      const result = await env.invoke('checkpoints', 'verify', { checkpointId: 'cp_does_not_exist' })
+      expectFailure(result, GRAY_REMOTE_ERROR_CODES.INTERNAL)
+      spy.mockRestore()
+    } finally {
+      await disposeEnv(env)
+    }
+  })
+
+  it('list maps genuine record read failures to GRAY_STORAGE_CORRUPT and other failures to GRAY_INTERNAL', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      // 真实记录读取类失败（带 fs 错误码）→ storageCorrupt
+      const storageSpy = vi.spyOn(env.service, 'listCheckpoints').mockRejectedValue(
+        Object.assign(new Error('failed to read records'), { code: 'EACCES' }),
+      )
+      expectFailure(
+        await env.invoke('checkpoints', 'list', { workspace: env.workspaceDir }),
+        GRAY_REMOTE_ERROR_CODES.STORAGE_CORRUPT,
+      )
+      storageSpy.mockRestore()
+
+      // 非存储类未预期异常 → internal（修复前一律 storageCorrupt）
+      const bugSpy = vi.spyOn(env.service, 'listCheckpoints').mockRejectedValue(new Error('unexpected bug'))
+      expectFailure(
+        await env.invoke('checkpoints', 'list', { workspace: env.workspaceDir }),
+        GRAY_REMOTE_ERROR_CODES.INTERNAL,
+      )
+      bugSpy.mockRestore()
     } finally {
       await disposeEnv(env)
     }

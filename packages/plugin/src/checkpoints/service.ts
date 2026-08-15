@@ -173,8 +173,11 @@ export interface CheckpointGcResult {
     removedBytes: number;
     /** refcount=0 但仍在 grace period 内的孤儿 blob（本次不处理） */
     pendingBlobs: Array<{ hash: string; orphanedSince: number; ageMs: number }>;
-    /** 参与调和校验的 blob 引用条目数 */
-    refsVerified: number;
+    /**
+     * 本次扫描的 blob 池文件数（listBlobs() 结果；4.12-L3 由 refsVerified 改名——
+     * 原值实为 blob 文件数而非「引用条目数」，名实不符）。
+     */
+    blobsScanned: number;
     issue?: string;
 }
 
@@ -323,8 +326,10 @@ export class CheckpointService {
 
     /** 恢复门闸：previewId → 绑定（checkpointId+workspace+manifestHash+基线摘要；进程内有效） */
     private readonly previewTokens = new Map<string, PreviewTokenBinding>();
-    /** 每工作区内容寻址存储（blob 池 + manifest 仓库）缓存 */
+    /** 每工作区内容寻址存储（blob 池 + manifest 仓库）缓存（4.12-L5：LRU 有界，见 workspaceStorageFor） */
     private readonly storages = new Map<string, CheckpointWorkspaceStorage>();
+    /** storages 缓存上限（4.12-L5）：超过后按最久未用驱逐，防止长会话多工作区无界增长 */
+    private static readonly MAX_STORAGE_CACHE = 100;
     /** 操作进度注册表（CheckpointDeletionService 依赖；最小实现） */
     private readonly operations = new Map<string, { progress: CheckpointOperationProgress; controller: AbortController }>();
     /**
@@ -348,9 +353,14 @@ export class CheckpointService {
         this.deletionService = new CheckpointDeletionService({
             conversationManager: this.store,
             getStorage: conversationId => this.workspaceStorageFor(conversationId),
-            // 本服务只调用无锁版 deleteCheckpointInternal（调用方已持工作区级锁）；
-            // batch/byNodeIds 的锁 ID 计算在 DSH 下退化为稳定虚拟键。
+            // 3.11-M5：批删/按节点删持锁键 = 壳层键（下）∪ 被删对话的工作区根键——工作区根键
+            // 由 CheckpointDeletionService.deletionLockIds 追加（conversationId = 工作区根 id），
+            // 与单删/创建/恢复/GC 持有的工作区根键互斥（blob 引用竞态防线）。本服务只调用
+            // 无锁版 deleteCheckpointInternal（调用方已持工作区级锁），不参与锁计算。
             getDeletionLockIds: () => ['checkpoint-global-storage'],
+            // 3.11-M5：注入与创建/恢复/单删/GC 共用同一 lockDir（checkpoints/.locks）的
+            // lockManager——缺省为进程级单例（系统临时目录命名空间），即便锁键一致也不互斥。
+            lockManager: this.lockManager,
             beginOperation: (kind, conversationId, checkpointId) => this.beginOperation(kind, conversationId, checkpointId),
             endOperation: operationId => this.endOperation(operationId),
             // 全局文件写锁层已删除（见 CheckpointOperationLock 头注释）：无该取消错误
@@ -401,19 +411,37 @@ export class CheckpointService {
         return first.id;
     }
 
-    /** 工作区内容寻址存储（blob 池 + manifest 仓库；workspace-id 即目录名，越界名拒绝） */
+    /**
+     * 工作区内容寻址存储（blob 池 + manifest 仓库；workspace-id 即目录名，越界名拒绝）。
+     *
+     * 4.12-L5：storages Map 按 LRU 有界缓存（MAX_STORAGE_CACHE = 100）——命中删除后重插
+     * 刷新为「最新」（Map 迭代序 = 插入序），超限时驱逐最久未用条目。BlobStore /
+     * CheckpointManifestRepository 是无状态磁盘封装（数据都在磁盘，仅少量内存缓存），
+     * 驱逐后重新访问按需重建，无数据丢失；dispose 清空兜底 HMR 残留。
+     */
     private workspaceStorageFor(conversationId: string): CheckpointWorkspaceStorage {
         if (!isSafeCheckpointDirName(conversationId)) {
             throw new Error(`Unsafe workspace id: ${conversationId}`);
         }
         let storage = this.storages.get(conversationId);
-        if (!storage) {
-            const workspaceDir = path.join(this.checkpointsDir, conversationId);
-            storage = {
-                blobs: new BlobStore(workspaceDir),
-                manifests: new CheckpointManifestRepository(workspaceDir)
-            };
+        if (storage) {
+            // LRU 命中：删除后重插，移到「最新」位置
+            this.storages.delete(conversationId);
             this.storages.set(conversationId, storage);
+            return storage;
+        }
+        const workspaceDir = path.join(this.checkpointsDir, conversationId);
+        storage = {
+            blobs: new BlobStore(workspaceDir),
+            manifests: new CheckpointManifestRepository(workspaceDir)
+        };
+        this.storages.set(conversationId, storage);
+        if (this.storages.size > CheckpointService.MAX_STORAGE_CACHE) {
+            // 驱逐最久未用（Map 首键；刚插入的条目在末尾，不会误驱逐自身）
+            const oldest = this.storages.keys().next().value;
+            if (oldest !== undefined) {
+                this.storages.delete(oldest);
+            }
         }
         return storage;
     }
@@ -718,12 +746,22 @@ export class CheckpointService {
                 newBytes: newBlobBytes
             });
 
-            // 保留策略清理（超过 maxCheckpoints 时驱逐最旧存档）
-            await this.cleanupExcessCheckpoints(conversationId);
-
-            // §7.6 第 6 步：清理 staging（成功提交的已移出；残留即失败证据，先入 quarantine）
+            // §7.6 第 6 步：清理 staging（成功提交的已移出；残留即失败证据，先入 quarantine）。
+            // M8：staging 清理必须先于保留策略驱逐——若此步失败，catch 回滚只移除本次新记录，
+            // 尚未发生任何旧存档驱逐（不会出现「创建报告失败但旧存档已被驱逐」的数据变更）。
             await this.quarantineStagingLeftovers(storage, opId);
             await storage.blobs.cleanupStaging(opId);
+
+            // 保留策略清理（超过 maxCheckpoints 时驱逐最旧存档）。M8：驱逐是最后一步且
+            // 尽力而为——驱逐失败不使已提交的创建回滚（新记录/manifest/blob 引用均已落定，
+            // 新存档本身有效）；部分驱逐/失败仅告警，保留策略仍按「链完整性优先」退化为
+            // 尽力而为（见 evictCheckpoint 注释）。这样任何「创建失败」路径都不会伴随
+            // 不可回滚的旧存档驱逐。
+            try {
+                await this.cleanupExcessCheckpoints(conversationId);
+            } catch (evictErr) {
+                warn('Retention eviction failed after successful create (create kept):', evictErr);
+            }
 
             // H-1：baseCheckpointId/description 可能为 undefined——剔除 undefined 值键后再返回
             // 工具层（lossless JSON），字段语义不变。
@@ -747,8 +785,9 @@ export class CheckpointService {
             } catch (cleanupErr) {
                 warn('Failed to recycle staging after failed create:', cleanupErr);
             }
-            // H2：记录已提交但后续步骤（保留策略清理等）失败 → 从 records.json 回收记录，
-            // 避免「manifest 已删、记录仍在」的幽灵记录。
+            // H2：记录已提交但后续步骤失败 → 从 records.json 回收记录，避免「manifest 已删、
+            // 记录仍在」的幽灵记录。M8：保留策略驱逐已在 try 内尽力而为（失败仅告警），
+            // 不会落入本分支；本分支覆盖的提交后失败只有 staging 清理（未发生驱逐）。
             if (recordCommitted) {
                 try {
                     await this.store.updateCheckpoints(conversationId, list => list.filter(cp => cp.id !== checkpointId));
@@ -921,6 +960,15 @@ export class CheckpointService {
         const workspaceFingerprint = createWorkspaceSnapshot(roots).workspaceFingerprint;
 
         try {
+            // 已知限制（4.12-L4）：preview 持有工作区排他锁期间对当前工作区做全量文件哈希
+            // （prepareRestore → collectCurrentWorkspaceState：ignore 遍历 + 逐文件 sha256），
+            // 大工作区会长时间阻塞同工作区其他操作（create/restore/delete/gc 排队等待）。
+            // 该全量哈希是恢复门闸的必要输入：preview 基线摘要（baselineDigest）绑定全部当前
+            // 文件哈希，restore 前重比对依赖它；恢复计划（modified/unchanged 判定与
+            // deleteUntrackedFiles 的 untracked 清单）也需要当前完整文件集。改为只哈希链相关
+            // 文件（惰性哈希）会破坏基线绑定与 untracked 检测的精确性，故保留现状并记录为
+            // 已知限制；后续若优化（如按快照 fileStats 跳过未变文件重哈希），需在设计层面
+            // 保证基线语义不变后再实施。
             const outcome = await this.lockManager.runExclusive(
                 roots.map(root => root.id),
                 'restore',
@@ -1467,7 +1515,15 @@ export class CheckpointService {
     ): { chain: CheckpointRecord[]; broken: boolean } {
         const chain: CheckpointRecord[] = [];
         let current: CheckpointRecord | undefined = targetCheckpoint;
-        const byId = new Map(checkpoints.map(cp => [cp.id, cp] as const));
+        // 4.12-L2：建图前按 conversationId 过滤——verifyCheckpoint 传入跨工作区 records
+        // （readAllRecords），不过滤时损坏记录的 baseCheckpointId 若恰好命中其他工作区的
+        // 存档 id 会被 byId 捕获，形成跨工作区混链（链上 manifest 从错误工作区加载、工作区
+        // 指纹校验错位）。过滤后 base 指向其他工作区 = 查不到 → broken（fail-closed）。
+        const byId = new Map(
+            checkpoints
+                .filter(cp => cp.conversationId === targetCheckpoint.conversationId)
+                .map(cp => [cp.id, cp] as const)
+        );
         const visited = new Set<string>();
         let broken = false;
 
@@ -1477,6 +1533,11 @@ export class CheckpointService {
                 break;
             }
             visited.add(current.id);
+            // 4.12-L2：校验链节点与目标同工作区（防御性；byId 已按工作区过滤，正常路径恒真）
+            if (current.conversationId !== targetCheckpoint.conversationId) {
+                broken = true;
+                break;
+            }
             chain.unshift(current);
 
             if (current.type !== 'incremental' || !current.baseCheckpointId) {
@@ -1573,7 +1634,7 @@ export class CheckpointService {
             removedBlobs: [],
             removedBytes: 0,
             pendingBlobs: [],
-            refsVerified: 0,
+            blobsScanned: 0,
             issue
         });
 
@@ -1650,7 +1711,7 @@ export class CheckpointService {
                         dryRun,
                         removed: toRemove.length,
                         pending: pending.length,
-                        refsVerified: hashes.length,
+                        blobsScanned: hashes.length,
                         orphanManifests: orphanManifestIds.length
                     });
 
@@ -1666,7 +1727,7 @@ export class CheckpointService {
                         removedBlobs: toRemove,
                         removedBytes,
                         pendingBlobs: pending,
-                        refsVerified: hashes.length,
+                        blobsScanned: hashes.length,
                         ...(issues.length > 0 ? { issue: issues.join('; ') } : {})
                     };
                 },

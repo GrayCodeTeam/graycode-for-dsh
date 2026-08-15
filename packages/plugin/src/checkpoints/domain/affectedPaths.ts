@@ -22,6 +22,15 @@
  * - 相对路径 resolve 到工作区根下；绝对路径原样；
  * - 路径穿越防御：resolve 后必须位于工作区根内（大小写不敏感前缀 + 路径边界，
  *   防止 `/root/outside` 匹配 `/root/outside2`），否则返回 null。
+ *
+ * ⚠️ 接线状态（3.11-M3，确认无生产调用点）：`extractAffectedPaths` 与部分快照分支
+ * （CheckpointSnapshotBuilder.buildAffectedPathsSnapshot）目前**未接线**——唯一的生产
+ * 快照调用点（service.ts createCheckpoint 的 buildWorkspaceSnapshot）不传 affectedPaths，
+ * 恒走全量分支，partial 恒不触发。本链路保留为 CP-PARTIAL-1 性能优化的实现与测试载体
+ * （snapshotBuilder.test.ts 直接覆盖部分分支的符号链接/目录/哈希语义）；若长期无接线
+ * 计划可整体删除 `extractAffectedPaths`，届时同步移除 snapshotBuilder.test.ts 的部分快照
+ * 用例（workspaceUriToFsPath / isPathWithin 仍被 workspacePath.test.ts 与
+ * CheckpointSnapshotBuilder 使用，保留）。
  */
 import * as path from 'path';
 
