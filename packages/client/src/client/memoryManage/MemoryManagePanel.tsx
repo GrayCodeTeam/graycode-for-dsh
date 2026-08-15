@@ -62,6 +62,8 @@ export interface MemoryManagePanelProps {
   workspace?: string
   /** Page size (normalized to the host contract; default 20, cap 100). */
   pageSize?: number
+  /** entryChars byte limit for the add box counter (host config mirror). */
+  entryChars?: number
 }
 
 const panelStyle: CSSProperties = {
@@ -157,6 +159,51 @@ const footerStyle: CSSProperties = {
   fontSize: '11px',
 }
 
+const addBoxStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '0.375rem',
+}
+
+const addTextareaStyle: CSSProperties = {
+  width: '100%',
+  minHeight: '3.25rem',
+  padding: '0.375rem 0.5rem',
+  borderRadius: '0.375rem',
+  border: '1px solid var(--dsh-border-color, #333)',
+  background: 'rgba(0, 0, 0, 0.25)',
+  color: 'inherit',
+  fontSize: '12px',
+  fontFamily: 'inherit',
+  resize: 'vertical',
+  boxSizing: 'border-box',
+}
+
+const addRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '0.5rem',
+  justifyContent: 'flex-end',
+}
+
+const addCharStyle: CSSProperties = {
+  fontSize: '10px',
+  opacity: 0.7,
+  marginRight: 'auto',
+}
+
+const addCharOverflowStyle: CSSProperties = {
+  ...addCharStyle,
+  color: '#f85149',
+  opacity: 1,
+  fontWeight: 600,
+}
+
+const addNoteStyle: CSSProperties = {
+  fontSize: '11px',
+  color: '#3fb950',
+}
+
 const totalStyle: CSSProperties = {
   opacity: 0.65,
 }
@@ -205,6 +252,12 @@ const SEARCH_DEBOUNCE_MS = 250
 /** Auto-dismiss of the forget success note. */
 const FORGET_NOTE_MS = 3500
 
+/** UTF-8 byte length of a string (TextEncoder in browsers; fallback for node). */
+function utf8Bytes(text: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text).length
+  return text.length
+}
+
 function MemoryErrorBanner({
   t,
   error,
@@ -239,6 +292,7 @@ export function MemoryManagePanel({
   initialScope = 'global',
   workspace,
   pageSize,
+  entryChars,
 }: MemoryManagePanelProps): ReactNode {
   const pageLimit = normalizeMemoryLimit(pageSize)
   const [queryText, setQueryText] = useState('')
@@ -251,6 +305,10 @@ export function MemoryManagePanel({
   const [editTarget, setEditTarget] = useState<MemoryEntryViewModel | null>(null)
   const [editSaving, setEditSaving] = useState(false)
   const [forget, setForget] = useState<ForgetState>(IDLE_FORGET_STATE)
+  const [addText, setAddText] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [addError, setAddError] = useState<MemoryErrorView | null>(null)
+  const [addNote, setAddNote] = useState<string | null>(null)
   /** Stale-response guard: only the latest request may commit state. */
   const seqRef = useRef(0)
   /** Unmount guard: never commit state after the panel is gone. */
@@ -352,8 +410,38 @@ export function MemoryManagePanel({
     if (next === scope) return
     setEditTarget(null)
     setForget(IDLE_FORGET_STATE)
+    setAddError(null)
+    setAddNote(null)
     setScope(next)
   }
+
+  const submitAdd = useCallback(async () => {
+    if (transport === undefined || adding) return
+    const text = addText.trim()
+    if (text.length === 0) return
+    setAddError(null)
+    setAddNote(null)
+    if (entryChars !== undefined && utf8Bytes(text) > entryChars) {
+      setAddError(mapMemoryFailure(toMemoryFailure(new Error(`Too long: ${utf8Bytes(text)} bytes, limit ${entryChars}.`))))
+      return
+    }
+    setAdding(true)
+    let result
+    try {
+      result = await transport.add({ scope, workspace, text })
+    } catch (err) {
+      result = { ok: false as const, error: toMemoryFailure(err) }
+    }
+    if (!mountedRef.current) return
+    setAdding(false)
+    if (result.ok) {
+      setAddText('')
+      setAddNote(t('add.success'))
+      await fetchFirstPage(appliedQuery, scope)
+    } else {
+      setAddError(mapMemoryFailure(result.error))
+    }
+  }, [transport, adding, addText, entryChars, scope, workspace, appliedQuery, fetchFirstPage, t]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveEdit = useCallback(async (nextText: string) => {
     if (transport === undefined || editTarget === null) return
@@ -498,6 +586,52 @@ export function MemoryManagePanel({
 
       {error !== null && (
         <MemoryErrorBanner t={t} error={error} onRetry={() => void fetchFirstPage(appliedQuery, scope)} />
+      )}
+
+      {wired && (
+        <div data-graycode-memory="add" style={addBoxStyle}>
+          <textarea
+            data-graycode-memory="add-input"
+            rows={3}
+            placeholder={t('add.placeholder')}
+            value={addText}
+            disabled={adding || (scope === 'workspace' && workspace === undefined)}
+            style={addTextareaStyle}
+            onChange={event => setAddText(event.target.value)}
+            onKeyDown={event => {
+              if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault()
+                void submitAdd()
+              }
+            }}
+          />
+          <div style={addRowStyle}>
+            <span
+              data-graycode-memory="add-bytes"
+              style={entryChars !== undefined && utf8Bytes(addText) > entryChars ? addCharOverflowStyle : addCharStyle}
+            >
+              {utf8Bytes(addText)}
+              {entryChars !== undefined ? `/${entryChars}` : ''}
+            </span>
+            <button
+              type="button"
+              data-graycode-memory="add-submit"
+              style={adding || addText.trim().length === 0 || (scope === 'workspace' && workspace === undefined) ? buttonDisabledStyle : buttonStyle}
+              disabled={adding || addText.trim().length === 0 || (scope === 'workspace' && workspace === undefined)}
+              onClick={() => void submitAdd()}
+            >
+              {adding ? t('add.busy') : t('add.button')}
+            </button>
+          </div>
+          {addError !== null && (
+            <MemoryErrorBanner t={t} error={addError} onRetry={() => void submitAdd()} />
+          )}
+          {addNote !== null && (
+            <span data-graycode-memory="add-note" style={addNoteStyle}>
+              {addNote}
+            </span>
+          )}
+        </div>
       )}
 
       {phase === 'loading' && (

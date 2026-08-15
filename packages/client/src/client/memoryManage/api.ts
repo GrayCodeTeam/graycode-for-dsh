@@ -27,6 +27,7 @@ import {
   type GrayMemoryForgetResult,
   type GrayMemoryListParams,
   type GrayMemoryListResult,
+  type GrayMemoryNoteParams,
   type GrayMemoryScope,
   type GrayRemoteArgs,
   type GrayRemoteResult,
@@ -36,6 +37,7 @@ import { normalizeMemoryLimit, toMemoryFailure } from './logic.ts'
 /** Endpoint names consumed by the memory surface (namespace `memory`). */
 export const MEMORY_ENDPOINTS = {
   list: 'memory/list',
+  note: 'memory/note',
   edit: 'memory/edit',
   forget: 'memory/forget',
 } as const
@@ -51,6 +53,7 @@ export interface MemoryManageTransport {
   /** True when backed by the real host channel; false for in-memory demo data. */
   readonly wired: boolean
   list(params: GrayMemoryListParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryListResult>>
+  add(params: GrayMemoryNoteParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryEntryView>>
   edit(params: GrayMemoryEditParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryEntryView>>
   forget(params: GrayMemoryForgetParams, signal?: AbortSignal): Promise<GrayRemoteResult<GrayMemoryForgetResult>>
 }
@@ -77,6 +80,8 @@ export function createRemoteMemoryTransport(invoker: GrayRemoteInvoker): MemoryM
     wired: true,
     list: (params, signal) =>
       callMemoryEndpoint(invoker, 'memory', 'list', params, signal, readMemoryListResult),
+    add: (params, signal) =>
+      callMemoryEndpoint(invoker, 'memory', 'note', params, signal, readMemoryEntryView),
     edit: (params, signal) =>
       callMemoryEndpoint(invoker, 'memory', 'edit', params, signal, readMemoryEntryView),
     forget: (params, signal) =>
@@ -180,6 +185,22 @@ export function createMockMemoryTransport(
         start + limit < entries.length && page.length > 0 ? String(page[page.length - 1]!.id) : undefined
       const items = page.map(entry => ({ id: entry.id, date: entry.date, text: entry.text }))
       return { ok: true, value: { items, total: entries.length, ...(nextCursor !== undefined ? { nextCursor } : {}) } }
+    },
+
+    async add(params, signal) {
+      if (signal?.aborted) return cancelled()
+      const text = params.text.trim()
+      if (text.length === 0) {
+        return invalid('text must be a non-empty string', { field: 'text' })
+      }
+      if (params.scope === 'workspace' && workspaceRoot === undefined) {
+        return invalid('workspace scope requires a workspace (absolute path)', {})
+      }
+      const scope = params.scope ?? 'global'
+      const id = store.reduce((max, entry) => Math.max(max, entry.id), 0) + 1
+      const date = new Date().toISOString().slice(0, 10)
+      store.push({ id, date, text, scope })
+      return { ok: true, value: { id, date, text } }
     },
 
     async edit(params, signal) {

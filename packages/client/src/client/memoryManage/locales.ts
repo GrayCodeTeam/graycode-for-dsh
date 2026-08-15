@@ -20,6 +20,10 @@ export type GrayCodeMemoryManageLocaleKey =
   | 'searchPlaceholder'
   | 'scope.global'
   | 'scope.workspace'
+  | 'add.placeholder'
+  | 'add.button'
+  | 'add.busy'
+  | 'add.success'
   | 'list.empty'
   | 'list.emptyHint'
   | 'list.total'
@@ -78,6 +82,10 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     searchPlaceholder: '搜索记忆…',
     'scope.global': '全局',
     'scope.workspace': '工作区',
+    'add.placeholder': '写入一条新的记忆…（Ctrl/Cmd + Enter 提交）',
+    'add.button': '新增',
+    'add.busy': '写入中…',
+    'add.success': '记忆已写入',
     'list.empty': '没有匹配的记忆',
     'list.emptyHint': '换个关键词，或切换作用域后再试',
     'list.total': '共',
@@ -120,6 +128,10 @@ export const graycodeMemoryManageDictionaries: Record<LocaleId, LocaleDictOf<'gr
     searchPlaceholder: 'Search memories…',
     'scope.global': 'Global',
     'scope.workspace': 'Workspace',
+    'add.placeholder': 'Write a new memory… (Ctrl/Cmd + Enter to submit)',
+    'add.button': 'Add',
+    'add.busy': 'Saving…',
+    'add.success': 'Memory saved',
     'list.empty': 'No matching memories',
     'list.emptyHint': 'Try a different keyword or switch scope',
     'list.total': 'Total',
@@ -170,6 +182,10 @@ export const graycodeMemoryManageJaPlaceholder: LocaleDict = {
   searchPlaceholder: 'メモリを検索…',
   'scope.global': 'グローバル',
   'scope.workspace': 'ワークスペース',
+  'add.placeholder': '新しいメモリを入力…（Ctrl/Cmd + Enter で送信）',
+  'add.button': '追加',
+  'add.busy': '保存中…',
+  'add.success': 'メモリを保存しました',
   'list.empty': '一致するメモリがありません',
   'list.emptyHint': '別のキーワードまたはスコープをお試しください',
   'list.total': '合計',

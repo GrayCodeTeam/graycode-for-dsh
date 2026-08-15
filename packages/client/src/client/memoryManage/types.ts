@@ -53,6 +53,14 @@ export interface GrayMemoryListResult {
   readonly nextCursor?: string
 }
 
+/** memory/note params (mirrors `GrayMemoryNoteParams`). */
+export interface GrayMemoryNoteParams {
+  readonly scope?: GrayMemoryScope
+  readonly workspace?: string
+  /** Single line; trimmed before storage, bounded by entryChars bytes. */
+  readonly text: string
+}
+
 /** memory/edit params (mirrors `GrayMemoryEditParams`). */
 export interface GrayMemoryEditParams {
   readonly scope?: GrayMemoryScope

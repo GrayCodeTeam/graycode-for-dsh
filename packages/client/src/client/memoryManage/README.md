@@ -14,6 +14,7 @@ implemented in `packages/plugin/src/memory/adapters/dsh/remote.ts`):
 | Endpoint | Wire args | Result |
 | --- | --- | --- |
 | `memory/list` | `{ scope?, workspace?, search?, cursor?, limit? }` | `{ items: GrayMemoryEntryView[], total, nextCursor? }` — substring search (case-insensitive), id-desc order, cursor pagination |
+| `memory/note` | `{ scope?, workspace?, text }` | created `GrayMemoryEntryView` — manual add, equivalent to the `memory_note` tool write path (single line + entryChars byte limit; write path creates a missing workspace store) |
 | `memory/edit` | `{ scope?, workspace?, id, text }` | updated `GrayMemoryEntryView` (id/date preserved) |
 | `memory/forget` | `{ scope?, workspace?, blockId, confirm }` | `{ mode: 'single'\|'range'\|'summary', removed?/gone?/firstId? }` — `confirm: true` required, else `GRAY_APPROVAL_REQUIRED` |
 
@@ -55,34 +56,35 @@ no dependency). `types.ts` carries a hand-synced STRUCTURAL contract snapshot
 | `MemoryEditOverlay.tsx` | Modal edit with live diff preview |
 | `ForgetConfirm.tsx` | Inline two-step forget confirm bar (warning + confirm/cancel, error retry) |
 
-## Wiring (main session — NOT done by P4-03; `index.ts` is off-limits)
+## Wiring (mounted in the native settings section)
+
+The main session (`packages/client/src/client/index.ts`) registers the
+`graycode.memoryManage` locale namespace and injects its translate seat into
+the Gray Code settings section. The「记忆 / Memory」category
+(`packages/client/src/client/settings/pages.tsx` → `MemoryPage`) renders the
+panel below the memory settings fields:
 
 ```ts
 import { MemoryManagePanel } from './memoryManage/MemoryManagePanel.tsx'
-import { createRemoteMemoryTransport, createMockMemoryTransport } from './memoryManage/api.ts'
-import {
-  GRAYCODE_MEMORY_MANAGE_NS,
-  graycodeMemoryManageDictionaries,
-  graycodeMemoryManageJaPlaceholder,
-} from './memoryManage/locales.ts'
+import { createRemoteMemoryTransport } from './memoryManage/api.ts'
 
-// 1. Register the locale namespace (own ns; kept separate from `graycode`).
-ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, graycodeMemoryManageDictionaries)
-ctx.locale.register(GRAYCODE_MEMORY_MANAGE_NS, 'ja', graycodeMemoryManageJaPlaceholder)
-
-// 2. Build the transport.
-//    Real host channel (single consumption point): wrap the host
-//    GrayRemoteService.invoke once a browser→host bridge exists.
-const transport = createRemoteMemoryTransport(
-  (namespace, method, args, signal) => ctx.grayRemote.invoke(namespace, method, args, signal),
+// The section's `/graycode` remote invoker is adapted once per page render:
+const transport = createRemoteMemoryTransport((namespace, method, args, signal) =>
+  remote(namespace, method, args, signal),
 )
-//    Demo / unwired host: in-memory mock (no I/O, wired: false).
-// const transport = createMockMemoryTransport([{ id: 1, date: '2025-01-01', text: '…' }])
 
-// 3. Mount the panel wherever the shell hosts the memory surface, with
-//    `t: ctx.locale.bind(GRAYCODE_MEMORY_MANAGE_NS)` and the transport.
-//    Pass `workspace` (workspace root) when scope = 'workspace' is offered.
+<MemoryManagePanel
+  t={memoryT}
+  transport={transport}
+  workspace={defaultWorkspace}
+  entryChars={config.memory.entryChars}
+/>
 ```
+
+The panel remains a mountable export for other hosts; an unwired host renders
+it read-only (`transport` absent → replay hint; a mock transport → demo badge).
+The add box shows a UTF-8 byte counter against `entryChars` and blocks
+over-limit submissions client-side (the host enforces the same bound).
 
 ## Host-side status & consumption recommendation
 
@@ -109,7 +111,8 @@ const transport = createRemoteMemoryTransport(
   returns `GRAY_INVALID_INPUT` (surfaced via the error banner).
 - The surface only issues entry-level forget (`blockId = "<id>"`); the
   `summary`/`range` forget modes exist on the contract but are not exposed
-  by this UI.
+  by this UI (the original web panel's arbitrary-set batch delete is not
+  ported — the host forget contract deletes single ids or closed ranges).
 - The mock transport has no summary tree (blockIds like `"16-31"` are
   rejected with `GRAY_INVALID_INPUT`).
 - No debounced-server search debounce beyond the local 250 ms input timer.

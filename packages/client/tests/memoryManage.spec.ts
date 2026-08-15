@@ -579,6 +579,33 @@ describe('createMockMemoryTransport', () => {
     expect(summary.error.code).toBe(CODES.INVALID_INPUT)
   })
 
+  it('adds a new entry with the next id and today date; trims and validates', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const added = await transport.add({ text: '  fresh note  ' })
+    expect(added).toEqual({ ok: true, value: { id: 5, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), text: 'fresh note' } })
+    const listed = await transport.list({})
+    expect(listed.ok && listed.value.items[0]!.id).toBe(5)
+
+    const empty = await transport.add({ text: '   ' })
+    expect(empty.ok).toBe(false)
+    if (empty.ok) return
+    expect(empty.error.code).toBe(CODES.INVALID_INPUT)
+  })
+
+  it('add respects the workspace scope guard (requires a workspace root)', async () => {
+    const transport = createMockMemoryTransport(seed)
+    const result = await transport.add({ scope: 'workspace', text: 'ws note' })
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.error.code).toBe(CODES.INVALID_INPUT)
+
+    const scoped = createMockMemoryTransport(seed, { workspace: 'C:\\ws' })
+    const added = await scoped.add({ scope: 'workspace', text: 'ws note' })
+    expect(added.ok && added.value.id).toBe(5)
+    const wsList = await scoped.list({ scope: 'workspace' })
+    expect(wsList.ok && wsList.value.items.map(item => item.id)).toEqual([5])
+  })
+
   it('honours aborted signals with CANCELLED', async () => {
     const transport = createMockMemoryTransport(seed)
     const signal = { aborted: true } as AbortSignal
@@ -601,18 +628,25 @@ describe('createRemoteMemoryTransport', () => {
     }
   }
 
-  it('dispatches the three endpoints with namespace/method/args', async () => {
+  it('dispatches the four endpoints with namespace/method/args', async () => {
     const calls: Array<{ namespace: string; method: string; args: unknown }> = []
     const transport = createRemoteMemoryTransport(recordInvoker(calls))
     await transport.list({ scope: 'global', search: 'x' })
+    await transport.add({ text: 'new note' })
     await transport.edit({ id: 1, text: 't' })
     await transport.forget({ blockId: '1', confirm: true })
     expect(calls).toEqual([
       { namespace: 'memory', method: 'list', args: { scope: 'global', search: 'x' } },
+      { namespace: 'memory', method: 'note', args: { text: 'new note' } },
       { namespace: 'memory', method: 'edit', args: { id: 1, text: 't' } },
       { namespace: 'memory', method: 'forget', args: { blockId: '1', confirm: true } },
     ])
-    expect(MEMORY_ENDPOINTS).toEqual({ list: 'memory/list', edit: 'memory/edit', forget: 'memory/forget' })
+    expect(MEMORY_ENDPOINTS).toEqual({
+      list: 'memory/list',
+      note: 'memory/note',
+      edit: 'memory/edit',
+      forget: 'memory/forget',
+    })
   })
 
   it('narrows ok values and turns malformed values into INTERNAL failures', async () => {
