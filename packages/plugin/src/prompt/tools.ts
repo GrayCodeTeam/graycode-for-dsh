@@ -197,14 +197,21 @@ export function createPromptTools(
         // （ENVIRONMENT 等 {{$MODULE}} 占位值），否则预览与注入文本不一致（预览会显示
         // "[placeholder ENVIRONMENT: not available in DSH]" 而实际注入的是真实环境段落）。
         const cwd = exec?.agent?.session?.header?.cwd
+        const requestLayer = getRequestLayer?.() ?? false
+        const sectionText = renderModeSectionText(mode, {
+          sendHistoryThoughts: getSendHistoryThoughts(),
+          requestLayer,
+          placeholderValues: previewPlaceholderValues(cwd),
+        })
+        // requestLayer 开启时 user/assistant 预设条目作为真实消息注入，不在系统文本预览中——
+        // 追加说明避免模型误以为预设被丢弃。
+        const text = requestLayer
+          ? `${sectionText.length > 0 ? `${sectionText}\n\n` : ''}Note: user/assistant preset entries will be injected as real messages at the request layer (llm/stream) and are not included in this system-text preview.`
+          : sectionText
         return {
           success: true,
           modeId: mode.id,
-          text: renderModeSectionText(mode, {
-            sendHistoryThoughts: getSendHistoryThoughts(),
-            requestLayer: getRequestLayer?.(),
-            placeholderValues: previewPlaceholderValues(cwd),
-          }),
+          text,
         }
       } catch (error) {
         return errorOf(error)
