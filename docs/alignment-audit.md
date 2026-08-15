@@ -1,6 +1,6 @@
 # Gray Code × DSH 实现对齐审计报告
 
-> 状态：调查完成，待主人审阅后按优先级执行
+> 状态：✅ 第一轮执行已完成（2026-08-16，5 commits 推送 main）；剩余待办见 §8
 > 调查方式：16 个并行子代理深度只读调查（原插件 `参考项目/Gray-Code-main` + 当前实现 `packages/` + DSH 官方 `参考项目/deepseek-harness-master` + cordis 源码/运行时探针）
 > 调查日期：2026-09
 
@@ -8,13 +8,23 @@
 
 | 域 | 结论 | 优先动作 |
 | --- | --- | --- |
-| 提示词（聚焦） | ① UI 结构与原插件差异大（字段区单框 + 列表式管理器 vs 原插件一体化模式编辑器）；② **GRAY_ENDPOINT_NOT_FOUND 阻断 bug 根因已确认** | 修 bug + UI 合并重构（主人已拍板：参考原插件 UI、去传统模板、仅预设条目） |
-| 记忆（顺带） | enabled 开关语义不一致、多工作区管理/批量删除缺失、memory_wake 快照语义差异、术语 | 文档化，待排期 |
-| 存档点（顺带） | 自动存档 vs 显式工具集（架构差异）、enabled/排除 UI/批量删除缺失 | 文档化，待排期 |
-| 分支（顺带） | 工作区联动缺失、分支 UI 全缺、reroll 粒度变化、子树软删缺失 | 文档化，待排期 |
+| 提示词（聚焦） | ① UI 结构与原插件差异大（字段区单框 + 列表式管理器 vs 原插件一体化模式编辑器）；② **GRAY_ENDPOINT_NOT_FOUND 阻断 bug 根因已确认** | ✅ 已执行：7cd843b 修 bug + 3a161b4/9eb895d UI 重构（见 §0.1） |
+| 记忆（顺带） | enabled 开关语义不一致、多工作区管理/批量删除缺失、memory_wake 快照语义差异、术语 | 文档化，待排期（P0 三项见 §8-4） |
+| 存档点（顺带） | 自动存档 vs 显式工具集（架构差异）、enabled/排除 UI/批量删除缺失 | 文档化，待排期（方向需产品决策） |
+| 分支（顺带） | 工作区联动缺失、分支 UI 全缺、reroll 粒度变化、子树软删缺失 | 文档化，待排期（大工程单独排期） |
 | 工作流（顺带） | compare finding key 差异、todo id/cancelled、requiresUserConfirmation、plan 卡片、review 本地化 | 文档化，待排期 |
 | 工具面（顺带） | 大部分由 DSH 原生替代（有意）；缺失 search replace/insert_code/list_files/get_symbols | 文档化，待排期 |
-| 术语 | 用户可见黑话 9 处（根代理/提示词域/思考请求层/跳数/条条目等） | 文档化，待排期 |
+| 术语 | 用户可见黑话 9 处（根代理/提示词域/思考请求层/跳数/条条目等） | ✅ 已执行：34b0326 三语清理（见 §7） |
+
+### 0.1 执行状态（2026-08-16）
+
+| commit | 内容 |
+| --- | --- |
+| `34b0326` | 术语清理（用户可见黑话 → 原插件/DSH 官方用语，zh/en/ja 三语同步） |
+| `7cd843b` | GRAY_ENDPOINT_NOT_FOUND 修复（7 域统一 ctx.inject + logger.warn + 契约测试 32 端点 + lateRegistration 回归） |
+| `90599ae` | 本审计报告落地 |
+| `9eb895d` | PromptEntry.name 显示名全链路 + createMode 空模板回退内置 code 模板 |
+| `3a161b4` | 提示词 UI 合并重构（原插件骨架：模式选择栏 + 预设条目唯一组装，去传统模板/persona 单框） |
 
 ---
 
@@ -87,7 +97,9 @@ Host 侧（与 UI 拆分对应的技术层）：
 | P-13 | **模式 CRUD 语义** | rename 仅改名不覆盖整份快照；删除保底 1 个、删当前自动切换；内置不可删/改名 | 同语义（BUILTIN_IMMUTABLE、删除回退 code） | 对齐 ✅ | — |
 | P-14 | **导入兼容** | 4 种形状 + 新 ID 防覆盖 | 2 种形状 + SystemPromptConfig 信封 + legacy 字段映射 warnings | 对齐 ✅（超集） | — |
 
-### 1.4 🔥 GRAY_ENDPOINT_NOT_FOUND 阻断 bug（根因已确认）
+**执行后状态（2026-08-16）**：P-01~P-06 已按建议落地（commit `3a161b4` UI 重构 + `9eb895d` 空模板回退）；P-07 维持 entries 唯一（主人指示）；P-08/P-09 可选增强暂不实施；P-10~P-14 原已对齐，不受影响。
+
+### 1.4 🔥 GRAY_ENDPOINT_NOT_FOUND 阻断 bug（✅ 已修复，2026-08-16）
 
 **现象**：设置面板提示词页报 `无法读取提示词模式： GRAY_ENDPOINT_NOT_FOUND: remote endpoint not found: prompt/modes.list`
 
@@ -106,6 +118,8 @@ Host 侧（与 UI 拆分对应的技术层）：
 | stagedDiff | `ctx.inject(['grayRemote'])` ✅ | 最安全（等 ACTIVE，官方等待机制） |
 
 **修复方案（已获主人认可）**：全部 7 个注册点统一为 `ctx.inject(['grayRemote'], child => ...)` 模式（与 stagedDiff 一致）；`GrayRemoteService.invoke` 端点未命中时补 `logger.warn`；契约测试补全 32 端点 + 组合根装配断言。
+
+**落地（commit `7cd843b`）**：7 处注册点（prompt/workflows/memory/checkpoints/branches/activity/migration）全部改为 `ctx.inject(['grayRemote'])` 延迟注册模式（服务可用自动补注册、卸载自动回收、HMR 安全）；`GrayRemoteService.invoke` 未命中补 `logger.warn`；契约测试 19→**32 端点**（补齐此前漏掉的 prompt 9 + branches 2 + activity 1 + migration 1）；新增 `lateRegistration.test.ts`（模拟 grayRemote 晚到，验证端点自动补注册，1 用例）。
 
 ---
 
@@ -238,13 +252,13 @@ Host 侧（与 UI 拆分对应的技术层）：
 
 ---
 
-## 8. 建议执行顺序（待主人确认）
+## 8. 执行顺序与状态（2026-08-16 更新）
 
-1. **修复 GRAY_ENDPOINT_NOT_FOUND**（阻断 bug，7 处注册点统一 inject + 日志 + 测试）
-2. **提示词 UI 合并重构**（主人已拍板方向：原插件骨架 + 去传统模板 + 仅预设条目；P-01~P-06 一并处理）
-3. **术语清理**（第 7 节清单，用户可见优先 + lib 重建）
-4. **记忆域 P0 项**（M-01 enabled 开关语义、M-02 多工作区、M-03 批量删除）——需确认
-5. **其他域按优先级**（存档点自动存档方向需产品决策；分支 UI/工作区联动是大工程，单独排期）
+1. ✅ **修复 GRAY_ENDPOINT_NOT_FOUND**（阻断 bug，7 处注册点统一 inject + 日志 + 测试）— commit `7cd843b`，已推送
+2. ✅ **提示词 UI 合并重构**（主人已拍板方向：原插件骨架 + 去传统模板 + 仅预设条目；P-01~P-06 一并处理）— commit `3a161b4`/`9eb895d`，已推送
+3. ✅ **术语清理**（第 7 节清单，用户可见优先 + lib 重建）— commit `34b0326`，已推送；注：代码注释残留「未接线」4 处（notifications 域，非用户可见），可顺手收尾
+4. ⏳ **记忆域 P0 项**（M-01 enabled 开关语义、M-02 多工作区、M-03 批量删除）——待主人确认方向后排期
+5. ⏳ **其他域按优先级**（存档点自动存档方向需产品决策；分支 UI/工作区联动是大工程，单独排期；其中 B-03 reroll 粒度建议优先）
 
 ---
 

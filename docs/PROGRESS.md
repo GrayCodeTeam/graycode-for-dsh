@@ -43,6 +43,15 @@
 > section 检测告警；**回合首步注入修复**（工具迭代循环不再重复注入预设条目，对齐原版
 > 注入时机语义）；thoughts 真实 agent-loop e2e（首步注入 + 第二 step 不注入 + 多回合
 > 再注入）；全量测试 1981 用例全绿。
+> 本轮（对齐审计执行批次，2026-08-16）：docs/alignment-audit.md 调查完成（16 并行子代理
+> 只读调查，覆盖原插件/当前实现/DSH 官方/cordis 源码 + 运行时探针）；
+> **GRAY_ENDPOINT_NOT_FOUND 阻断 bug 修复**（组合根 LOADING 期 strict ctx.get 返回
+> undefined → prompt 9 端点静默缺失；7 域统一 ctx.inject 延迟注册 + logger.warn +
+> 契约测试 19→32 端点 + lateRegistration 回归）；**提示词 UI 合并重构**（对齐原插件骨架：
+> 模式选择栏 + 选中即编辑，去传统模板/persona 单框/新建模板输入；EntriesEditor 增强——
+> 条目名称/chat_history 锁定卡/拖拽排序/变量插入 chips/未保存确认；createMode 空模板
+> 回退内置 code 模板）；PromptEntry.name 显示名全链路；术语清理（用户可见黑话 9 处 →
+> 原插件/DSH 官方用语，zh/en/ja 三语）；5 commits 推送 main；全量测试 2038 用例全绿。
 
 ## 版本锁定（ADR-0001）
 
@@ -440,13 +449,8 @@ D-3 旧 checkpoint 数据迁移范围（✅ 迁移器承接 v1/v2 转换）、D-
 
 ## 测试基线
 
-`pnpm test`：120 文件 1725 用例全绿（1720 通过 / 5 skipped；本地实测）——
-workflows 171 / client 418（含 activityHeatmap 33 + scopeMapPanel 32）/ branches 125 /
-prompt 88 / migration 119 / memory 96 / media 86 / checkpoints 78 / remote 69 / activity 58 /
-stagedDiff 48 / shared 47 / spike 23（staged-diff 8 + subagents.probe 15，1 skipped）/ 
-fault-injection 19 / providers 13 / agentScope 9 / persona 8 / e2e 5 / todo 25 / file 17。
-5 skipped 分布：spike/subagents.probe 1、migrationHarden 3（Windows 无 symlink）、
-stagedDiff/tools 1（Windows 无 symlink）。
+`pnpm test`：136 文件 2039 用例全绿（2038 通过 / 1 skipped；本地实测）——
+plugin 117 文件 1446 用例 + client 19 文件 592 用例（对齐审计执行后全量重跑）。
 `pnpm typecheck`（含 tests/**，tsconfig.test.json）/ `pnpm build`：全绿。
 `scripts/verify-pack.ps1`：PASS（3 tarball，violations: none，warnings 0）。
 

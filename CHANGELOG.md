@@ -265,6 +265,13 @@
 - **thoughts e2e 集成验证**：`tests/e2e/thoughtsLoop.test.ts`——真实 agent-loop +
   mock LLM + 默认配置，验证首步注入（user 条目头部 + assistant reasoning 块 +
   真实输入保序）、第二 step 不再注入、第二用户回合再次注入；连跑稳定。
+- **提示词条目显示名（P-04 对齐）**：PromptEntry 新增 `name` 字段（解析/归一化/导入
+  兼容全链路，原插件导入的 name 不再丢弃），EntriesEditor 显示并编辑条目名称。
+- **新建模式默认模板（P-06 修复）**：createMode 空模板自动回退内置 code 模板——此前
+  空 section 被瀑布丢弃，新模式「看起来没注入」（对齐原插件 DEFAULT_TEMPLATE 语义）。
+- **Remote 契约测试补全**：契约端点 19 → 32（补齐 prompt 9 + branches 2 + activity 1 +
+  migration 1），含无文档外端点断言；新增 lateRegistration 回归测试（grayRemote 晚到
+  自动补注册）。
 
 ### Changed（变更）
 
@@ -288,6 +295,16 @@
   （roots/all/disabled）scoped 工具注册。
 - **测试基线**：从 282 用例增长到 452 用例（42 文件），typecheck 现覆盖 `tests/**`
   （新增 `packages/plugin/tsconfig.test.json`）。
+- **提示词 UI 合并重构（对齐原插件）**：PromptModeManager 重写为原插件骨架——顶部模式
+  选择栏（下拉 + 保存/新建/复制/导出/导入/重命名/删除）+ 选中模式直接编辑（不再需要点
+  「编辑」展开）；删除全部传统模板面（主模板 textarea、新建模式模板输入、persona 单框
+  移除，host 注入机制保留）；EntriesEditor 增强（条目名称、chat_history 锁定卡片虚线框
+  + 说明、拖拽排序 + before/after 指示线、{{$MODULE}} 变量插入 chips）；新增未保存更改
+  切换确认（对齐原插件 hasChanges）。
+- **术语清理（对齐原插件/DSH 官方）**：用户可见黑话 9 处替换——仅根代理→仅主代理、
+  代理作用范围→工具注册范围、启用提示词域→启用提示词功能、思考请求层→思考注入、
+  子代理最大消息跳数→子代理最大消息往返次数、条条目→条、主机服务→DSH 服务等；
+  zh/en/ja 三语同步。
 
 ### Fixed（修复，来自审计批次）
 
@@ -376,6 +393,14 @@
   `set -euo pipefail`；尚未发布导致的 404 只留在独立 bundle 探针，不再掩盖插件失败。
 - **发布包 exports**：移除 plugin 未随 tarball 发布的 `./src/*` 子路径；verify-pack 新增
   所有相对 exports 目标存在性硬检查。
+- **GRAY_ENDPOINT_NOT_FOUND（阻断 bug，组合根 LOADING 期）**：prompt 域用 strict
+  `ctx.get('grayRemote')` 一次性快照，组合根装配时 grayRemote 已 provide 但 fiber 仍
+  LOADING（`await Promise.all` 含真实文件 I/O 未完成），cordis strict get 对非 ACTIVE
+  提供方返回 undefined → `?.register()` 静默跳过 → prompt/modes.* 9 个端点从未注册 →
+  全新启动设置面板必报错、热更新后消失。修复：7 个域（prompt/workflows/memory/
+  checkpoints/branches/activity/migration）统一 `ctx.inject(['grayRemote'])` 延迟注册
+  （服务可用自动补注册、卸载自动回收、HMR 安全）；`GrayRemoteService.invoke` 端点未
+  命中补 `logger.warn`；契约测试 19→32 端点 + lateRegistration 回归测试。
 
 ### Security（安全）
 
