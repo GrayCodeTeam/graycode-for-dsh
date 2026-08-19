@@ -29,6 +29,7 @@ import type { GrayCodeCheckpointConfigLocaleKey } from '../checkpointList/locale
 import { PromptModeManager } from './promptModes/PromptModeManager.tsx'
 import { BackgroundAppearanceSection } from './BackgroundAppearanceSection.tsx'
 import { BranchManagerSection } from './BranchManagerSection.tsx'
+import { CheckpointExclusionProfilesSection } from './CheckpointExclusionProfilesSection.tsx'
 
 export interface GrayCodePageProps {
   t: GcTranslate
@@ -147,6 +148,11 @@ const CheckpointsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWor
         checkpointConfig={checkpointConfig}
         onCheckpointConfigChange={onChange}
         configT={key => checkpointConfigT(key as GrayCodeCheckpointConfigLocaleKey)}
+      />
+      <CheckpointExclusionProfilesSection
+        t={t}
+        values={config.checkpoints.excludeProfiles}
+        onChange={value => onChange(['checkpoints', 'excludeProfiles'], value)}
       />
     </div>
   )

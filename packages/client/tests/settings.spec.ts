@@ -33,6 +33,11 @@ import {
   tokens,
 } from '../src/client/settings/styles.ts'
 import type { GrayCodeConfig } from '../src/client/settings/types.ts'
+import {
+  CHECKPOINT_EXCLUSION_PROFILE_IDS,
+  exclusionProfileEnabled,
+  withExclusionProfile,
+} from '../src/client/settings/CheckpointExclusionProfilesSection.tsx'
 
 function makeConnection(call: ReturnType<typeof vi.fn>): ConnectionHandle {
   return { rpc: { call } } as unknown as ConnectionHandle
@@ -354,6 +359,22 @@ describe('real settings surface', () => {
     expect(summaryTokenBudgetTransform.toInput(4096)).toBe('4096')
     expect(summaryTokenBudgetTransform.fromInput(' 4096 ')).toBe(4096)
     expect(summaryTokenBudgetTransform.fromInput(' 50% ')).toBe('50%')
+  })
+})
+
+describe('checkpoint exclusion profile settings', () => {
+  it('treats omitted entries as enabled defaults', () => {
+    expect(CHECKPOINT_EXCLUSION_PROFILE_IDS).toHaveLength(8)
+    for (const id of CHECKPOINT_EXCLUSION_PROFILE_IDS) {
+      expect(exclusionProfileEnabled({}, id)).toBe(true)
+    }
+  })
+
+  it('writes a complete unambiguous profile record when toggled', () => {
+    const next = withExclusionProfile({}, 'datasets', false)
+    expect(next.datasets).toBe(false)
+    expect(Object.keys(next)).toEqual([...CHECKPOINT_EXCLUSION_PROFILE_IDS])
+    expect(Object.values(next).filter(Boolean)).toHaveLength(7)
   })
 })
 
