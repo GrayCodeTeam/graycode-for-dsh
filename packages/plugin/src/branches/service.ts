@@ -137,6 +137,18 @@ export interface BranchCoordinatorConfig {
     retentionDays?: number;
 }
 
+/** Replace the editable text while retaining images, files, and future non-text blocks. */
+export function editUserMessageContent(
+    original: readonly unknown[],
+    text: string
+): readonly unknown[] {
+    const attachments = original.filter(block => {
+        if (typeof block !== 'object' || block === null) return true;
+        return (block as { type?: unknown }).type !== 'text';
+    });
+    return [{ type: 'text', text }, ...attachments];
+}
+
 export interface BranchPruneResult {
     groupsScanned: number;
     groupsChanged: number;
@@ -364,7 +376,13 @@ export class BranchCoordinatorService {
                     BranchErrorCode.NO_USER_MESSAGE
                 );
             }
-            const content = (userEvent as unknown as { data: { content: readonly unknown[] } }).data.content;
+            const content = (userEvent as unknown as { data: { content?: unknown } }).data.content;
+            if (!Array.isArray(content)) {
+                throw new BranchError(
+                    `user message event seq ${userMessageSeq} has no replayable content`,
+                    BranchErrorCode.NO_USER_MESSAGE
+                );
+            }
             const previousActive = group.activeSessionId;
             const created = await this.forkAndRecord({
                 group,
@@ -411,6 +429,22 @@ export class BranchCoordinatorService {
                     );
                 }
             }
+            const userMessageSeq = directUserMessageSeqOfTurn(source.events, input.turn);
+            if (userMessageSeq === undefined) {
+                throw new BranchError(
+                    `turn ${input.turn} has no direct user message to edit`,
+                    BranchErrorCode.NO_USER_MESSAGE
+                );
+            }
+            const userEvent = source.events.find(event => event.seq === userMessageSeq);
+            const originalContent = (userEvent as unknown as { data?: { content?: unknown } } | undefined)
+                ?.data?.content;
+            if (!Array.isArray(originalContent)) {
+                throw new BranchError(
+                    `user message event seq ${userMessageSeq} has no editable content`,
+                    BranchErrorCode.NO_USER_MESSAGE
+                );
+            }
             const previousActive = group.activeSessionId;
             const created = await this.forkAndRecord({
                 group,
@@ -422,9 +456,10 @@ export class BranchCoordinatorService {
                 expectedRevision: input.expectedRevision,
                 activate: true,
             });
-            const messageSent = await this.sendAfterFork(created.sessionId, [
-                { type: 'text', text: input.text },
-            ]);
+            const messageSent = await this.sendAfterFork(
+                created.sessionId,
+                editUserMessageContent(originalContent, input.text)
+            );
             // 3.15-M2：消息未送达时不自动激活——把激活指针退回原候选（新候选保留在组内）
             const reverted = messageSent ? undefined : await this.revertActivation(input.groupId, previousActive);
             return {

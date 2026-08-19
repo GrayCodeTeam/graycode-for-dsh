@@ -591,6 +591,45 @@ describe('BranchCoordinatorService editRetry', () => {
     expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'edited hello' }])
   })
 
+  it('preserves image, file, and unknown non-text blocks while replacing the edited text', async () => {
+    const image = { type: 'image', mimeType: 'image/png', data: 'base64-image' }
+    const file = { type: 'file', name: 'notes.txt', data: 'file-data' }
+    const futureBlock = { type: 'future-attachment', id: 'attachment-1' }
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, {
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'original' }, image, file, futureBlock],
+      }),
+      ev('turn/end', 2, { turn: 1 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+
+    await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 1, text: 'edited' })
+
+    expect(env.adapter.sentMessages[0]!.content).toEqual([
+      { type: 'text', text: 'edited' },
+      image,
+      file,
+      futureBlock,
+    ])
+  })
+
+  it('rejects a turn without a direct user message before creating a branch', async () => {
+    env.adapter.addSession(ROOT_SESSION, [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'injected' }] }),
+      ev('turn/end', 2, { turn: 1 }),
+    ])
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+
+    await expectRejectCode(
+      env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 1, text: 'edited' }),
+      BranchErrorCode.NO_USER_MESSAGE,
+    )
+    expect(env.adapter.forkCalls).toHaveLength(0)
+  })
+
   it('editRetry auto-activates the new candidate (D-2)', async () => {
     const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
     const result = await env.service.editRetry({ groupId: group.id, sessionId: ROOT_SESSION, turn: 2, text: 'edited hello' })
