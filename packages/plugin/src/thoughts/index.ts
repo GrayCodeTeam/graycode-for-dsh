@@ -39,6 +39,11 @@ import { PROMPT_MODES_SERVICE } from '../prompt/index.ts'
 
 export const name = 'graycode-thoughts'
 
+// The adapter re-enters the host waterfall through ctx.llm.stream(). Cordis
+// only exposes injected services on a plugin fiber, so declaring this
+// dependency is required even when the llm runtime is already mounted.
+export const inject = ['llm']
+
 /** Adapter state provider: returns the current injection set (read per event). */
 export type ThoughtsStateProvider = () => Omit<ThoughtsAdapterState, 'enabled' | 'sendHistoryThoughts'>
 

@@ -344,10 +344,6 @@ function createBuiltinModes(): PromptMode[] {
     // renderModeSectionText 输出 = 模板 + system 条目拼接，模板为空时即条目
     // 内容），Chat History 其后，动态上下文殿后（原项目 convertLegacy 三件套
     // 顺序：system → history → dynamic）。
-    // 预设条目承载全部内容：system 条目 = 原内置模板文本（渲染等价——
-    // renderModeSectionText 输出 = 模板 + system 条目拼接，模板为空时即条目
-    // 内容），Chat History 其后，动态上下文殿后（原项目 convertLegacy 三件套
-    // 顺序：system → history → dynamic）。
     template: '',
     promptEntries: createDefaultEntrySeed(BUILTIN_MODE_TEMPLATES[id]),
   }))
@@ -363,6 +359,20 @@ function createDefaultEntrySeed(systemContent: string): PromptEntry[] {
     { id: CHAT_HISTORY_PROMPT_ENTRY_ID, name: 'Chat History', role: 'chat_history', order: 1, enabled: true, content: '' },
     { id: newEntryId(), name: '动态上下文', role: 'user', order: 2, enabled: true, content: DEFAULT_DYNAMIC_CONTEXT_TEMPLATE },
   ]
+}
+
+/** Upgrade only persisted legacy modes; imports keep their payload semantics. */
+function ensureUsableStoredPreset(mode: PromptMode): PromptMode {
+  if (!mode.promptEntries.every(entry => entry.role === 'chat_history')) return mode
+  const builtinTemplate = (BUILTIN_MODE_IDS as readonly string[]).includes(mode.id)
+    ? BUILTIN_MODE_TEMPLATES[mode.id as BuiltinModeId]
+    : undefined
+  const systemContent = mode.template || builtinTemplate || DEFAULT_MINIMAL_SYSTEM_PROMPT
+  return {
+    ...mode,
+    template: '',
+    promptEntries: createDefaultEntrySeed(systemContent),
+  }
 }
 
 /** createMode 的 P-06 判断：种子条目是否含非空 system 内容（决定模板回退）。 */
@@ -788,13 +798,13 @@ export class PromptSettingsService {
     for (const [index, rawMode] of record.modes.entries()) {
       let mode: PromptMode
       try {
-        mode = parseModeRecord(rawMode, {
+        mode = ensureUsableStoredPreset(parseModeRecord(rawMode, {
           errorCode: PromptErrorCode.STORAGE_CORRUPT,
           existingIds: undefined,
           warnings: [],
           forceCustomKind: false,
           requireFullShape: true,
-        })
+        }))
       } catch (error) {
         throw new PromptError(
           `prompt modes store mode #${index} is corrupt: ${error instanceof Error ? error.message : String(error)}`,

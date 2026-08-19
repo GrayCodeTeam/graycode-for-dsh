@@ -120,6 +120,68 @@ describe('内置模式种子', () => {
     expect(code?.promptEntries.map(entry => entry.role)).toEqual(['user', 'chat_history'])
     expect(code?.promptEntries[1]).toMatchObject({ id: 'chat-history', name: 'Chat History', enabled: true, content: '' })
   })
+
+  test('store load 迁移空预设：补齐极简 System / Chat History / Dynamic Context 三件套', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'legacy-empty',
+        modes: [
+          {
+            id: 'legacy-empty',
+            name: 'Legacy Empty',
+            kind: 'custom',
+            template: '',
+            promptEntries: [],
+          },
+        ],
+      }),
+      'utf8',
+    )
+
+    const service = await serviceOf(root)
+    const mode = await service.getCurrentMode()
+    expect(mode.template).toBe('')
+    expect(mode.promptEntries.map(entry => [entry.role, entry.name])).toEqual([
+      ['system', '系统提示词'],
+      ['chat_history', 'Chat History'],
+      ['user', '动态上下文'],
+    ])
+    expect(mode.promptEntries[0]!.content).toContain('professional programming assistant')
+    expect(mode.promptEntries[2]!.content).toContain('{{$TODO_LIST}}')
+  })
+
+  test('store load 迁移模板-only 预设：模板进入 System 条目且不重复渲染', async () => {
+    const root = await makeDataRoot()
+    await mkdir(path.join(root, 'prompt'), { recursive: true })
+    await writeFile(
+      storePath(root),
+      JSON.stringify({
+        version: 1,
+        currentModeId: 'legacy-template',
+        modes: [
+          {
+            id: 'legacy-template',
+            name: 'Legacy Template',
+            kind: 'custom',
+            template: 'legacy system prompt',
+            promptEntries: [{ id: 'history', role: 'chat_history', order: 0, enabled: true, content: '' }],
+          },
+        ],
+      }),
+      'utf8',
+    )
+
+    const mode = await (await serviceOf(root)).getCurrentMode()
+    expect(mode.template).toBe('')
+    expect(mode.promptEntries.map(entry => entry.role)).toEqual(['system', 'chat_history', 'user'])
+    expect(mode.promptEntries[0]!.content).toBe('legacy system prompt')
+    expect(renderModeSectionText(mode)).toContain('legacy system prompt')
+    expect(renderModeSectionText(mode).match(/legacy system prompt/g)).toHaveLength(1)
+  })
 })
 
 describe('模式 CRUD', () => {
