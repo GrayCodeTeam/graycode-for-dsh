@@ -10,21 +10,24 @@
  * - 负值 / 非整数被 schemastery 拒绝；customAgents 条目缺 id/name 被拒绝。
  */
 import { describe, expect, it } from 'vitest'
-import { Config, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
+import { Config, GENERAL_WORKER_AGENT, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
 
 describe('subagents Config（Schemastery）', () => {
-  it('缺省：maxHopDepth=5、maxConcurrent=3、queueTimeoutSeconds=600、defaultMaxRuntimeSeconds=1800、customAgents=[]', () => {
+  it('缺省：通用子代理启用，守卫使用安全默认值，customAgents=[]', () => {
     expect(Config({} as SubagentsConfig)).toEqual({
+      generalWorkerEnabled: true,
       maxHopDepth: 5,
       maxConcurrent: 3,
       queueTimeoutSeconds: 600,
       defaultMaxRuntimeSeconds: 1800,
       customAgents: [],
     })
+    expect(GENERAL_WORKER_AGENT).toMatchObject({ name: 'general', enabled: true, toolMode: 'all' })
   })
 
   it('显式覆盖生效', () => {
     expect(Config({ maxHopDepth: 3, maxConcurrent: 4 } as SubagentsConfig)).toEqual({
+      generalWorkerEnabled: true,
       maxHopDepth: 3,
       maxConcurrent: 4,
       queueTimeoutSeconds: 600,
@@ -33,6 +36,7 @@ describe('subagents Config（Schemastery）', () => {
     })
     // 0 = 关闭对应守卫（并发/排队/预算均不限）。
     expect(Config({ maxHopDepth: 0, maxConcurrent: 0, queueTimeoutSeconds: -1, defaultMaxRuntimeSeconds: -1 } as SubagentsConfig)).toEqual({
+      generalWorkerEnabled: true,
       maxHopDepth: 0,
       maxConcurrent: 0,
       queueTimeoutSeconds: -1,
@@ -50,7 +54,15 @@ describe('subagents Config（Schemastery）', () => {
 
   it('customAgents 条目默认字段补齐；缺 id / name 被拒绝', () => {
     const agent = Config({ customAgents: [{ id: 'agent-1', name: 'Reviewer' }] } as unknown as SubagentsConfig)
-    expect(agent.customAgents).toEqual([{ id: 'agent-1', name: 'Reviewer', description: '', systemPrompt: '', enabled: true }])
+    expect(agent.customAgents).toEqual([{
+      id: 'agent-1',
+      name: 'Reviewer',
+      description: '',
+      systemPrompt: '',
+      enabled: true,
+      toolMode: 'all',
+      tools: [],
+    }])
     expect(() => Config({ customAgents: [{}] } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ customAgents: [{ id: '' }] } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ customAgents: [{ id: 'agent-1' }] } as unknown as SubagentsConfig)).toThrow()
@@ -77,6 +89,9 @@ describe('subagents Config（Schemastery）', () => {
     expect(() => validateCustomAgentConfig([
       { id: '', name: 'A', description: '', systemPrompt: '', enabled: true },
     ])).toThrow(/slug-able/)
+    expect(() => validateCustomAgentConfig([
+      { id: 'limited', name: 'Limited', description: '', systemPrompt: '', enabled: true, toolMode: 'allow', tools: [] },
+    ])).toThrow(/names no tools/)
     // 合法配置通过。
     expect(() => validateCustomAgentConfig([
       { id: 'agent-1', name: 'A', description: '', systemPrompt: '', enabled: true },

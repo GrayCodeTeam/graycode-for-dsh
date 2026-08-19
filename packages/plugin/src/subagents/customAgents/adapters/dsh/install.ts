@@ -23,6 +23,11 @@ import { stopReasonError } from '../../../domain/stopReason.ts'
 import type { CustomAgentConfig } from '../../domain/plan.ts'
 import { deriveProviderName, deriveToolName, deriveToolNames, slugify } from '../../domain/plan.ts'
 
+export interface ToolRestrictionLike {
+  readonly allow?: readonly string[]
+  readonly deny?: readonly string[]
+}
+
 /** Structural subset of the host `SubagentProvider`. */
 export interface SubagentProviderLike {
   readonly name: string
@@ -44,6 +49,7 @@ export interface ResolvedSubagentStartRequestLike {
   readonly parent: unknown
   readonly signal: AbortSignal
   readonly persona?: string
+  readonly toolFilter?: ToolRestrictionLike
 }
 
 /** Structural subset of `SubagentRun`. */
@@ -190,6 +196,7 @@ export function createCustomAgentTool(
         prompt: [{ type: 'text', text: args.prompt }],
         parent,
         ...(agent.systemPrompt.trim().length > 0 ? { persona: agent.systemPrompt.trim() } : {}),
+        ...toolFilterFor(agent),
       }
       if (args.run_in_background !== false) {
         const started = await seam.startContinuable({
@@ -203,6 +210,15 @@ export function createCustomAgentTool(
       return settleForegroundRun(await seam.start(providerName, { ...request, signal: exec.signal }))
     },
   })
+}
+
+/** Convert persisted custom-agent policy into the host's start-time filter. */
+export function toolFilterFor(agent: CustomAgentConfig): { toolFilter?: ToolRestrictionLike } {
+  const mode = agent.toolMode ?? 'all'
+  if (mode === 'all') return {}
+  const names = [...new Set((agent.tools ?? []).map(name => name.trim()).filter(name => name.length > 0))]
+  if (names.length === 0) return {}
+  return mode === 'allow' ? { toolFilter: { allow: names } } : { toolFilter: { deny: names } }
 }
 
 /** Join the text blocks of an output value defensively (never trust the wire). */

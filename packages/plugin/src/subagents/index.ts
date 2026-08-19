@@ -35,6 +35,8 @@ export const name = 'graycode-subagents'
 export const inject = ['agents', 'subagents', 'tools'] as const
 
 export interface Config {
+  /** Register the zero-config general-purpose worker tool (`subagent_general`). */
+  generalWorkerEnabled: boolean
   /**
    * G1：每子线程 hop 上限（老 Gray MAX_HOP_DEPTH=5 硬熔断）。同一子代理的
    * 父子消息链（followup/reportFrom 各算一跳）超限后拒绝投递。0 = 关闭熔断。
@@ -74,9 +76,12 @@ const customAgentSchema = z.object({
   description: z.string().default(''),
   systemPrompt: z.string().default(''),
   enabled: z.boolean().default(true),
+  toolMode: z.union(['all', 'allow', 'deny'] as const).default('all'),
+  tools: z.array(z.string()).default([]),
 })
 
 export const Config: z<Config> = z.object({
+  generalWorkerEnabled: z.boolean().default(true),
   maxHopDepth: z.number().step(1).min(0).default(5),
   maxConcurrent: z.number().step(1).min(0).default(3),
   queueTimeoutSeconds: z.number().step(1).min(-1).default(600),
@@ -106,7 +111,26 @@ export function validateCustomAgentConfig(customAgents: readonly CustomAgentConf
       )
     }
     seen.set(providerName, agent.id)
+    const toolMode = agent.toolMode ?? 'all'
+    const toolNames = agent.tools ?? []
+    if (toolNames.some(name => name.trim().length === 0)) {
+      throw new Error(`custom agent "${agent.id}" contains an empty tool name`)
+    }
+    if (toolMode !== 'all' && toolNames.length === 0) {
+      throw new Error(`custom agent "${agent.id}" uses ${toolMode} tool mode but names no tools`)
+    }
   }
+}
+
+/** Built-in, zero-config equivalent of Gray Code's general worker. */
+export const GENERAL_WORKER_AGENT: CustomAgentConfig = {
+  id: 'general-worker',
+  name: 'general',
+  description: 'A general-purpose worker for focused, independent tasks.',
+  systemPrompt: '',
+  enabled: true,
+  toolMode: 'all',
+  tools: [],
 }
 
 /** 跨域服务名：G2/G1/G3 守卫句柄（Gray 侧代码经 ctx.get 取用，可选）。 */
@@ -151,7 +175,7 @@ export function apply(ctx: Context, config: Config): void {
     disposeCustomAgents = installCustomAgentRuntimes(
       runtime as unknown as CustomAgentSeamLike,
       ctx.tools as unknown as CustomAgentToolsLike,
-      config.customAgents,
+      config.generalWorkerEnabled ? [GENERAL_WORKER_AGENT, ...config.customAgents] : config.customAgents,
     )
   } catch (error) {
     guard.dispose()

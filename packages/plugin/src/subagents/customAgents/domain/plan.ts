@@ -10,12 +10,18 @@
  */
 
 /** Custom agent configuration (persisted under `subagents.customAgents`). */
+export type CustomAgentToolMode = 'all' | 'allow' | 'deny'
+
 export interface CustomAgentConfig {
   readonly id: string
   readonly name: string
   readonly description: string
   readonly systemPrompt: string
   readonly enabled: boolean
+  /** Child tool policy; omitted values from older configs mean `all`. */
+  readonly toolMode?: CustomAgentToolMode
+  /** Tool names used by the allow/deny policy. */
+  readonly tools?: string[]
 }
 
 /** ASCII-fragment slug: lowercase, non-alphanumerics collapse to `-`. */

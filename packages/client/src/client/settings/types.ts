@@ -13,6 +13,8 @@ export interface CustomAgentConfig {
   description: string
   systemPrompt: string
   enabled: boolean
+  toolMode?: 'all' | 'allow' | 'deny'
+  tools?: string[]
 }
 
 /** 消息级自动存档策略（checkpoints.messageCheckpoint）。 */
@@ -111,6 +113,7 @@ export interface GrayCodeConfig {
   file: ToggleScopedConfig
   todo: ToggleScopedConfig
   subagents: {
+    generalWorkerEnabled: boolean
     maxHopDepth: number
     maxConcurrent: number
     /** 排队等待并发名额的超时（秒，-1 不限，默认 600）。 */

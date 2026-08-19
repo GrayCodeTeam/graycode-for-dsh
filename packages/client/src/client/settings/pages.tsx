@@ -285,6 +285,7 @@ const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
       title={t('pages.subagents.title')}
       description={t('pages.subagents.description')}
       fields={[
+        { kind: 'boolean', path: ['subagents', 'generalWorkerEnabled'], labelKey: 'fields.generalWorkerEnabled', descriptionKey: 'fields.generalWorkerEnabled.description' },
         { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', descriptionKey: 'fields.maxConcurrent.description', min: 0, step: 1 },
         { kind: 'number', path: ['subagents', 'queueTimeoutSeconds'], labelKey: 'fields.queueTimeoutSeconds', descriptionKey: 'fields.queueTimeoutSeconds.description', min: -1, step: 1 },
         { kind: 'number', path: ['subagents', 'defaultMaxRuntimeSeconds'], labelKey: 'fields.defaultMaxRuntimeSeconds', descriptionKey: 'fields.defaultMaxRuntimeSeconds.description', min: -1, step: 1 },

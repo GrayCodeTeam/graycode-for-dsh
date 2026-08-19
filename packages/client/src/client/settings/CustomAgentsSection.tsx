@@ -155,21 +155,35 @@ interface AgentDraft {
   name: string
   description: string
   systemPrompt: string
+  toolMode: 'all' | 'allow' | 'deny'
+  toolsText: string
 }
 
-const EMPTY_DRAFT: AgentDraft = { name: '', description: '', systemPrompt: '' }
+const EMPTY_DRAFT: AgentDraft = { name: '', description: '', systemPrompt: '', toolMode: 'all', toolsText: '' }
+
+function parseToolNames(value: string): string[] {
+  return [...new Set(value.split(/[\n,]/).map(name => name.trim()).filter(name => name.length > 0))]
+}
+
+type DraftError = { name?: string; tools?: string }
+
+function validateTools(draft: AgentDraft): DraftError {
+  return draft.toolMode !== 'all' && parseToolNames(draft.toolsText).length === 0
+    ? { tools: 'toolsRequired' }
+    : {}
+}
 
 export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSectionProps): ReactNode {
   const [draft, setDraft] = useState<AgentDraft>(EMPTY_DRAFT)
-  const [draftError, setDraftError] = useState<{ name?: string }>({})
+  const [draftError, setDraftError] = useState<DraftError>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState<AgentDraft>(EMPTY_DRAFT)
   const [submitError, setSubmitError] = useState('')
 
   const addAgent = (): void => {
-    const error = validateCustomAgentDraft(draft, agents)
+    const error = { ...validateCustomAgentDraft(draft, agents), ...validateTools(draft) }
     setDraftError(error)
-    if (error.name !== undefined) return
+    if (error.name !== undefined || error.tools !== undefined) return
     setSubmitError('')
     Promise.resolve(onChange(upsertCustomAgent(agents, {
       id: createCustomAgentId(),
@@ -177,6 +191,8 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       description: draft.description.trim(),
       systemPrompt: draft.systemPrompt.trim(),
       enabled: true,
+      toolMode: draft.toolMode,
+      tools: parseToolNames(draft.toolsText),
     }))).then(
       () => setDraft(EMPTY_DRAFT),
       (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
@@ -185,12 +201,21 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
 
   const startEdit = (agent: CustomAgentConfig): void => {
     setEditingId(agent.id)
-    setEditDraft({ name: agent.name, description: agent.description, systemPrompt: agent.systemPrompt })
+    setEditDraft({
+      name: agent.name,
+      description: agent.description,
+      systemPrompt: agent.systemPrompt,
+      toolMode: agent.toolMode ?? 'all',
+      toolsText: (agent.tools ?? []).join('\n'),
+    })
   }
 
   const saveEdit = (agent: CustomAgentConfig): void => {
-    const error = validateCustomAgentDraft(editDraft, agents.filter(candidate => candidate.id !== agent.id))
-    if (error.name !== undefined) {
+    const error = {
+      ...validateCustomAgentDraft(editDraft, agents.filter(candidate => candidate.id !== agent.id)),
+      ...validateTools(editDraft),
+    }
+    if (error.name !== undefined || error.tools !== undefined) {
       setDraftError(error)
       return
     }
@@ -201,6 +226,8 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       name: editDraft.name.trim(),
       description: editDraft.description.trim(),
       systemPrompt: editDraft.systemPrompt.trim(),
+      toolMode: editDraft.toolMode,
+      tools: parseToolNames(editDraft.toolsText),
     }))).then(
       () => { setEditingId(null); setDraftError({}) },
       (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
@@ -237,6 +264,31 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
           />
         </label>
         <label>
+          <span style={fieldLabelStyle}>{t('fields.customAgentToolMode')}</span>
+          <span style={fieldDescriptionStyle}>{t('fields.customAgentToolMode.description')}</span>
+          <select
+            style={inputStyle}
+            value={draft.toolMode}
+            onChange={event => setDraft({ ...draft, toolMode: event.target.value as AgentDraft['toolMode'] })}
+          >
+            <option value="all">{t('customAgents.toolMode.all')}</option>
+            <option value="allow">{t('customAgents.toolMode.allow')}</option>
+            <option value="deny">{t('customAgents.toolMode.deny')}</option>
+          </select>
+        </label>
+        {draft.toolMode !== 'all' && (
+          <label>
+            <span style={fieldLabelStyle}>{t('fields.customAgentTools')}</span>
+            <span style={fieldDescriptionStyle}>{t('fields.customAgentTools.description')}</span>
+            <textarea
+              rows={3}
+              style={{ ...textareaStyle, ...monoStyle }}
+              value={draft.toolsText}
+              onChange={event => setDraft({ ...draft, toolsText: event.target.value })}
+            />
+          </label>
+        )}
+        <label>
           <span style={fieldLabelStyle}>{t('fields.customAgentDescription')}</span>
           <span style={fieldDescriptionStyle}>{t('fields.customAgentDescription.description')}</span>
           <input
@@ -257,6 +309,7 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
           />
         </label>
         {draftError.name !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.name}`)}</p>}
+        {draftError.tools !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.tools}`)}</p>}
         <div style={addRowStyle}>
           <button
             type="button"
@@ -287,6 +340,31 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
                       onChange={event => setEditDraft({ ...editDraft, name: event.target.value })}
                     />
                   </label>
+                  <label>
+                    <span style={fieldLabelStyle}>{t('fields.customAgentToolMode')}</span>
+                    <select
+                      style={inputStyle}
+                      value={editDraft.toolMode}
+                      onChange={event => setEditDraft({ ...editDraft, toolMode: event.target.value as AgentDraft['toolMode'] })}
+                    >
+                      <option value="all">{t('customAgents.toolMode.all')}</option>
+                      <option value="allow">{t('customAgents.toolMode.allow')}</option>
+                      <option value="deny">{t('customAgents.toolMode.deny')}</option>
+                    </select>
+                  </label>
+                  {editDraft.toolMode !== 'all' && (
+                    <label>
+                      <span style={fieldLabelStyle}>{t('fields.customAgentTools')}</span>
+                      <textarea
+                        rows={3}
+                        style={{ ...textareaStyle, ...monoStyle }}
+                        value={editDraft.toolsText}
+                        onChange={event => setEditDraft({ ...editDraft, toolsText: event.target.value })}
+                      />
+                    </label>
+                  )}
+                  {draftError.name !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.name}`)}</p>}
+                  {draftError.tools !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.tools}`)}</p>}
                   <label>
                     <span style={fieldLabelStyle}>{t('fields.customAgentDescription')}</span>
                     <input
@@ -328,6 +406,12 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
                       )}
                       <span style={entryMetaStyle}>
                         {t('fields.customAgentToolName')}: {customAgentToolNamePreview(agent)}
+                      </span>
+                      <span style={entryMetaStyle}>
+                        {t('fields.customAgentToolMode')}: {t(`customAgents.toolMode.${agent.toolMode ?? 'all'}`)}
+                        {(agent.toolMode ?? 'all') !== 'all' && (agent.tools?.length ?? 0) > 0
+                          ? ` (${agent.tools!.join(', ')})`
+                          : ''}
                       </span>
                     </div>
                     <div style={entryActionsStyle}>

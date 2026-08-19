@@ -20,6 +20,7 @@ import {
   createCustomAgentTool,
   createDelegatingProvider,
   installCustomAgentRuntimes,
+  toolFilterFor,
   type CustomAgentSeamLike,
   type CustomAgentToolsLike,
 } from '../../src/subagents/customAgents/adapters/dsh/install.ts'
@@ -186,6 +187,24 @@ describe('custom agent tool', () => {
     const tool = toolOf(createCustomAgentTool({ ...AGENT, systemPrompt: '   ' }, 'subagent_x', seam))
     await tool.execute({ description: 'review', prompt: 'check x', run_in_background: false }, { agent: { id: 'parent' }, signal: new AbortController().signal })
     expect(start.mock.calls[0]![1]).not.toHaveProperty('persona')
+  })
+
+  it('passes allow/deny tool restrictions to both foreground and background starts', async () => {
+    expect(toolFilterFor({ ...AGENT, toolMode: 'allow', tools: ['read_file', ' search '] })).toEqual({
+      toolFilter: { allow: ['read_file', 'search'] },
+    })
+    expect(toolFilterFor({ ...AGENT, toolMode: 'deny', tools: ['terminal'] })).toEqual({
+      toolFilter: { deny: ['terminal'] },
+    })
+    expect(toolFilterFor({ ...AGENT, toolMode: 'all', tools: ['ignored'] })).toEqual({})
+
+    const { seam, start, startContinuable } = makeFakeSeam()
+    const restricted = { ...AGENT, toolMode: 'allow' as const, tools: ['read_file'] }
+    const tool = toolOf(createCustomAgentTool(restricted, 'subagent_limited', seam))
+    await tool.execute({ description: 'read', prompt: 'inspect', run_in_background: false }, { agent: {}, signal: new AbortController().signal })
+    expect(start.mock.calls[0]![1].toolFilter).toEqual({ allow: ['read_file'] })
+    await tool.execute({ description: 'read', prompt: 'inspect' }, { agent: {}, signal: new AbortController().signal })
+    expect(startContinuable.mock.calls[0]![0].request.toolFilter).toEqual({ allow: ['read_file'] })
   })
 
   it('L1：前台执行失败且 dispose 也失败 → AggregateError 同时上报两者（不丢 dispose 失败）', async () => {

@@ -113,7 +113,7 @@ function graycodeConfig(dataRoot: string): GraycodeConfig {
     media: { enabled: true, agentScope: 'roots', maxBatch: 10 },
     file: { enabled: true, agentScope: 'roots' },
     todo: { enabled: true, agentScope: 'roots' },
-    subagents: { maxHopDepth: 5, maxConcurrent: 2, queueTimeoutSeconds: 600, defaultMaxRuntimeSeconds: 1800, customAgents: [] },
+    subagents: { generalWorkerEnabled: true, maxHopDepth: 5, maxConcurrent: 2, queueTimeoutSeconds: 600, defaultMaxRuntimeSeconds: 1800, customAgents: [] },
     notifications: { enabled: true, agentScope: 'roots', windowsToast: true },
     thoughts: { enabled: false, sendHistoryThoughts: false },
     images: {
