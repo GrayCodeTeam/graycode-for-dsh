@@ -9,6 +9,7 @@ import {
   IconDataOutline16,
   IconEnhanceOutline16,
   IconGraphLineOutline16,
+  IconListPenOutline16,
   IconSettingsOutline16,
   IconSparkle16,
   IconUserOutline16,
@@ -75,6 +76,17 @@ const mebibytesTransform = {
 const secondsTransform = {
   toInput: (value: unknown): number => typeof value === 'number' ? value / 1000 : 0,
   fromInput: (value: unknown): number => typeof value === 'number' ? Math.round(value * 1000) : 1000,
+}
+
+/** 总结保留预算允许绝对 token 数或百分比文本（例如 4096 / 50%）。 */
+export const summaryTokenBudgetTransform = {
+  toInput: (value: unknown): string => typeof value === 'string' || typeof value === 'number'
+    ? String(value)
+    : '',
+  fromInput: (value: unknown): string | number => {
+    const text = typeof value === 'string' ? value.trim() : ''
+    return /^\d+$/u.test(text) ? Number(text) : text
+  },
 }
 
 /** 逗号分隔工具名列表 ↔ string[]（checkpoints.beforeTools / afterTools 共用）。 */
@@ -232,6 +244,22 @@ const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT, co
     </div>
   )
 }
+
+const SummaryPage: GrayCodePage = ({ t, config, onChange }) => (
+  <FieldSection
+    title={t('pages.summary.title')}
+    description={t('pages.summary.description')}
+    fields={[
+      { kind: 'boolean', path: ['summary', 'enabled'], labelKey: 'fields.summaryEnabled', descriptionKey: 'fields.summaryEnabled.description' },
+      { kind: 'number', path: ['summary', 'keepRecentRounds'], labelKey: 'fields.summaryKeepRounds', descriptionKey: 'fields.summaryKeepRounds.description', min: 1, max: 10, step: 1 },
+      { kind: 'text', path: ['summary', 'keepRecentTokens'], labelKey: 'fields.summaryKeepTokens', descriptionKey: 'fields.summaryKeepTokens.description', placeholderKey: 'fields.summaryKeepTokens.placeholder', transform: summaryTokenBudgetTransform },
+      { kind: 'textarea', path: ['summary', 'summarizePrompt'], labelKey: 'fields.summaryPrompt', descriptionKey: 'fields.summaryPrompt.description', placeholderKey: 'fields.summaryPrompt.placeholder', rows: 6 },
+    ]}
+    config={config}
+    onChange={onChange}
+    t={t}
+  />
+)
 
 const ImagePage: GrayCodePage = ({ t, config, onChange }) => {
   const aspectRatioOptions = [
@@ -402,6 +430,7 @@ export const CATEGORIES: readonly GrayCodeCategory[] = [
   { id: 'memory', labelKey: 'tabs.memory', icon: <IconDataOutline16 size={16} />, page: MemoryPage },
   { id: 'workflows', labelKey: 'tabs.workflows', icon: <IconChecklistOutline14 size={16} />, page: WorkflowsPage },
   { id: 'activity', labelKey: 'tabs.activity', icon: <IconGraphLineOutline16 size={16} />, page: ActivityPage },
+  { id: 'summary', labelKey: 'tabs.summary', icon: <IconListPenOutline16 size={16} />, page: SummaryPage },
   { id: 'image', labelKey: 'tabs.image', icon: <IconSparkle16 size={16} />, page: ImagePage },
   { id: 'subagents', labelKey: 'tabs.subagents', icon: <IconUserOutline16 size={16} />, page: SubagentsPage },
   { id: 'prompt', labelKey: 'tabs.prompt', icon: <IconEnhanceOutline16 size={16} />, page: PromptPage },

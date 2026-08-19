@@ -9,7 +9,7 @@ import {
   graycodeSettingsJaPlaceholder,
   zh,
 } from '../src/client/settings/locales.ts'
-import { CATEGORIES, commaListTransform, optionalSelectTransform } from '../src/client/settings/pages.tsx'
+import { CATEGORIES, commaListTransform, optionalSelectTransform, summaryTokenBudgetTransform } from '../src/client/settings/pages.tsx'
 import { selectCurrentSessionWorkspace } from '../src/client/settings/GrayCodeSettingsSection.tsx'
 import {
   createFieldDraft,
@@ -341,12 +341,19 @@ describe('real settings surface', () => {
     expect(DEFAULTS.images.apiKey).toBe('')
   })
 
-  it('uses ten focused native-settings categories', () => {
+  it('uses focused native-settings categories', () => {
     expect(CATEGORIES.map(category => category.id)).toEqual([
-      'checkpoints', 'memory', 'workflows', 'activity', 'image', 'subagents', 'prompt', 'tools', 'appearance', 'advanced',
+      'checkpoints', 'memory', 'workflows', 'activity', 'summary', 'image', 'subagents', 'prompt', 'tools', 'appearance', 'advanced',
     ])
     expect(new Set(CATEGORIES.map(category => category.id)).size).toBe(CATEGORIES.length)
     for (const category of CATEGORIES) expect(zh).toHaveProperty(category.labelKey)
+  })
+
+  it('normalizes summary token budgets without losing percentages', () => {
+    expect(summaryTokenBudgetTransform.toInput('50%')).toBe('50%')
+    expect(summaryTokenBudgetTransform.toInput(4096)).toBe('4096')
+    expect(summaryTokenBudgetTransform.fromInput(' 4096 ')).toBe(4096)
+    expect(summaryTokenBudgetTransform.fromInput(' 50% ')).toBe('50%')
   })
 })
 
