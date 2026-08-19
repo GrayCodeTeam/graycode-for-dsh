@@ -315,6 +315,20 @@ describe('purgeExpiredCandidates', () => {
     expect(purgeExpiredCandidates(group, 2_000_000_000_000)).toBe(group)
   })
 
+  it('physically removes the full subtree once its deleted root expires', () => {
+    const now = 2_000_000_000_000
+    let group = makeGroup()
+    group = addCandidate(group, { sessionId: 'parent', parentSessionId: 'root-1', kind: 'manual' })
+    group = addCandidate(group, { sessionId: 'child', parentSessionId: 'parent', kind: 'manual' })
+    group = deleteCandidate(group, 'parent', undefined, now - 40 * DAY)
+    // 模拟旧数据中后代时间戳较新；父节点过期后仍应整棵物理移除，不能留下孤儿。
+    const child = group.candidates.find(c => c.sessionId === 'child')!
+    child.deletedAt = now - 2 * DAY
+
+    const purged = purgeExpiredCandidates(group, now)
+    expect(purged.candidates.map(c => c.sessionId)).toEqual(['root-1'])
+  })
+
   it('supports a configurable retention period and treats zero as disabled', () => {
     const now = 2_000_000_000_000
     let group = makeGroup()

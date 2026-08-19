@@ -272,13 +272,20 @@ export function purgeExpiredCandidates(
     // 与原项目一致：0 表示禁用自动/过期清理，只保留手动逐项删除/恢复能力。
     if (retentionDays === 0) return group;
     const cutoff = now - retentionDays * DAY_MS;
-    const kept = group.candidates.filter(c => {
-        if (c.deletedAt === undefined) return true;
-        if (c.kind === 'root') return true;
-        if (c.sessionId === group.activeSessionId) return true;
-        // deletedAt >= cutoff：仍在配置的保留期内
-        return c.deletedAt >= cutoff;
-    });
+    const purgedIds = new Set<string>();
+    for (const candidate of group.candidates) {
+        if (
+            candidate.deletedAt === undefined ||
+            candidate.deletedAt >= cutoff ||
+            candidate.kind === 'root' ||
+            candidate.sessionId === group.activeSessionId
+        ) continue;
+        const subtree = collectCandidateSubtree(group, candidate.sessionId);
+        // 防御遗留损坏状态：绝不清理包含活动候选的子树。
+        if (subtree.has(group.activeSessionId)) continue;
+        for (const id of subtree) purgedIds.add(id);
+    }
+    const kept = group.candidates.filter(c => !purgedIds.has(c.sessionId));
     if (kept.length === group.candidates.length) return group;
     return {
         ...group,
