@@ -60,14 +60,16 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
   async forkChild(input: {
     parent: { id: string; events: readonly BranchEventView[] }
     boundary: number | undefined
+    emptySeed?: boolean
     childSessionId: string
     cwd?: string
     agentPreset?: string
   }): Promise<{ sessionId: string; agentAttached: boolean }> {
     // 与真实适配器同口径：seed 按 seq <= boundary 选取（事件流 seq 可能不连续）
     const boundary = input.boundary
-    const seed =
-      boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
+    const seed = input.emptySeed === true
+      ? []
+      : boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
     this.sessions.set(input.childSessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
     return { sessionId: input.childSessionId, agentAttached: false }
   }

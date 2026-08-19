@@ -3,9 +3,8 @@
  *
  * 由 TurnTailActions（`conversation.chat.turnTail` 链座位的唯一当选条目）内联
  * 渲染：链选择器直接给出该轮的会话轮号，不再经 messageId → legacy nodes 反查
- * （旧路径依赖宿主 IconActions 行对 extraActions 的渲染时机，且首轮防御
- * turn ≤ 1 时静默不可见——「没有重roll」抱怨的两个来源）。现在每个已完成
- * 且 turn > 1 的轮次都有稳定可见的按钮；点击调用插件的 `branches/reroll`
+ * （旧路径依赖宿主 IconActions 行对 extraActions 的渲染时机）。现在每个已完成
+ * 且 turn ≥ 1 的轮次都有稳定可见的按钮；点击调用插件的 `branches/reroll`
  * 端点（可信 `/graycode` remote 通道），成功后若返回 branchSessionId 则跳转
  * 打开（与 subagent back-to-main 同路由），并回调 onCommitted 让分支切换器
  * 刷新候选。端点错误就地展示（行内警告 + console.warn），绝不吞掉。
@@ -83,13 +82,12 @@ export interface RegenerateActionProps {
 
 type RerollPhase = 'idle' | 'working' | 'failed'
 
-/** Regenerate action for one completed turn (renders nothing on the first turn). */
+/** Regenerate action for one completed turn. */
 export function RegenerateAction({ turn, sessionId, t, remote, open, onCommitted }: RegenerateActionProps): ReactNode {
   const [phase, setPhase] = useState<RerollPhase>('idle')
   const [failure, setFailure] = useState<string | null>(null)
 
-  // 首轮（turn ≤ 1）没有可 fork 的前缀，宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN；
-  // 直接不渲染按钮，避免点击后暴露英文原文错误（防御保持不变）。
+  // 仅正整数轮次可重试；第一轮由宿主从空 seed 重建。
   if (!isRerollableTurn(turn)) return null
 
   const start = async (): Promise<void> => {

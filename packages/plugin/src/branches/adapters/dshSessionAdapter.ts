@@ -18,13 +18,13 @@ import type { BranchSessionAdapter } from '../service.ts'
 /** 无 agent factory 时的注册错误（dsh-agent 内部文案；降级触发条件） */
 const NO_FACTORY_MESSAGE = 'no agent factory registered (load an agent-loop plugin)'
 
-/** 把会话事件投影为领域最小视图（只读；data 保持原样仅换静态类型） */
-function toEventViews(events: readonly SessionEvent[]): BranchEventView[] {
-  return events.map(event => ({
-    type: event.type,
-    seq: event.seq,
-    data: event.data as BranchEventView['data'],
-  }))
+/**
+ * Expose the domain's read-only view without rebuilding the event envelope.
+ * The same objects later become a fork seed, so dropping `time`, `surfaceOp`,
+ * or extension fields makes DSH reject the seed as an invalid event envelope.
+ */
+function toEventViews(events: readonly SessionEvent[]): readonly BranchEventView[] {
+  return events as unknown as readonly BranchEventView[]
 }
 
 export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapter {
@@ -39,11 +39,13 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
             return ctx.sessions.get(SessionId(sessionId))?.header.agentPreset
         },
 
-        async forkChild({ parent, boundary, childSessionId, cwd, agentPreset }) {
+        async forkChild({ parent, boundary, emptySeed, childSessionId, cwd, agentPreset }) {
             // 按 seq 定位边界而非数组下标：事件流 seq 可能不连续（修剪/压缩/过滤），
             // slice(0, boundary + 1) 按下标切片会错位（把 boundary 之后的事件带进 seed）；
             // 边界 = 所有 seq <= boundary 的事件（保持事件流原有顺序）
-            const seed = (boundary === undefined
+            const seed = (emptySeed === true
+                ? []
+                : boundary === undefined
                 ? [...parent.events]
                 : parent.events.filter(event => event.seq <= boundary)) as unknown as SessionEvent[]
             const seedLength = seed.length
@@ -55,10 +57,12 @@ export function createDshBranchSessionAdapter(ctx: Context): BranchSessionAdapte
                 ...(agentPreset ? { agentPreset } : {}),
             }
             try {
+                const parentOptions = ctx.agents.get(SessionId(parent.id))?.options
                 const handle = await ctx.agents.create({
                     sessionId: childId,
                     seed,
                     meta,
+                    ...(parentOptions !== undefined ? { agentOptions: { ...parentOptions } } : {}),
                 })
                 return { sessionId: handle.agent.id, agentAttached: true }
             } catch (error) {

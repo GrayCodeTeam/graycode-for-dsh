@@ -45,12 +45,15 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
   async forkChild(input: {
     parent: { id: string; events: readonly BranchEventView[] }
     boundary: number | undefined
+    emptySeed?: boolean
     childSessionId: string
     cwd?: string
     agentPreset?: string
   }): Promise<{ sessionId: string; agentAttached: boolean }> {
     const seed =
-      input.boundary === undefined
+      input.emptySeed === true
+        ? []
+        : input.boundary === undefined
         ? [...input.parent.events]
         : input.parent.events.filter(event => event.seq <= input.boundary!)
     this.sessions.set(input.childSessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
@@ -259,13 +262,10 @@ describe('branches/reroll', () => {
     }
   })
 
-  it('首轮 reroll → NO_PREVIOUS_TURN（GRAY_INVALID_INPUT，causeCode 保留）', async () => {
+  it('首轮 reroll 从空 seed 成功创建候选', async () => {
     const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 1 })
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
-      expect(result.error.details.causeCode).toBe(BranchErrorCode.NO_PREVIOUS_TURN)
-    }
+    expect(result.ok).toBe(true)
+    if (result.ok) expect((result.value as { branchSessionId: string }).branchSessionId).toMatch(/^branch-/)
   })
 
   it('不存在的轮次 → GRAY_NOT_FOUND（TARGET_TURN_NOT_FOUND）', async () => {
@@ -328,12 +328,9 @@ describe('branches/editRetry', () => {
     if (!result.ok) expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
   })
 
-  it('首轮 editRetry → NO_PREVIOUS_TURN', async () => {
+  it('首轮 editRetry 从空 seed 成功创建候选', async () => {
     const result = await invoke('editRetry', { sessionId: ROOT_SESSION, turn: 1, text: 'x' })
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
-      expect(result.error.details.causeCode).toBe(BranchErrorCode.NO_PREVIOUS_TURN)
-    }
+    expect(result.ok).toBe(true)
+    if (result.ok) expect((result.value as { branchSessionId: string }).branchSessionId).toMatch(/^branch-/)
   })
 })

@@ -29,16 +29,13 @@ import {
 } from '../src/client/rerollEdit/locales.ts'
 
 describe('isRerollableTurn (regenerate/edit visibility defense)', () => {
-  it('accepts completed turns after the first (integer turn > 1)', () => {
+  it('accepts every positive integer turn, including the first', () => {
+    expect(isRerollableTurn(1)).toBe(true)
     expect(isRerollableTurn(2)).toBe(true)
     expect(isRerollableTurn(17)).toBe(true)
   })
 
-  it('rejects the first turn and drifted turn shapes', () => {
-    // The host rejects turn 1 (and any turn <= 1) with GRAY_BRANCH_NO_PREVIOUS_TURN
-    // — nothing to fork before it — so the actions resolve to invisible instead
-    // of surfacing the raw English error.
-    expect(isRerollableTurn(1)).toBe(false)
+  it('rejects non-positive and drifted turn shapes', () => {
     expect(isRerollableTurn(0)).toBe(false)
     expect(isRerollableTurn(-3)).toBe(false)
     expect(isRerollableTurn(1.5)).toBe(false)

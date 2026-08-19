@@ -77,6 +77,32 @@ describe('dshSessionAdapter.sendUserMessage', () => {
   })
 })
 
+describe('dshSessionAdapter.forkChild', () => {
+  it('supports an empty first-turn seed and inherits the parent model options', async () => {
+    const create = vi.fn(async () => ({ agent: { id: 'child-1' } }))
+    const ctx = {
+      sessions: { get: () => ({ header: {}, events: twoClosedTurns() }), create: vi.fn() },
+      agents: {
+        get: (id: string) => id === 'root-session'
+          ? { options: { provider: 'echo', model: 'echo-model', maxTokens: 2048 } }
+          : undefined,
+        create,
+      },
+    } as unknown as Context
+    const adapter = createDshBranchSessionAdapter(ctx)
+    await adapter.forkChild({
+      parent: { id: 'root-session', events: twoClosedTurns() },
+      boundary: undefined,
+      emptySeed: true,
+      childSessionId: 'child-1',
+    })
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      seed: [],
+      agentOptions: { provider: 'echo', model: 'echo-model', maxTokens: 2048 },
+    }))
+  })
+})
+
 describe('reroll through the real adapter', () => {
   it('a rejecting followup yields messageSent false and no unhandled rejection (BUG-04)', async () => {
     const followup = vi.fn().mockRejectedValue(new Error('followup failed'))

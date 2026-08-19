@@ -68,6 +68,8 @@ export interface BranchSessionAdapter {
     forkChild(input: {
         parent: { id: string; events: readonly BranchEventView[] };
         boundary: number | undefined;
+        /** True for retrying turn 1: create the child from an empty prefix. */
+        emptySeed?: boolean;
         childSessionId: string;
         cwd?: string;
         agentPreset?: string;
@@ -108,7 +110,7 @@ export interface CreateBranchResult {
 export interface RetryBranchResult {
     groupId: string;
     sessionId: string;
-    boundary: number;
+    boundary?: number;
     targetTurn: number;
     messageSent: boolean;
     agentAttached: boolean;
@@ -331,10 +333,6 @@ export class BranchCoordinatorService {
                         BranchErrorCode.TARGET_TURN_NOT_FOUND
                     );
                 }
-                throw new BranchError(
-                    `turn ${input.turn} is the first turn; nothing to fork before it`,
-                    BranchErrorCode.NO_PREVIOUS_TURN
-                );
             }
             const userMessageSeq = directUserMessageSeqOfTurn(source.events, input.turn);
             if (userMessageSeq === undefined) {
@@ -358,6 +356,7 @@ export class BranchCoordinatorService {
                 group,
                 parent: source,
                 boundary,
+                emptySeed: boundary === undefined,
                 kind: 'reroll',
                 label: `reroll turn ${input.turn}`,
                 expectedRevision: input.expectedRevision,
@@ -368,7 +367,7 @@ export class BranchCoordinatorService {
             const reverted = messageSent ? undefined : await this.revertActivation(input.groupId, previousActive);
             return {
                 ...created,
-                boundary,
+                ...(boundary !== undefined ? { boundary } : {}),
                 targetTurn: input.turn,
                 messageSent,
                 revision: reverted?.revision ?? created.revision,
@@ -397,16 +396,13 @@ export class BranchCoordinatorService {
                         BranchErrorCode.TARGET_TURN_NOT_FOUND
                     );
                 }
-                throw new BranchError(
-                    `turn ${input.turn} is the first turn; nothing to fork before it`,
-                    BranchErrorCode.NO_PREVIOUS_TURN
-                );
             }
             const previousActive = group.activeSessionId;
             const created = await this.forkAndRecord({
                 group,
                 parent: source,
                 boundary,
+                emptySeed: boundary === undefined,
                 kind: 'edit',
                 label: `edit retry turn ${input.turn}`,
                 expectedRevision: input.expectedRevision,
@@ -419,7 +415,7 @@ export class BranchCoordinatorService {
             const reverted = messageSent ? undefined : await this.revertActivation(input.groupId, previousActive);
             return {
                 ...created,
-                boundary,
+                ...(boundary !== undefined ? { boundary } : {}),
                 targetTurn: input.turn,
                 messageSent,
                 revision: reverted?.revision ?? created.revision,
@@ -554,6 +550,7 @@ export class BranchCoordinatorService {
         group: GrayBranchGroup;
         parent: { id: string; events: readonly BranchEventView[]; cwd?: string; agentPreset?: string };
         boundary: number | undefined;
+        emptySeed?: boolean;
         kind: BranchCandidateKind;
         label?: string;
         expectedRevision?: number;
@@ -570,6 +567,7 @@ export class BranchCoordinatorService {
             forkOutcome = await this.adapter.forkChild({
                 parent: { id: input.parent.id, events: input.parent.events },
                 boundary: input.boundary,
+                emptySeed: input.emptySeed,
                 childSessionId,
                 cwd: input.parent.cwd,
                 agentPreset: input.parent.agentPreset,
@@ -599,7 +597,7 @@ export class BranchCoordinatorService {
                 groupId: next.id,
                 sessionId: forkOutcome.sessionId,
                 parentSessionId: input.parent.id,
-                boundary: input.boundary,
+                ...(input.boundary !== undefined ? { boundary: input.boundary } : {}),
                 kind: input.kind,
                 agentAttached: forkOutcome.agentAttached,
                 orphan: false,
@@ -616,7 +614,7 @@ export class BranchCoordinatorService {
                     groupId: input.group.id,
                     sessionId: forkOutcome.sessionId,
                     parentSessionId: input.parent.id,
-                    boundary: input.boundary,
+                    ...(input.boundary !== undefined ? { boundary: input.boundary } : {}),
                     kind: input.kind,
                     agentAttached: forkOutcome.agentAttached,
                     orphan: true,

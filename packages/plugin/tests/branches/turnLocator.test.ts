@@ -115,6 +115,19 @@ describe('forkBoundaryBeforeTurn', () => {
     expect(forkBoundaryBeforeTurn(twoClosedTurns(), 1)).toBeUndefined()
   })
 
+  it('excludes a user message persisted before turn/start from the retry seed', () => {
+    const events: BranchEventView[] = [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('user/message', 1, { source: { kind: 'user' } }),
+      ev('turn/end', 2, { turn: 1 }),
+      ev('user/message', 3, { source: { kind: 'user' } }),
+      ev('request/header', 4),
+      ev('turn/start', 5, { turn: 2 }),
+      ev('turn/end', 6, { turn: 2 }),
+    ]
+    expect(forkBoundaryBeforeTurn(events, 2)).toBe(2)
+  })
+
   it('returns undefined for an unknown turn', () => {
     expect(forkBoundaryBeforeTurn(twoClosedTurns(), 99)).toBeUndefined()
   })

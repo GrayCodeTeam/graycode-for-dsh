@@ -51,6 +51,7 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
   readonly forkCalls: Array<{
     childSessionId: string
     boundary: number | undefined
+    emptySeed?: boolean
     parentSessionId: string
     cwd?: string
     agentPreset?: string
@@ -82,6 +83,7 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
   async forkChild(input: {
     parent: { id: string; events: readonly BranchEventView[] }
     boundary: number | undefined
+    emptySeed?: boolean
     childSessionId: string
     cwd?: string
     agentPreset?: string
@@ -89,6 +91,7 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
     this.forkCalls.push({
       childSessionId: input.childSessionId,
       boundary: input.boundary,
+      emptySeed: input.emptySeed,
       parentSessionId: input.parent.id,
       cwd: input.cwd,
       agentPreset: input.agentPreset,
@@ -99,8 +102,9 @@ class FakeBranchSessionAdapter implements BranchSessionAdapter {
     const sessionId = this.failSendOnFork ? 'fail-send' : input.childSessionId
     // 与真实适配器同口径：seed 按 seq <= boundary 选取（事件流 seq 可能不连续）
     const boundary = input.boundary
-    const seed =
-      boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
+    const seed = input.emptySeed === true
+      ? []
+      : boundary === undefined ? [...input.parent.events] : input.parent.events.filter(event => event.seq <= boundary)
     this.sessions.set(sessionId, { events: seed, cwd: input.cwd, agentPreset: input.agentPreset })
     return { sessionId, agentAttached: false }
   }
@@ -482,12 +486,13 @@ describe('BranchCoordinatorService reroll', () => {
     )
   })
 
-  it('rejects the first turn with NO_PREVIOUS_TURN', async () => {
+  it('rerolls the first turn from an empty seed', async () => {
     const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
-    await expectRejectCode(
-      env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 1 }),
-      BranchErrorCode.NO_PREVIOUS_TURN,
-    )
+    const result = await env.service.reroll({ groupId: group.id, sessionId: ROOT_SESSION, turn: 1 })
+    expect(result.boundary).toBeUndefined()
+    expect(env.adapter.forkCalls[0]).toMatchObject({ boundary: undefined, emptySeed: true })
+    expect(env.adapter.eventsOf(result.sessionId)).toEqual([])
+    expect(env.adapter.sentMessages[0]!.content).toEqual([{ type: 'text', text: 'first' }])
   })
 
   it('reports messageSent false when sendUserMessage throws, but still records the candidate', async () => {

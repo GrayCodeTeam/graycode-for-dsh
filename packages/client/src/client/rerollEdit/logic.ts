@@ -3,8 +3,7 @@
  *
  * 功能 1（重新生成）：挂在 `conversation.chat.turnTail` 链座位（每个已完成轮次
  * 渲染一次），链选择器直接给出该轮的会话轮号；`isRerollableTurn` 承担
- * 首轮防御（turn ≤ 1 时宿主必报 GRAY_BRANCH_NO_PREVIOUS_TURN，按钮直接
- * 不渲染，避免点击后暴露英文原文错误——见 logic 下方注释）。
+ * 轮次防御（仅正整数可用）；第一轮由宿主从空 seed 重新发送原消息。
  *
  * 功能 2（编辑用户消息）：编辑入口以独立 chat 节点（见 editNode.ts）锚定在
  * 用户消息正后方，渲染器经 `editTargetOfTurn` 从会话快照解析该轮「开轮」
@@ -26,15 +25,13 @@ export interface ContentBlockLike {
 export const BRANCH_NO_PREVIOUS_TURN_CODE = 'GRAY_BRANCH_NO_PREVIOUS_TURN'
 
 /**
- * True when a completed turn can be rerolled / edit-retried: reroll forks the
- * prefix BEFORE the turn and resends the turn's user message, so turn ≤ 1 has
- * no prefix — the host rejects it with `GRAY_BRANCH_NO_PREVIOUS_TURN`. The
- * 首轮防御（turn ≤ 1 不渲染按钮）保持不变：点击后只会得到英文原文错误。
+ * True when a completed turn can be rerolled / edit-retried. The first turn
+ * is valid: it forks an empty seed and resends that turn's user message.
  */
 export function isRerollableTurn(turn: unknown): turn is number {
   if (typeof turn !== 'number') return false
   if (!Number.isInteger(turn)) return false
-  return turn > 1
+  return turn >= 1
 }
 
 /**

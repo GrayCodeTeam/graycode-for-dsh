@@ -9,8 +9,7 @@
  * （用户明确要求重roll 出现在用户消息旁，而非轮尾）。
  *
  * 可见性纯逻辑防御（渲染 nothing 而非报错）：
- * - turn 缺失（位置 unresolved）或 turn ≤ 1（首轮无前缀可 fork，宿主必报
- *   GRAY_BRANCH_NO_PREVIOUS_TURN；RegenerateAction 内部同样防御）；
+ * - turn 缺失（位置 unresolved）或不是正整数；
  * - source.kind 非 'user'（agent 注入的合成上下文不可编辑）；
  * - 节点锚定的消息不是本轮「开轮」用户消息（steering 消息 seq 对不上
  *   editTargetOfTurn 解析出的开轮消息 seq）。
@@ -100,7 +99,7 @@ export function EditUserAction({ node, sessionId, useSession, remote, open, onCo
   // Hooks 必须无条件调用（早退判断全部放在订阅之后）。
   const snapshot = useSession((state) => state)
 
-  // 首轮防御 + 合成上下文防御：不渲染（点击只会得到宿主英文错误）。
+  // 非法轮次 + 合成上下文防御：第一轮本身可以从空 seed 重试。
   if (data.sourceKind !== 'user') return null
   if (data.turn === undefined || !isRerollableTurn(data.turn)) return null
 
