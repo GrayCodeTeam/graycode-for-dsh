@@ -91,7 +91,7 @@ export interface GrayCodeConfig {
   }
   images: ImagesConfig
   summary: SummaryConfig
-  branches: DataRootConfig & ScopedConfig
+  branches: DataRootConfig & ScopedConfig & { retentionDays: number }
   persona: ToggleScopedConfig & { template?: string }
   prompt: DataRootConfig
   migration: DataRootConfig & { enabled: boolean }

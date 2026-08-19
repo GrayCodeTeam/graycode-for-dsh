@@ -8,10 +8,8 @@
  *   （会话级兜底，整组候选轮换；当前会话是组根或 per-turn 映射不可用时仍
  *   可切换）。
  *
- * 切换动作：插件 Remote 通道没有 branches/switch 端点，客户端等价实现是
- * sessions.open(候选会话)——候选即完整会话，跳转即切换（activeSessionId
- * 指针不动，属已知取舍，见 logic.ts 文件头）。remote 拉取失败/无组/单候选
- * 一律渲染 nothing，绝不炸聊天流。
+ * 切换动作：先通过 branches/switch 同步 sidecar 活动指针，再打开候选会话。
+ * remote 拉取失败/无组/单候选一律渲染 nothing，绝不炸聊天流。
  */
 import type { CSSProperties, ReactNode } from 'react'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
@@ -25,6 +23,7 @@ import {
   type CandidateSwitchView,
 } from './logic.ts'
 import { useBranchGroups } from './branchData.ts'
+import { switchBranchSession } from './actions.ts'
 
 const barStyle: CSSProperties = {
   display: 'inline-flex',
@@ -164,14 +163,15 @@ export function TurnBranchSwitcher({ turn, sessionId, useSession, t, remote, ope
   const turnEnds = useSession((state) => state.turnEnds)
   if (groups.status !== 'ready') return null
   if (turnEnds === undefined) return null
-  const view = candidatesAtTurn(branchGroupOfSession(groups.items, sessionId), sessionId, turn, turnEnds)
+  const group = branchGroupOfSession(groups.items, sessionId)
+  const view = candidatesAtTurn(group, sessionId, turn, turnEnds)
   if (view === undefined) return null
   return (
     <BranchSwitchChip
       view={view}
       sessionId={sessionId}
       t={t}
-      onSwitch={(target) => { if (open !== undefined) open(target) }}
+      onSwitch={(target) => { if (group !== undefined) void switchBranchSession(remote, group, target, open) }}
     />
   )
 }
@@ -186,14 +186,15 @@ export interface SessionBranchSwitcherProps extends BranchSwitchInjected {
 export function SessionBranchSwitcher({ sessionId, t, remote, open }: SessionBranchSwitcherProps): ReactNode {
   const groups = useBranchGroups(remote, sessionId)
   if (groups.status !== 'ready') return null
-  const view = candidatesOfGroup(branchGroupOfSession(groups.items, sessionId), sessionId)
+  const group = branchGroupOfSession(groups.items, sessionId)
+  const view = candidatesOfGroup(group, sessionId)
   if (view === undefined) return null
   return (
     <BranchSwitchChip
       view={view}
       sessionId={sessionId}
       t={t}
-      onSwitch={(target) => { if (open !== undefined) open(target) }}
+      onSwitch={(target) => { if (group !== undefined) void switchBranchSession(remote, group, target, open) }}
     />
   )
 }

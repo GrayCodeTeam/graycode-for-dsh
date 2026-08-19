@@ -4,7 +4,7 @@
  * cyclic stepping) and the locale alignment. React is intentionally not
  * imported (the switcher components are thin shells over these helpers).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   branchGroupOfSession,
   candidateLabel,
@@ -17,6 +17,8 @@ import {
   type BranchCandidateItem,
   type BranchGroupItem,
 } from '../src/client/branchSwitch/logic.ts'
+import { switchBranchSession } from '../src/client/branchSwitch/actions.ts'
+import type { GrayRemoteInvoke } from '../src/client/settings/types.ts'
 import {
   GRAYCODE_BRANCH_NS,
   graycodeBranchSwitchDictionaries,
@@ -42,6 +44,7 @@ function group(over: Record<string, unknown>): unknown {
     id: 'g-1',
     rootSessionId: 's-root',
     activeSessionId: 's-a',
+    revision: 4,
     candidates: [],
     ...over,
   }
@@ -58,6 +61,7 @@ describe('readBranchGroup (branches/list narrowing)', () => {
     })
     const parsed = readBranchGroup(item)
     expect(parsed?.id).toBe('g-1')
+    expect(parsed?.revision).toBe(4)
     expect(parsed?.candidates).toHaveLength(3)
     expect(parsed?.candidates[1]).toMatchObject({ sessionId: 's-a', parentSessionId: 's-root', boundary: 30, label: '尝试 2', deleted: false })
     expect(parsed?.candidates[2]?.deleted).toBe(true)
@@ -72,6 +76,32 @@ describe('readBranchGroup (branches/list narrowing)', () => {
     const parsed = readBranchGroup(group({ candidates: [null, { sessionId: '' }, candidate({ sessionId: 's-ok' })] }))
     expect(parsed?.candidates).toHaveLength(1)
     expect(parsed?.candidates[0]?.sessionId).toBe('s-ok')
+  })
+})
+
+describe('switchBranchSession', () => {
+  it('updates the active pointer before opening the target session', async () => {
+    const calls: Array<{ namespace: string; method: string; args?: Record<string, unknown> }> = []
+    const remote: GrayRemoteInvoke = async (namespace, method, args) => {
+      calls.push({ namespace, method, args })
+      return { ok: true, value: {} }
+    }
+    const open = vi.fn()
+    const parsed = readBranchGroup(group({ candidates: [candidate({ sessionId: 's-a' }), candidate({ sessionId: 's-b' })] }))!
+
+    await expect(switchBranchSession(remote, parsed, 's-b', open)).resolves.toBe(true)
+    expect(calls).toEqual([{ namespace: 'branches', method: 'switch', args: { groupId: 'g-1', sessionId: 's-b', expectedRevision: 4 } }])
+    expect(open).toHaveBeenCalledWith('s-b')
+  })
+
+  it('does not navigate when the pointer update fails', async () => {
+    const remote: GrayRemoteInvoke = async () => ({ ok: false, error: { code: 'GRAY_CONFLICT', message: 'stale', details: {} } })
+    const open = vi.fn()
+    const parsed = readBranchGroup(group({ candidates: [candidate({ sessionId: 's-a' }), candidate({ sessionId: 's-b' })] }))!
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(switchBranchSession(remote, parsed, 's-b', open)).resolves.toBe(false)
+    expect(open).not.toHaveBeenCalled()
+    warn.mockRestore()
   })
 })
 

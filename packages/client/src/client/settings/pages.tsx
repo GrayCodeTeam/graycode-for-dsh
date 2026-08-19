@@ -28,6 +28,7 @@ import { normalizeCheckpointConfig } from '../checkpointList/configModel.ts'
 import type { GrayCodeCheckpointConfigLocaleKey } from '../checkpointList/locales.ts'
 import { PromptModeManager } from './promptModes/PromptModeManager.tsx'
 import { BackgroundAppearanceSection } from './BackgroundAppearanceSection.tsx'
+import { BranchManagerSection } from './BranchManagerSection.tsx'
 
 export interface GrayCodePageProps {
   t: GcTranslate
@@ -193,21 +194,25 @@ const MemoryPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspac
   )
 }
 
-const WorkflowsPage: GrayCodePage = ({ t, config, onChange }) => (
-  <FieldSection
-    title={t('pages.workflows.title')}
-    description={t('pages.workflows.description')}
-    fields={[
-      scope('workflows', t),
-      { kind: 'text', path: ['workflows', 'documentRoot'], labelKey: 'fields.documentRoot', monospace: true },
-      scope('branches', t),
-      { kind: 'boolean', path: ['stagedDiff', 'enabled'], labelKey: 'fields.stagedDiffEnabled' },
-      scope('stagedDiff', t),
-    ]}
-    config={config}
-    onChange={onChange}
-    t={t}
-  />
+const WorkflowsPage: GrayCodePage = ({ t, config, onChange, remote, defaultWorkspace }) => (
+  <div>
+    <FieldSection
+      title={t('pages.workflows.title')}
+      description={t('pages.workflows.description')}
+      fields={[
+        scope('workflows', t),
+        { kind: 'text', path: ['workflows', 'documentRoot'], labelKey: 'fields.documentRoot', monospace: true },
+        scope('branches', t),
+        { kind: 'number', path: ['branches', 'retentionDays'], labelKey: 'fields.branchRetentionDays', descriptionKey: 'fields.branchRetentionDays.description', min: 0, step: 1 },
+        { kind: 'boolean', path: ['stagedDiff', 'enabled'], labelKey: 'fields.stagedDiffEnabled' },
+        scope('stagedDiff', t),
+      ]}
+      config={config}
+      onChange={onChange}
+      t={t}
+    />
+    <BranchManagerSection t={t} remote={remote} workspace={defaultWorkspace} retentionDays={config.branches.retentionDays} />
+  </div>
 )
 
 const ActivityPage: GrayCodePage = ({ t, config, onChange, remote, activityT, connection }) => {

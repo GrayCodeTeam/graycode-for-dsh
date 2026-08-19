@@ -4,10 +4,8 @@
  * 数据源是插件端 `branches/list` Remote 端点（packages/plugin/src/branches/
  * adapters/dsh/remote.ts 的实际契约）：返回按 workspace 过滤前的全部分支组，
  * 每组含 candidates[]（一个候选 = 一条独立 dsh Session，携带 parentSessionId
- * 与 boundary=fork 前缀末事件 seq）。插件 Remote 通道没有 `branches/switch`
- * 端点（switch 只作为模型侧 branch_switch 工具暴露），因此「切换」在客户端
- * 的等价实现是 sessions.open(候选会话)——候选本身就是完整会话，跳转即切换
- * （组内 activeSessionId 指针的改写不在客户端能力范围，属已知取舍）。
+ * 与 boundary=fork 前缀末事件 seq）。切换器先调用 `branches/switch` 原子更新
+ * sidecar 活动指针，再由宿主打开候选会话，避免页面与分支状态脱节。
  *
  * 粒度取舍：分支组是「会话级」模型，没有 per-turn 候选轴；但候选的
  * (parentSessionId, boundary) 对可推导出「同一 fork 点的兄弟候选」，配合会话
@@ -36,6 +34,7 @@ export interface BranchGroupItem {
   readonly id: string
   readonly rootSessionId: string
   readonly activeSessionId: string
+  readonly revision?: number
   readonly candidates: readonly BranchCandidateItem[]
 }
 
@@ -50,6 +49,7 @@ export function readBranchGroup(item: unknown): BranchGroupItem | undefined {
     id?: unknown
     rootSessionId?: unknown
     activeSessionId?: unknown
+    revision?: unknown
     candidates?: unknown
   }
   if (typeof raw.id !== 'string' || typeof raw.rootSessionId !== 'string') return undefined
@@ -78,7 +78,13 @@ export function readBranchGroup(item: unknown): BranchGroupItem | undefined {
       createdAt: typeof c.createdAt === 'number' ? c.createdAt : 0,
     })
   }
-  return { id: raw.id, rootSessionId: raw.rootSessionId, activeSessionId: raw.activeSessionId, candidates }
+  return {
+    id: raw.id,
+    rootSessionId: raw.rootSessionId,
+    activeSessionId: raw.activeSessionId,
+    revision: typeof raw.revision === 'number' && Number.isSafeInteger(raw.revision) ? raw.revision : undefined,
+    candidates,
+  }
 }
 
 /**
