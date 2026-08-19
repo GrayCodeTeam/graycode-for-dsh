@@ -12,6 +12,7 @@
  *   取消 → GRAY_CANCELLED）。
  * - `checkpoints/create`：立即创建检查点；
  * - `checkpoints/delete`：显式 confirm 门闸后删除；
+ * - `checkpoints/deleteBatch`：显式 confirm 门闸后按增量链闭包批量删除；
  * - `checkpoints/gc`：dry-run 默认，真实清理需要 confirm 门闸。
  *
  * 错误分类说明：领域 RestoreResult 以字符串承载错误（错误文案只在 host 侧
@@ -29,6 +30,7 @@ import { CHECKPOINT_LOCK_CANCELLED_MESSAGE } from '../../domain/CheckpointOperat
 import {
   normalizeLimit,
   optionalBoolean,
+  optionalStringArray,
   optionalString,
   requireString,
   requireWorkspace,
@@ -233,6 +235,27 @@ export function createCheckpointsRemoteHandlers(service: CheckpointService): Gra
           }
           throw GrayRemoteError.internal('checkpoint deletion failed')
         }
+        return outcome
+      } catch (err) {
+        throw normalizeEndpointError(err, signal)
+      }
+    },
+
+    'checkpoints/deleteBatch': async (args: GrayRemoteArgs, signal?: AbortSignal) => {
+      const workspace = requireWorkspace(args)
+      const checkpointIds = optionalStringArray(args, 'checkpointIds')
+      if (checkpointIds === undefined || checkpointIds.length === 0) {
+        throw GrayRemoteError.invalidInput('checkpointIds must be a non-empty array')
+      }
+      if (args.confirm !== true) {
+        throw GrayRemoteError.approvalRequired('checkpoints.deleteBatch requires explicit confirmation', {
+          checkpointIds,
+        })
+      }
+      try {
+        if (signal?.aborted) throw GrayRemoteError.cancelled()
+        const outcome = await service.deleteCheckpointsBatch(workspace, checkpointIds)
+        if (!outcome.success) throw GrayRemoteError.internal('checkpoint batch deletion failed')
         return outcome
       } catch (err) {
         throw normalizeEndpointError(err, signal)

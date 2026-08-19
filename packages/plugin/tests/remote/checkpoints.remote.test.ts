@@ -316,6 +316,60 @@ describe('checkpoints/create / delete / gc', () => {
       await disposeEnv(env)
     }
   })
+
+  it('batch deletion removes a selected chain together and retains a selected base with an unselected child', async () => {
+    const env = await makeRemoteEnv()
+    try {
+      await writeFile(env.workspaceDir, 'managed.txt', 'v1')
+      const first = await env.service.createCheckpoint(env.workspaceDir)
+      await writeFile(env.workspaceDir, 'managed.txt', 'v2')
+      const second = await env.service.createCheckpoint(env.workspaceDir)
+
+      expectFailure(
+        await env.invoke('checkpoints', 'deleteBatch', {
+          workspace: env.workspaceDir,
+          checkpointIds: [first!.checkpointId, second!.checkpointId],
+        }),
+        GRAY_REMOTE_ERROR_CODES.APPROVAL_REQUIRED,
+      )
+      expectFailure(
+        await env.invoke('checkpoints', 'deleteBatch', {
+          workspace: env.workspaceDir,
+          checkpointIds: [],
+          confirm: true,
+        }),
+        GRAY_REMOTE_ERROR_CODES.INVALID_INPUT,
+      )
+
+      const protectedBase = await env.invoke('checkpoints', 'deleteBatch', {
+        workspace: env.workspaceDir,
+        checkpointIds: [first!.checkpointId],
+        confirm: true,
+      })
+      expect(protectedBase).toMatchObject({
+        ok: true,
+        value: { deletedIds: [], rejectedIds: [first!.checkpointId], success: true },
+      })
+
+      const deletedChain = await env.invoke('checkpoints', 'deleteBatch', {
+        workspace: env.workspaceDir,
+        checkpointIds: [first!.checkpointId, second!.checkpointId],
+        confirm: true,
+      })
+      expect(deletedChain).toMatchObject({
+        ok: true,
+        value: {
+          deletedIds: expect.arrayContaining([first!.checkpointId, second!.checkpointId]),
+          rejectedIds: [],
+          success: true,
+        },
+      })
+      const list = await env.invoke('checkpoints', 'list', { workspace: env.workspaceDir })
+      expect(list).toMatchObject({ ok: true, value: { items: [], total: 0 } })
+    } finally {
+      await disposeEnv(env)
+    }
+  })
 })
 describe('checkpoints remote error normalization (M6)', () => {
   it('create lock-cancelled message maps to GRAY_CANCELLED, not GRAY_INTERNAL', async () => {

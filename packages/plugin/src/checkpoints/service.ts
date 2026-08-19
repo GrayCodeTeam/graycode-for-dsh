@@ -79,6 +79,7 @@ import {
 } from './domain/checkpointConcurrency.ts';
 import { hashFileStreaming } from './domain/fileHashing.ts';
 import type {
+    BatchCheckpointDeleteResult,
     CheckpointExcludedNote,
     CheckpointFileChange,
     CheckpointManifest,
@@ -151,6 +152,9 @@ export interface CheckpointDeleteOutcome {
     rejected?: string;
     reason?: string;
 }
+
+/** Settings-side batch deletion result (chain-safe; rejected ancestors are retained). */
+export type CheckpointBatchDeleteOutcome = BatchCheckpointDeleteResult;
 
 /** checkpoint_verify 返回（只读校验，不修改任何文件） */
 export interface CheckpointVerifyResult {
@@ -1615,6 +1619,23 @@ export class CheckpointService {
             error('Failed to delete checkpoint:', err);
             return { success: false, deleted: false, reason: err instanceof Error ? err.message : 'Unknown error' };
         }
+    }
+
+    /**
+     * Delete several checkpoints as one chain-aware operation. Unlike repeated single deletes,
+     * selecting an entire incremental chain can remove it without forcing broken descendants.
+     */
+    async deleteCheckpointsBatch(
+        cwd: string | undefined,
+        checkpointIds: readonly string[]
+    ): Promise<CheckpointBatchDeleteOutcome> {
+        const roots = this.resolveRuntimeRoots(cwd);
+        const conversationId = roots[0]?.id ?? '';
+        const [result] = await this.deletionService.deleteCheckpointsBatch([{
+            conversationId,
+            checkpointIds: [...new Set(checkpointIds)],
+        }]);
+        return result ?? { conversationId, deletedIds: [], rejectedIds: [], success: false };
     }
 
     // ==================== checkpoint_gc ====================

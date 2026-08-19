@@ -41,6 +41,7 @@ reject——只有未注册端点才返回 `GRAY_ENDPOINT_NOT_FOUND` 信封。
 | `checkpoints/previewRestore` | 恢复预览（签发 previewToken） | §checkpoints |
 | `checkpoints/restore` | 执行恢复（previewToken 门闸） | §checkpoints |
 | `checkpoints/delete` | 删除存档点（confirm 门闸） | §checkpoints |
+| `checkpoints/deleteBatch` | 按增量链闭包批量删除存档点（confirm 门闸） | §checkpoints |
 | `checkpoints/gc` | 垃圾回收（dryRun/confirm） | §checkpoints |
 | `stagedDiff/list` | staged 条目列表 | §stagedDiff |
 | `stagedDiff/preview` | 条目 diff 预览 | §stagedDiff |

@@ -156,6 +156,13 @@ export interface CheckpointListResult {
   nextCursor?: string
 }
 
+export interface CheckpointBatchDeleteResult {
+  conversationId: string
+  deletedIds: string[]
+  rejectedIds: string[]
+  success: boolean
+}
+
 export interface CheckpointVerifyResult {
   ok: boolean
   checkpointId: string

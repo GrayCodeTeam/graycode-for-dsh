@@ -12,6 +12,7 @@ import {
   tokens,
 } from './styles.ts'
 import type {
+  CheckpointBatchDeleteResult,
   CheckpointGcResult,
   CheckpointItem,
   CheckpointListResult,
@@ -112,6 +113,7 @@ export function CheckpointManager({
   }
   const [title, setTitle] = useState('')
   const [items, setItems] = useState<CheckpointItem[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [total, setTotal] = useState(0)
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
@@ -148,6 +150,7 @@ export function CheckpointManager({
 
   const clearWorkspaceResults = useCallback((): void => {
     setItems([])
+    setSelectedIds(new Set())
     setTotal(0)
     setNextCursor(undefined)
     setVerify({})
@@ -199,6 +202,8 @@ export function CheckpointManager({
       if (!isCurrent(token)) return
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       setItems(result.value.items)
+      const loadedIds = new Set(result.value.items.map(item => item.id))
+      setSelectedIds(current => new Set([...current].filter(id => loadedIds.has(id))))
       setTotal(result.value.total)
       setNextCursor(result.value.nextCursor)
       setListWorkspace(token.workspace)
@@ -354,6 +359,31 @@ export function CheckpointManager({
     }
   }
 
+  const deleteSelected = async (): Promise<void> => {
+    const checkpointIds = [...selectedIds]
+    if (checkpointIds.length === 0 || !window.confirm(t('checkpoint.batchDeleteConfirm'))) return
+    const token = beginRequest(listWorkspace)
+    if (token === null) return
+    try {
+      const result = await remote<CheckpointBatchDeleteResult>(
+        'checkpoints',
+        'deleteBatch',
+        argsWithWorkspace(token.workspace, { checkpointIds, confirm: true }),
+      )
+      if (!isCurrent(token)) return
+      if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
+      setSelectedIds(new Set(result.value.rejectedIds))
+      setNotice(result.value.rejectedIds.length === 0
+        ? `${t('checkpoint.batchDeleted')}: ${result.value.deletedIds.length}`
+        : `${t('checkpoint.batchDeleted')}: ${result.value.deletedIds.length} · ${t('checkpoint.batchRejected')}: ${result.value.rejectedIds.length}`)
+      await load(token.workspace)
+    } catch (cause) {
+      if (isCurrent(token)) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (isCurrent(token)) setBusy(false)
+    }
+  }
+
   const gc = async (dryRun: boolean, targetWorkspace: string): Promise<void> => {
     if (!dryRun && !window.confirm(t('checkpoint.gcConfirm'))) return
     const token = beginRequest(targetWorkspace)
@@ -433,6 +463,37 @@ export function CheckpointManager({
         )}
       </div>
       <div style={metaStyle}>{t('checkpoint.total')}: {total}</div>
+      {items.length > 0 && (
+        <div style={buttonRowStyle}>
+          <label style={metaStyle}>
+            <input
+              type="checkbox"
+              checked={items.every(item => selectedIds.has(item.id))}
+              disabled={busy}
+              onChange={event => {
+                const loadedIds = items.map(item => item.id)
+                setSelectedIds(current => {
+                  const next = new Set(current)
+                  for (const id of loadedIds) {
+                    if (event.target.checked) next.add(id)
+                    else next.delete(id)
+                  }
+                  return next
+                })
+              }}
+            />
+            {' '}{t('checkpoint.selectLoaded')} ({selectedIds.size})
+          </label>
+          <button
+            type="button"
+            style={buttonDangerStyle}
+            disabled={busy || selectedIds.size === 0}
+            onClick={() => void deleteSelected()}
+          >
+            {t('checkpoint.deleteSelected')}
+          </button>
+        </div>
+      )}
       {items.length === 0 && !busy && <p style={noteStyle}>{t('checkpoint.empty')}</p>}
       {items.map(item => {
         const result = verify[item.id]
@@ -440,7 +501,21 @@ export function CheckpointManager({
         return (
           <article key={item.id} style={itemStyle}>
             <div style={itemHeaderStyle}>
-              <code style={codeStyle}>{item.id}</code>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(item.id)}
+                  disabled={busy}
+                  aria-label={`${t('checkpoint.select')} ${item.id}`}
+                  onChange={event => setSelectedIds(current => {
+                    const next = new Set(current)
+                    if (event.target.checked) next.add(item.id)
+                    else next.delete(item.id)
+                    return next
+                  })}
+                />
+                {' '}<code style={codeStyle}>{item.id}</code>
+              </label>
               <span style={metaStyle}>{new Date(item.timestamp).toLocaleString()}</span>
             </div>
             <div style={metaStyle}>
