@@ -58,6 +58,10 @@ reject——只有未注册端点才返回 `GRAY_ENDPOINT_NOT_FOUND` 信封。
 | `prompt/modes.export` | 导出模式 | §prompt |
 | `branches/list` | 会话分支组列表 | §branches |
 | `branches/rename` | 重命名分支组 | §branches |
+| `branches/switch` | 切换激活候选（revision CAS） | §branches |
+| `branches/delete` | 软删除候选子树（confirm 门闸） | §branches |
+| `branches/restore` | 恢复软删除候选子树 | §branches |
+| `branches/pruneDeleted` | 清理超过保留期的候选子树（confirm 门闸） | §branches |
 | `branches/reroll` | 重新生成：fork 目标轮次前前缀 + 重发用户消息 | §branches |
 | `branches/editRetry` | 编辑并重试：fork 目标轮次前前缀 + 重发编辑后文本 | §branches |
 | `activity/stats` | 使用时长统计 | §activity |

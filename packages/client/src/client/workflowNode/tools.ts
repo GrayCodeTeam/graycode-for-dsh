@@ -87,7 +87,7 @@ export function workflowToolLocaleKey(name: string): `tool.${WorkflowToolName}` 
  *
  * WIRING POINT (host half, not touched by P4-01): the workflows plugin should
  * attach `presentationMeta(args, value)` → `{ kind: 'graycode.workflow', ... }`
- * to the 12 tools so the durable log carries an explicit workflow signature.
+ * to the 14 tools so the durable log carries an explicit workflow signature.
  * The client folds results through `message.source.callId` regardless, so this
  * marker is an enhancement (document status, explicit correlation), not a
  * requirement — see `workflowNode/README.md`.

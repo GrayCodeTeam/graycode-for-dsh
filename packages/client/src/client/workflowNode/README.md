@@ -4,7 +4,7 @@ Renders Gray workflow tool calls (`create_design` / `update_design` /
 `create_progress` / `update_progress` / `record_progress_milestone` /
 `validate_progress_document` / `create_review` / `record_review_milestone` /
 `finalize_review` / `reopen_review` / `validate_review_document` /
-`compare_review_documents` — 12 tools) as dedicated cards in the DSH
+`compare_review_documents` — 14 tools) as dedicated cards in the DSH
 conversation flow: status, document path, timestamps, error and retry entry.
 
 ## Probe conclusion (DSH rc.6) — the node extension surface EXISTS
