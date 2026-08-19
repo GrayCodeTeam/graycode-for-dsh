@@ -270,7 +270,10 @@ export class MemoryManager {
     async wake(part?: number, T?: number): Promise<WakeResult> {
         await this.ensureReady();
         const now = await this.logLen();
-        const snapshotT = T ?? now;
+        // 一些模型/工具客户端会把未提供的可选数值参数填成 0。首次 wake 时
+        // snapshotT=0 应与省略参数同义，读取当前日志；真实空日志同样得到 0。
+        // 后续分页仍由调用方回传非零 snapshotT，以保持一致快照。
+        const snapshotT = T === undefined || T === 0 ? now : T;
         if (snapshotT > now) {
             die(`T=${snapshotT}, but the log holds ${plural(now, 'memory')}. Run memory_wake.`);
         }

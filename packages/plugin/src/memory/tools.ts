@@ -107,7 +107,7 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       'Parameters: part (optional, 1-based part number); snapshotT (single-scope snapshot count); globalSnapshotT/workspaceSnapshotT (combined-scope snapshot counts); scope (optional, "global" or "workspace" to read a single scope instead of both).',
     parameters: {
       part: { type: 'integer', description: 'Part number to read (1-based). Omit to start at part 1.' },
-      snapshotT: { type: 'integer', description: 'Total memory count at snapshot time. Omit to use the current count. Keeps multi-call wake reads consistent.' },
+      snapshotT: { type: 'integer', description: 'Total memory count at snapshot time. Omit or pass 0 on the first call to use the current count. Keeps later multi-call wake reads consistent.' },
       globalSnapshotT: { type: 'integer', description: 'Global memory count returned by part 1 of a combined-scope wake.' },
       workspaceSnapshotT: { type: 'integer', description: 'Workspace memory count returned by part 1 of a combined-scope wake.' },
       scope: { ...scopeEnum, description: 'Memory scope to read. Omit to read both global and current workspace memory; "global" reads only global; "workspace" reads only the current workspace (requires an active workspace).' },
@@ -176,20 +176,24 @@ export function createMemoryTools(service: MemoryService): ToolDefinition[] {
       let wsMgr: MemoryManager | null = null
       if (readWorkspace && cwd) wsMgr = await service.getWorkspace(cwd, false)
 
-      let globalSnapshotT = scope === 'global' ? args.snapshotT : args.globalSnapshotT
-      let workspaceSnapshotT = scope === 'workspace' ? args.snapshotT : args.workspaceSnapshotT
+      // 部分工具客户端会给未填写的可选整数补 0；首轮的 0 与省略同义。
+      const snapshotT = args.snapshotT === 0 ? undefined : args.snapshotT
+      const requestedGlobalSnapshotT = args.globalSnapshotT === 0 ? undefined : args.globalSnapshotT
+      const requestedWorkspaceSnapshotT = args.workspaceSnapshotT === 0 ? undefined : args.workspaceSnapshotT
+      let globalSnapshotT = scope === 'global' ? snapshotT : requestedGlobalSnapshotT
+      let workspaceSnapshotT = scope === 'workspace' ? snapshotT : requestedWorkspaceSnapshotT
       if (
         scope === undefined &&
-        args.snapshotT !== undefined &&
-        args.globalSnapshotT === undefined &&
-        args.workspaceSnapshotT === undefined
+        snapshotT !== undefined &&
+        requestedGlobalSnapshotT === undefined &&
+        requestedWorkspaceSnapshotT === undefined
       ) {
         if (wsMgr) {
           throw new Error(
             'Combined memory_wake has two snapshots. Pass globalSnapshotT and workspaceSnapshotT from part 1, or set scope.',
           )
         }
-        globalSnapshotT = args.snapshotT
+        globalSnapshotT = snapshotT
       }
       if (
         scope === undefined &&

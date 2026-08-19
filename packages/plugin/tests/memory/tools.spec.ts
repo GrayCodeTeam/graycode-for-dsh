@@ -409,6 +409,27 @@ describe('memory 工具（经 service 闭包）', () => {
     }
   })
 
+  test('memory_wake 首轮 snapshotT=0 与省略参数同义，不隐藏已有双作用域记忆', async () => {
+    const { tools, service, dataRoot } = makeTools()
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-zero-snapshot-'))
+    try {
+      await (await service.getGlobal()).note('global-existing')
+      await (await service.getWorkspace(wsDir, true))!.note('workspace-existing')
+
+      const wake = tools.get('memory_wake')!
+      const omitted = (await wake.execute({}, fakeExec(wsDir))) as WakeToolResult
+      const zero = (await wake.execute({ snapshotT: 0 }, fakeExec(wsDir))) as WakeToolResult
+
+      expect(zero.totalMemories).toBe(2)
+      expect(zero.blocks).toEqual(omitted.blocks)
+      expect(zero.text).toContain('global-existing')
+      expect(zero.text).toContain('workspace-existing')
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true })
+      fs.rmSync(wsDir, { recursive: true, force: true })
+    }
+  })
+
   test('memory_wake 双作用域压缩提示携带明确 scope，不再用一个无作用域 blockId 指代两边', async () => {
     const { tools, service, dataRoot } = makeTools()
     const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mm-tools-dual-nap-'))

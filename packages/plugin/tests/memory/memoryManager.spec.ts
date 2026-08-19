@@ -37,6 +37,10 @@ describe('MemoryManager.note → wake', () => {
       expect(texts.join(' ')).toContain('cd')
       expect(texts.join(' ')).toContain('e')
       expect(wake.awake).toBe(true)
+
+      const zeroSnapshotWake = await mm.wake(undefined, 0)
+      expect(zeroSnapshotWake.totalMemories).toBe(5)
+      expect(zeroSnapshotWake.blocks).toEqual(wake.blocks)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
