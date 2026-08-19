@@ -306,10 +306,13 @@ export type GrayCodeCheckpointConfigLocaleKey =
   | 'config.tool.edit.description'
   | 'config.tool.str_replace_editor.description'
   | 'config.tool.delete_code.description'
+  | 'config.tool.insert_code.description'
   | 'config.tool.bash.description'
   | 'config.tool.pwsh.description'
   | 'config.tool.grep.description'
   | 'config.tool.glob.description'
+  | 'config.tool.list_files.description'
+  | 'config.tool.search_in_files.description'
   | 'config.tool.crop_image.description'
   | 'config.tool.resize_image.description'
   | 'config.tool.rotate_image.description'
@@ -368,7 +371,7 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.toolsTooLong': '工具名过长',
     'config.toolsEmptyLine': '工具名不能为空',
     'config.toolsGroup': '工具触发存档',
-    'config.toolsGroup.description': '勾选哪些工具在「执行前 / 执行后」自动创建存档点。默认只勾：执行命令前（bash/pwsh）、删除前（delete_code）、写入后（write）、应用差异后（edit / str_replace_editor）。',
+    'config.toolsGroup.description': '勾选哪些工具在「执行前 / 执行后」自动创建存档点。默认只勾：执行命令前（bash/pwsh）、删除前（delete_code），以及写入或替换后（write / edit / str_replace_editor / insert_code / search_in_files）。',
     'config.toolsProfile': '工具调用存档方案',
     'config.toolsProfile.description': '先选一个常用方案；需要精细控制时再展开下方的逐工具设置。',
     'config.toolsProfile.recommended': '推荐',
@@ -403,10 +406,13 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.tool.edit.description': '编辑文件（旧版补丁格式）',
     'config.tool.str_replace_editor.description': '精确字符串替换编辑',
     'config.tool.delete_code.description': '删除代码片段',
+    'config.tool.insert_code.description': '按行插入代码',
     'config.tool.bash.description': '执行 Bash 命令',
     'config.tool.pwsh.description': '执行 PowerShell 命令',
     'config.tool.grep.description': '按正则搜索文件内容',
     'config.tool.glob.description': '按模式匹配文件名',
+    'config.tool.list_files.description': '列出目录与文本行数',
+    'config.tool.search_in_files.description': '搜索或批量替换文件内容',
     'config.tool.crop_image.description': '裁剪图片',
     'config.tool.resize_image.description': '缩放图片',
     'config.tool.rotate_image.description': '旋转图片',
@@ -453,7 +459,7 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.toolsTooLong': 'Tool name is too long',
     'config.toolsEmptyLine': 'Tool name cannot be empty',
     'config.toolsGroup': 'Tool-triggered checkpoints',
-    'config.toolsGroup.description': 'Pick which tools checkpoint before/after execution. Defaults: before commands (bash/pwsh) and deletes (delete_code); after writes (write) and diffs (edit / str_replace_editor).',
+    'config.toolsGroup.description': 'Pick which tools checkpoint before/after execution. Defaults: before commands (bash/pwsh) and deletes (delete_code); after writes or replacements (write / edit / str_replace_editor / insert_code / search_in_files).',
     'config.toolsProfile': 'Tool checkpoint policy',
     'config.toolsProfile.description': 'Start with a common policy, then expand the per-tool controls only when needed.',
     'config.toolsProfile.recommended': 'Recommended',
@@ -488,10 +494,13 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.tool.edit.description': 'Edit files (legacy patch format)',
     'config.tool.str_replace_editor.description': 'Exact string-replace editing',
     'config.tool.delete_code.description': 'Delete code snippets',
+    'config.tool.insert_code.description': 'Insert code at a line',
     'config.tool.bash.description': 'Run Bash commands',
     'config.tool.pwsh.description': 'Run PowerShell commands',
     'config.tool.grep.description': 'Regex content search',
     'config.tool.glob.description': 'File-name pattern matching',
+    'config.tool.list_files.description': 'List directories with text line counts',
+    'config.tool.search_in_files.description': 'Search or batch-replace file content',
     'config.tool.crop_image.description': 'Crop images',
     'config.tool.resize_image.description': 'Resize images',
     'config.tool.rotate_image.description': 'Rotate images',
@@ -579,10 +588,13 @@ export const graycodeCheckpointConfigJaPlaceholder: LocaleDict = {
   'config.tool.edit.description': 'ファイルを編集（旧パッチ形式）',
   'config.tool.str_replace_editor.description': '正確な文字列置換編集',
   'config.tool.delete_code.description': 'コード断片を削除',
+  'config.tool.insert_code.description': '指定行にコードを挿入',
   'config.tool.bash.description': 'Bash コマンドを実行',
   'config.tool.pwsh.description': 'PowerShell コマンドを実行',
   'config.tool.grep.description': '正規表現でファイル内容を検索',
   'config.tool.glob.description': 'ファイル名パターン照合',
+  'config.tool.list_files.description': 'ディレクトリとテキスト行数を一覧表示',
+  'config.tool.search_in_files.description': 'ファイル内容を検索・一括置換',
   'config.tool.crop_image.description': '画像を切り抜き',
   'config.tool.resize_image.description': '画像をリサイズ',
   'config.tool.rotate_image.description': '画像を回転',

@@ -74,13 +74,13 @@ export interface Config {
 }
 
 /**
- * 默认 beforeTools/afterTools（DSH 版 24 工具全集）：
+ * 默认 beforeTools/afterTools（DSH + Gray Code 兼容工具全集）：
  * - 7 个 DSH host 内建工具（deepseek-harness 源码核实）：write / edit /
  *   str_replace_editor / bash / pwsh / grep / glob；
- * - 本插件注册工具（modeToolsPolicy 白名单同名核实）：delete_code（file 域）、
+ * - 本插件注册工具（modeToolsPolicy 白名单同名核实）：delete_code / insert_code /
+ *   list_files / search_in_files（file 域）、
  *   media 5 工具、workflows 11 工具。
- * 原插件 insert_code/create_directory/delete_file/search_in_files/execute_command
- * 在 DSH 无同名工具，由上述 DSH 内建/替代工具承担对应语义。
+ * create_directory / delete_file / execute_command 由 DSH write 与受控终端工具承担。
  */
 export const DEFAULT_AUTO_CHECKPOINT_TOOLS: readonly string[] = [
   'write',
@@ -91,6 +91,9 @@ export const DEFAULT_AUTO_CHECKPOINT_TOOLS: readonly string[] = [
   'grep',
   'glob',
   'delete_code',
+  'insert_code',
+  'list_files',
+  'search_in_files',
   'crop_image',
   'resize_image',
   'rotate_image',
@@ -117,9 +120,16 @@ export const DEFAULT_AUTO_CHECKPOINT_BEFORE_TOOLS: readonly string[] = ['bash', 
 
 /**
  * 默认「执行后」白名单（用户指定：只勾 写入后 + 应用差异后）：
- * write（写入后）、edit / str_replace_editor（应用差异后）。
+ * write / insert_code（写入后）、edit / str_replace_editor / search_in_files
+ * （应用差异或批量替换后）。
  */
-export const DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS: readonly string[] = ['write', 'edit', 'str_replace_editor']
+export const DEFAULT_AUTO_CHECKPOINT_AFTER_TOOLS: readonly string[] = [
+  'write',
+  'edit',
+  'str_replace_editor',
+  'insert_code',
+  'search_in_files',
+]
 
 const MESSAGE_KIND_SCHEMA = z.union(['user', 'model'] as const)
 

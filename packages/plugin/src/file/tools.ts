@@ -25,10 +25,10 @@ import { withProgressWriteLock } from '../workflows/domain/progress/progressWrit
 import {
   depsFromExec,
   readTargetText,
-  resolveTarget,
   writeTargetText,
   type ToolDeps,
 } from '../workflows/workspace.ts'
+import { resolveWorkspaceTarget } from './workspaceGuard.ts'
 
 /** 文件大小护栏（与老版 MAX_EDIT_FILE_BYTES 一致，5MB） */
 export const MAX_EDIT_FILE_BYTES = 5 * 1024 * 1024
@@ -104,7 +104,7 @@ async function readFileOrNotFound(
   deps: ToolDeps,
   relPath: string,
 ): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
-  const target = await resolveTarget(deps, relPath)
+  const { target } = await resolveWorkspaceTarget(deps, relPath)
   const info = await deps.fs.stat(target, deps.signal)
   if (info === undefined) {
     return { ok: false, error: `File not found: ${relPath}` }
@@ -180,7 +180,9 @@ async function deleteSingleFile(
       }
     }
 
-    const outcome = await writeTargetText(deps, await resolveTarget(deps, relPath), newContent, relPath)
+    // 写入前重新解析并再次做 containment 校验，防止读写之间路径别名被换到工作区外。
+    const { target } = await resolveWorkspaceTarget(deps, relPath)
+    const outcome = await writeTargetText(deps, target, newContent, relPath)
     const result: DeleteCodeFileResult = {
       path: relPath,
       success: true,

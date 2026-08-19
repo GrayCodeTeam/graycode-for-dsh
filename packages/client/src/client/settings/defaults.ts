@@ -5,7 +5,7 @@ export const AGENT_SCOPES: readonly AgentScope[] = ['roots', 'all', 'disabled']
 /** Kept for the generic field primitive; GrayCode does not expose diagnostics here. */
 export const DIAGNOSTIC_SEVERITIES: readonly { value: string; labelKey: string }[] = []
 
-/** DSH 版默认工具全集（矩阵目录，24 个）。 */
+/** DSH + Gray Code 兼容工具全集（存档触发矩阵目录）。 */
 export const DSH_TOOL_DEFAULTS: readonly string[] = [
   'write',
   'edit',
@@ -15,6 +15,9 @@ export const DSH_TOOL_DEFAULTS: readonly string[] = [
   'grep',
   'glob',
   'delete_code',
+  'insert_code',
+  'list_files',
+  'search_in_files',
   'crop_image',
   'resize_image',
   'rotate_image',
@@ -41,9 +44,16 @@ export const DSH_BEFORE_TOOL_DEFAULTS: readonly string[] = ['bash', 'pwsh', 'del
 
 /**
  * 默认「执行后」白名单（用户指定：只勾 写入后 + 应用差异后）：
- * write（写入后）、edit / str_replace_editor（应用差异后）。
+ * write / insert_code（写入后）、edit / str_replace_editor / search_in_files
+ * （应用差异或批量替换后）。
  */
-export const DSH_AFTER_TOOL_DEFAULTS: readonly string[] = ['write', 'edit', 'str_replace_editor']
+export const DSH_AFTER_TOOL_DEFAULTS: readonly string[] = [
+  'write',
+  'edit',
+  'str_replace_editor',
+  'insert_code',
+  'search_in_files',
+]
 
 export const DEFAULTS: GrayCodeConfig = {
   workflows: { dataRoot: '', documentRoot: '.graycode', agentScope: 'roots' },

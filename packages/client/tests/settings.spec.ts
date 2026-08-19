@@ -72,7 +72,7 @@ describe('shared settings layer: memory.enabled / checkpoints extensions', () =>
     })
     expect(DEFAULTS.checkpoints.beforeTools).toEqual([...DSH_BEFORE_TOOL_DEFAULTS])
     expect(DEFAULTS.checkpoints.afterTools).toEqual([...DSH_AFTER_TOOL_DEFAULTS])
-    expect(DSH_TOOL_DEFAULTS).toHaveLength(24)
+    expect(DSH_TOOL_DEFAULTS).toHaveLength(27)
   })
 
   it('resolves every new field path on the defaults snapshot', () => {

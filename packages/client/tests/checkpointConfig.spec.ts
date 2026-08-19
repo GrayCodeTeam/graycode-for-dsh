@@ -50,11 +50,11 @@ describe('checkpoint config defaults and normalization', () => {
     expect(DEFAULT_CHECKPOINT_CONFIG.modelToolsEnabled).toBe(true)
     expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.beforeMessages).toEqual(['user', 'model'])
     // The plugin default has the after-model slot off; tool lists are the
-    // selective defaults (before: 命令前/删除前; after: 写入后/差异后), not all 24.
+    // selective defaults (before: 命令前/删除前; after: 写入后/差异后), not the full catalog.
     expect(DEFAULT_CHECKPOINT_CONFIG.messageCheckpoint.afterMessages).toEqual([])
     expect(DEFAULT_CHECKPOINT_CONFIG.beforeTools).toEqual([...DSH_BEFORE_TOOL_DEFAULTS])
     expect(DEFAULT_CHECKPOINT_CONFIG.afterTools).toEqual([...DSH_AFTER_TOOL_DEFAULTS])
-    expect(DSH_TOOL_DEFAULTS).toHaveLength(24)
+    expect(DSH_TOOL_DEFAULTS).toHaveLength(27)
   })
 
   it('normalizes missing / hostile snapshots to defaults (legacy config)', () => {
