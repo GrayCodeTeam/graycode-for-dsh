@@ -1,7 +1,7 @@
 # 只读对照审查：memory 与 checkpoints 迁移实现 vs Gray Code 1.5.4
 
 > 审查方式：只读。新实现 `packages/plugin/src/memory|checkpoints/**`（DSH 插件）与旧实现
-> `A:\api\Gray-Code-main\backend\modules\memory|checkpoint\**`、`backend\tools\memory\**` 逐文件对照；
+> `<gray-code-root>\backend\modules\memory|checkpoint\**`、`backend\tools\memory\**` 逐文件对照；
 > 存储格式锚点 `docs/legacy-format.md` §2/§3。审查基于**当前快照**，未修改任何 src/test 与 docs 文件。
 
 ---

@@ -7,7 +7,7 @@
 
 ## 1. 审查范围
 
-**新实现（当前工作区 `a:\api\graycode-for-dsh`）**
+**新实现（当前工作区 `<repo-root>`）**
 
 | 模块 | 文件 |
 | --- | --- |
@@ -16,14 +16,14 @@
 | persona/agentScope | `packages/plugin/src/persona.ts`、`agentScope.ts`、`shared/regexGuard.ts`（+ `tests/persona.spec.ts`、`tests/agentScope.spec.ts`） |
 | 约束文档 | `docs/PLAN_V2.md`（§6.4/§6.5/§6.6/§P3E/§P3F）、`docs/ADR-0002.md`、`packages/plugin/src/prompt/README.md` |
 
-**旧实现（只读参考 `A:\api\Gray-Code-main`，Gray Code 1.5.4）**
+**旧实现（只读参考 `<gray-code-root>`，Gray Code 1.5.4）**
 
 | 模块 | 文件 |
 | --- | --- |
 | 分支架构 | `checkpoint-history-branch-architecture.plan.md`（BR/TREE/BCP 各阶段 + 已确认业务决策 L2019-2035） |
 | 分支实现 | `backend/modules/conversation/branch/{types.ts, BranchGraph.ts, BranchGraphRepository.ts, branchServiceCore.ts, BranchService.ts, branchCandidateService.ts, branchServiceTypes.ts}`；前端 `frontend/src/components/message/{BranchSwitcherBar.vue, BranchTreePanel.vue}`、`stores/chat/branchActions.ts` |
 | 提示词实现 | `backend/modules/prompt/{PromptManager.ts, promptContextCache.ts, contextSections.ts, templatePlaceholders.ts}`；`backend/modules/settings/{promptModes.ts, PromptSettingsService.ts, types/promptTypes.ts}`；`backend/modules/api/chat/services/ToolIterationLoopService.ts`（applyPromptContextThoughtPolicy L2175-2189）、`backend/modules/config/configs/base.ts`（sendHistoryThoughts）；前端 `PromptSettings.vue`、`prompt/ImportModesDialog.vue` |
-| regexGuard | `A:\api\Gray-Code-main\shared\regexGuard.ts` + `backend/core/services/regexGuard.ts`（re-export 壳） |
+| regexGuard | `<gray-code-root>\shared\regexGuard.ts` + `backend/core/services/regexGuard.ts`（re-export 壳） |
 
 ## 2. 问题清单
 
@@ -96,7 +96,7 @@
 
 ## 4. 一致项摘要（已核对通过）
 
-- **regexGuard**：`packages/plugin/src/shared/regexGuard.ts` 与旧 `A:\api\Gray-Code-main\shared\regexGuard.ts` **逐字节一致**（已执行 diff 验证，IDENTICAL）；旧 `backend/core/services/regexGuard.ts` 为 re-export 壳，新旧导出面（MAX_REGEX_SOURCE_LENGTH / hasNestedQuantifiedGroups / validateRegexPattern）一致；已知 ReDoS 盲区（无分组连续量词）两侧相同。
+- **regexGuard**：`packages/plugin/src/shared/regexGuard.ts` 与旧 `<gray-code-root>\shared\regexGuard.ts` **逐字节一致**（已执行 diff 验证，IDENTICAL）；旧 `backend/core/services/regexGuard.ts` 为 re-export 壳，新旧导出面（MAX_REGEX_SOURCE_LENGTH / hasNestedQuantifiedGroups / validateRegexPattern）一致；已知 ReDoS 盲区（无分组连续量词）两侧相同。
 - **agentScope**：`roots | all | disabled` 三档、默认 `roots`（agentScope.ts:22）与 PLAN_V2 §6.5 L481 一致；`agent/created`/`agent/disposed` 生命周期 + 后装 backfill + scoped 注册 shadow 全局 + agent 销毁自动卸载（agentScope.ts:86-107）与 §6.5 L480、ADR-0002 §3 一致。
 - **persona**：`PERSONA_ORDER=0` 取自 `@deepseek-ai/dsh-system-prompt`（persona.ts:17），`graycode:prompt` PROMPT_ORDER=1 紧随其后（promptInjector.ts:42），与 ADR-0002 §3（PERSONA_SECTION/ORDER）一致；scoped section + variable 注册、HMR 幂等卸载实现与 persona/prompt README 描述一致。
 - **分支 sidecar 核心字段覆盖**：`rootSessionId↔rootNodeId`、`activeSessionId↔activeTailNodeId`、`parentSessionId/boundary↔activeChildId 谱系`、`label/deletedAt/createdAt`、`workspaceSnapshotId↔workspaceCheckpointId`（字段级映射）；对话正文不落 sidecar 属 P3E 设计（PLAN_V2 L941）。

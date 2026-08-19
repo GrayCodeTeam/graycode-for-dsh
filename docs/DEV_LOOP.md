@@ -9,7 +9,7 @@ DSH web profile 把 `@graycode/dsh` 及 plugin/client 三个包以**目录链接
 
 ```
 %USERPROFILE%\.dsh\profiles\web\
-├── _dev-link/                  # junction → A:\api\graycode-for-dsh（仓库根）
+├── _dev-link/                  # junction → <repo-root>（仓库根）
 └── node_modules\@graycode\
     ├── dsh          → _dev-link/scripts/.dev-bundle   （bundle 壳，dsh.bundle.patch）
     ├── dsh-plugin   → _dev-link/packages/plugin       （host 插件源码）
@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup-dev-profile.
 ## 为什么不用 file:/link: 绝对路径
 
 pnpm（v10）在 Windows 上对 `file:A:/...` / `link:A:/...` 这类盘符绝对路径有拼接 bug
-（`path.join` 不识别盘符，目标变成 `profiles\web\A:\api\...`）。tarball 走解包路径不受
+（`path.join` 不识别盘符，目标会错误地拼入类似 `profiles\web\<absolute-path>` 的内容）。tarball 走解包路径不受
 影响；目录链接必须经 profile 内 junction（`_dev-link`）用相对路径间接指向仓库。
 
 ## 切回正式安装（发布/验证用）

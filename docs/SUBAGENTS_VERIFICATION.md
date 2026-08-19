@@ -2,8 +2,8 @@
 
 > 探针测试：`packages/plugin/tests/spike/subagents.probe.spec.ts`（15 用例 / 1 skipped，全部通过，零网络零模型）
 > 依据包：`node_modules/@deepseek-ai/dsh-subagent@0.1.0-rc.6`（本仓库 packages/plugin devDependencies，实测）
-> 走查源码：`A:\api\deepseek-harness\packages\subagent\**`（seam / tool 族）与 `packages\bundle\base\cordis.patch.yml`（base 挂载行）
-> 老 Gray 对照：`A:\api\Gray-Code-main\backend\tools\subagents\`（`subagents.ts`、`agentSendMessage.ts`）、`backend\core\services\agentMailbox.ts`
+> 走查源码：`<deepseek-harness-root>\packages\subagent\**`（seam / tool 族）与 `packages\bundle\base\cordis.patch.yml`（base 挂载行）
+> 老 Gray 对照：`<gray-code-root>\backend\tools\subagents\`（`subagents.ts`、`agentSendMessage.ts`）、`backend\core\services\agentMailbox.ts`
 >
 > 本文档是独立的能力域验证（agent 编排），与 `docs/PROVIDER_MATRIX.md`（LLM 渠道矩阵）分开存放；
 > 两文档共用同一套「探针测试 + 包内代码走查」证据风格。
@@ -42,7 +42,7 @@
 
 ### 1.2 base 层已挂载的 subagent 行族（走查证据）
 
-`A:\api\deepseek-harness\packages\bundle\base\cordis.patch.yml` L292-333 挂载以下行；
+`<deepseek-harness-root>\packages\bundle\base\cordis.patch.yml` L292-333 挂载以下行；
 `packages/bundle/{base,web-app,headless}/package.json` 均声明对应依赖：
 
 | 行 id | 包名 | 注册内容 |

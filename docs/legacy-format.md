@@ -1,9 +1,9 @@
 # Gray Code 1.5.4 本地数据存储格式规范
 
 > 用途：为 Phase 5「旧数据迁移器」提供格式依据。
-> 来源：只读调研 `A:\api\Gray-Code-main`（VS Code 扩展工程，1.5.4）。
+> 来源：只读调研 `<gray-code-root>`（VS Code 扩展工程，1.5.4）。
 > 约定：文中所有字段均来自实际读到的源码/真实样本；无法从代码确认的字段标注「未确认」。
-> 来源路径采用仓库相对路径 `backend/modules/...` 或根目录文件，均指 `A:\api\Gray-Code-main` 下。
+> 来源路径采用仓库相对路径 `backend/modules/...` 或根目录文件，均指 `<gray-code-root>` 下。
 
 ---
 
@@ -607,7 +607,7 @@ mcpServers: number, skills: number }, errors: string[] }`；默认不覆盖既�
 
 ### 5.1 结论：仓库内无会话/存档/记忆真实数据
 
-对 `A:\api\Gray-Code-main` 全仓递归检索未发现以下数据目录（find_files 全零结果）：
+对 `<gray-code-root>` 全仓递归检索未发现以下数据目录（find_files 全零结果）：
 `conversations/`、`snapshots/`、`checkpoints/`、`memory-workspaces/`、`cp_*/`、`LOG.txt`。
 
 - 真实扩展数据位于用户 VS Code `globalStorage`（本机 `%APPDATA%\Code\User\globalStorage\...`），不在仓库内。
@@ -627,7 +627,7 @@ mcpServers: number, skills: number }, errors: string[] }`；默认不覆盖既�
 
 ## 6. 来源文件索引
 
-| 领域 | 文件（A:\api\Gray-Code-main 下） | 覆盖内容 |
+| 领域 | 文件（`<gray-code-root>` 下） | 覆盖内容 |
 |---|---|---|
 | 会话 | `backend/modules/conversation/fileSystemStorageAdapter.ts` | 目录布局/路径规则/分段写入/损坏降级 |
 | 会话 | `backend/modules/conversation/storageTypes.ts` / `storageIds.ts` / `storage.ts` | IStorageAdapter 契约/ID 白名单 |

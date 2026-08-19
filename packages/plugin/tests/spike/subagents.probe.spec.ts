@@ -17,7 +17,7 @@
  *    - 深度语义：resolveChildDepth（parent 深度 + 1 > maxDepth → SubagentDepthError），
  *      持久化 header 为单调下限（delegationDepthOf = max(header, runtime)）。
  * 2. 工具族（subagent / subagent_fork / send_message / interrupt_agent / list_agents /
- *    report）由 DSH base 层 bundle 挂载（A:\api\deepseek-harness\packages\bundle\base\
+ *    report）由 DSH base 层 bundle 挂载（<deepseek-harness-root>\packages\bundle\base\
  *    cordis.patch.yml 的 subagent 行族），本仓库的 @graycode/dsh bundle 是 base 之上的
  *    增量层，不重复挂载。探针把 base 行族钉为常量表（对照 harness 源码走查），并守卫
  *    @graycode/dsh 的 cordis.patch.yml 不复制这些行（防止未来重复挂载导致分层漂移）。

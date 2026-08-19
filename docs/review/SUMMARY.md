@@ -8,7 +8,7 @@
 > - `docs/review/audit-bugs.md`（R4，静态 bug 猎人）
 > - `docs/review/audit-tests.md`（R5，测试质量）
 > - 并行任务完成消息：A（格式调研）、B（client 包）、C（P0-08 改造）、D（P3D 决策门）、F-b（fixture）
-> - 规划基线：`docs/PLAN_V2.md`；旧代码基线：`A:\api\Gray-Code-main`（Gray Code 1.5.4）
+> - 规划基线：`docs/PLAN_V2.md`；旧代码基线：`<gray-code-root>`（Gray Code 1.5.4）
 
 ---
 
