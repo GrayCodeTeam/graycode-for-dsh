@@ -86,6 +86,13 @@ import {
   graycodeSubagentBackDictionaries,
   graycodeSubagentBackJaPlaceholder,
 } from './subagentBack/locales.ts'
+import { SubagentMonitorButton, SubagentMonitorPage, type SubagentMonitorInjected } from './subagentMonitor/SubagentMonitor.tsx'
+import { SubagentMonitorController } from './subagentMonitor/controller.ts'
+import {
+  GRAYCODE_SUBAGENT_MONITOR_NS,
+  graycodeSubagentMonitorDictionaries,
+  graycodeSubagentMonitorJaPlaceholder,
+} from './subagentMonitor/locales.ts'
 import { TurnTailActions, type TurnTailActionsInjected } from './rerollEdit/TurnTailActions.tsx'
 import { EditUserAction, type EditUserActionInjected } from './rerollEdit/EditUserAction.tsx'
 import { createEditActionDefinition, EDIT_ACTION_KIND } from './rerollEdit/editNode.ts'
@@ -254,6 +261,10 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => disposeSubagentBack)
   const disposeSubagentBackJa = ctx.locale.register(GRAYCODE_SUBAGENT_BACK_NS, 'ja', graycodeSubagentBackJaPlaceholder)
   ctx.effect(() => disposeSubagentBackJa)
+  const disposeSubagentMonitor = ctx.locale.register(GRAYCODE_SUBAGENT_MONITOR_NS, graycodeSubagentMonitorDictionaries)
+  ctx.effect(() => disposeSubagentMonitor)
+  const disposeSubagentMonitorJa = ctx.locale.register(GRAYCODE_SUBAGENT_MONITOR_NS, 'ja', graycodeSubagentMonitorJaPlaceholder)
+  ctx.effect(() => disposeSubagentMonitorJa)
 
   // F1/F2 reroll & edit-turn locale namespace (own ns, same pattern as the
   // other surfaces).
@@ -276,6 +287,43 @@ export function apply(ctx: ClientContext): void {
     ctx.slots.register(
       { name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS },
       GrayCodeBadge,
+    ))
+
+  const subagentMonitor = new SubagentMonitorController()
+  const monitorSessions = (): {
+    refreshSubagents(parentSessionId: string): Promise<void>
+    setSubagentCatalogOpen(parentSessionId: string, open: boolean): void
+  } | undefined => ctx.get('sessions') as {
+    refreshSubagents(parentSessionId: string): Promise<void>
+    setSubagentCatalogOpen(parentSessionId: string, open: boolean): void
+  } | undefined
+  const monitorInjected = (): SubagentMonitorInjected => ({
+    controller: subagentMonitor,
+    refresh: (parentSessionId) => {
+      try {
+        void monitorSessions()?.refreshSubagents(parentSessionId).catch(() => {})
+      } catch {
+        /* host without the catalog service: monitor remains an empty page */
+      }
+    },
+    setCatalogOpen: (parentSessionId, open) => {
+      try {
+        monitorSessions()?.setSubagentCatalogOpen(parentSessionId, open)
+      } catch {
+        /* lifecycle races degrade to a stale/empty catalog */
+      }
+    },
+  })
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'graycode.subagent-monitor',
+        order: 100,
+        locale: GRAYCODE_SUBAGENT_MONITOR_NS,
+        inject: monitorInjected,
+      },
+      SubagentMonitorPage,
     ))
 
   // S1: "back to main session" header action inside the subagent viewer. The
@@ -313,6 +361,20 @@ export function apply(ctx: ClientContext): void {
         }),
       },
       SubagentBackButton,
+    ))
+
+  // Dedicated monitor page: opens in the frame overlay and reads the live
+  // subagent catalog without navigating away from the current conversation.
+  ctx.slots.inject('conversation.session.header.actions', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.session.header.actions',
+        id: 'graycode.subagent-monitor.action',
+        order: 25,
+        locale: GRAYCODE_SUBAGENT_MONITOR_NS,
+        inject: () => ({ controller: subagentMonitor }),
+      },
+      SubagentMonitorButton,
     ))
 
   // Gray Code settings panel: native settings section (slot `settings.section`,

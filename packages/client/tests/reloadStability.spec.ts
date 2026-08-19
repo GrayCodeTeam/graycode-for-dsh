@@ -254,7 +254,7 @@ describe('refresh replay consistency — memory management surface', () => {
 // HMR mount/unmount idempotency of the client entry (apply)
 // ---------------------------------------------------------------------------
 
-/** The sixteen locale namespaces the entry registers (dict + ja placeholder each). */
+/** Locale namespaces the entry registers (dict + ja placeholder each). */
 const EXPECTED_LOCALE_NS: readonly string[] = [
   GRAYCODE_NS,
   GRAYCODE_WORKFLOW_NS,
@@ -269,6 +269,7 @@ const EXPECTED_LOCALE_NS: readonly string[] = [
   'graycode.notifications',
   'graycode.scopeMap',
   'graycode.subagentBack',
+  'graycode.subagentMonitor',
   'graycode.rerollEdit',
   'graycode.branchSwitch',
   'graycode.summarize',
@@ -482,19 +483,19 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     const harness = createFiberHarness()
     apply(harness.ctx)
     await flushMicrotasks()
-    // Seven injections: the shell.overlay marker, the settings.section entry,
+    // Nine injections: the shell.overlay marker + subagent monitor page, the settings.section entry,
     // the subagent back-to-main header action, the F2 edit pencil keyed node
     // seat (conversation.chat.node), the F1 turn-tail composite
     // (conversation.chat.turnTail), the session-level branch switcher header
     // action (conversation.session.header.actions) and the summarize header
-    // action (conversation.session.header.actions).
-    expect(harness.overlayEntries).toHaveLength(7)
+    // action (conversation.session.header.actions), plus the monitor header action.
+    expect(harness.overlayEntries).toHaveLength(9)
     // Declaration teardown calls the inject disposer (apply() leaves it to the
     // declaration lifetime by design — see the index.ts comment).
     const injectDisposer = harness.slotInject.mock.results[0]?.value as () => void
     expect(typeof injectDisposer).toBe('function')
     injectDisposer()
-    expect(harness.overlayEntries).toHaveLength(6)
+    expect(harness.overlayEntries).toHaveLength(8)
 
     // Fiber unload alone does NOT remove the injection while the declaration
     // lives — documented declaration-lifetime semantics.
@@ -503,6 +504,6 @@ describe('HMR mount/unmount idempotency of apply()', () => {
     await flushMicrotasks()
     other.unload()
     expect(other.definitions).toHaveLength(0)
-    expect(other.overlayEntries).toHaveLength(7)
+    expect(other.overlayEntries).toHaveLength(9)
   })
 })

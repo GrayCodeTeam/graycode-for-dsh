@@ -69,14 +69,14 @@ describe('@graycode/dsh-client browser half apply()', () => {
   it('registers every Phase 4 locale namespace (zh/en dict + ja placeholder each)', () => {
     const { ctx, localeRegister } = makeFakeCtx()
     apply(ctx)
-    // Seventeen namespaces × two forms (typed zh/en dictionaries + untyped ja
-    // placeholder) = thirty-four registrations. Covers the base `graycode` ns,
+    // Eighteen namespaces × two forms (typed zh/en dictionaries + untyped ja
+    // placeholder) = thirty-six registrations. Covers the base `graycode` ns,
     // the workflow node ns, all six Phase 4 management surfaces, the
     // activity heatmap surface (C6), the notifications surface (C4), the
     // migration scope-map surface (D-1/D-2), the subagent back-to-main
     // action (S1), the reroll/edit-turn actions (F1/F2), the branch-candidate
     // switcher, the summarize action and the settings panel ns.
-    expect(localeRegister).toHaveBeenCalledTimes(34)
+    expect(localeRegister).toHaveBeenCalledTimes(36)
     const namespaces = localeRegister.mock.calls.map((call) => call[0])
     for (const ns of [
       GRAYCODE_NS,
@@ -92,6 +92,7 @@ describe('@graycode/dsh-client browser half apply()', () => {
       'graycode.notifications',
       'graycode.scopeMap',
       'graycode.subagentBack',
+      'graycode.subagentMonitor',
       'graycode.rerollEdit',
       'graycode.branchSwitch',
       'graycode.summarize',
@@ -124,9 +125,9 @@ describe('@graycode/dsh-client browser half apply()', () => {
     const { ctx, conversationEventsRegister, effect } = makeFakeCtx()
     apply(ctx)
     // One ctx.effect per registration disposer: the two Definitions (workflow
-    // + editAction) plus every locale namespace (17 × dict + ja placeholder)
-    // plus the connection/reset refresh subscription = 2 + 34 + 1.
-    expect(effect).toHaveBeenCalledTimes(37)
+    // + editAction) plus every locale namespace (18 × dict + ja placeholder)
+    // plus the connection/reset refresh subscription = 2 + 36 + 1.
+    expect(effect).toHaveBeenCalledTimes(39)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
     // The first effect body returns the Definition registry disposer, so
@@ -157,6 +158,18 @@ describe('@graycode/dsh-client browser half apply()', () => {
       expect.objectContaining({ name: 'shell.overlay', id: 'graycode.loaded', locale: GRAYCODE_NS }),
       expect.any(Function),
     )
+  })
+
+  it('registers a dedicated subagent monitor overlay and header action', () => {
+    const { ctx, slotRegister } = makeFakeCtx()
+    apply(ctx)
+    const entries = slotRegister.mock.calls.map(call => call[0] as { name?: string; id?: string; order?: number })
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: 'shell.overlay', id: 'graycode.subagent-monitor', order: 100,
+    }))
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: 'conversation.session.header.actions', id: 'graycode.subagent-monitor.action', order: 25,
+    }))
   })
 
   it('registers the settings.graycode locale namespace (typed zh/en + ja placeholder)', () => {
