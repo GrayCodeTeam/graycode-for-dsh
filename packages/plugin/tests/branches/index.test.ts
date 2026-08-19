@@ -17,7 +17,7 @@ describe('branches plugin initialization lifecycle', () => {
       mounted.push(await ctx.plugin(SessionStore))
       mounted.push(await ctx.plugin(AgentRegistry))
       const remote = new GrayRemoteService(ctx)
-      mounted.push(await ctx.plugin(branches, { dataRoot, agentScope: 'disabled' }))
+      mounted.push(await ctx.plugin(branches, { dataRoot, agentScope: 'disabled', retentionDays: 30 }))
 
       const result = await remote.invoke('branches', 'list', {})
       expect(result).toEqual({ ok: true, value: { items: [], total: 0, nextCursor: undefined } })

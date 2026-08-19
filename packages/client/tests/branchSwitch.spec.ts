@@ -82,9 +82,9 @@ describe('readBranchGroup (branches/list narrowing)', () => {
 describe('switchBranchSession', () => {
   it('updates the active pointer before opening the target session', async () => {
     const calls: Array<{ namespace: string; method: string; args?: Record<string, unknown> }> = []
-    const remote: GrayRemoteInvoke = async (namespace, method, args) => {
+    const remote: GrayRemoteInvoke = async <T>(namespace: string, method: string, args?: Record<string, unknown>) => {
       calls.push({ namespace, method, args })
-      return { ok: true, value: {} }
+      return { ok: true, value: {} as T }
     }
     const open = vi.fn()
     const parsed = readBranchGroup(group({ candidates: [candidate({ sessionId: 's-a' }), candidate({ sessionId: 's-b' })] }))!
