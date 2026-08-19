@@ -126,13 +126,14 @@ describe('@graycode/dsh-client browser half apply()', () => {
     apply(ctx)
     // One ctx.effect per registration disposer: the two Definitions (workflow
     // + editAction) plus every locale namespace (18 × dict + ja placeholder)
-    // plus the connection/reset refresh subscription = 2 + 36 + 1.
-    expect(effect).toHaveBeenCalledTimes(39)
+    // plus the connection/reset refresh subscription and the persisted
+    // background appearance listener = 2 + 36 + 1 + 1.
+    expect(effect).toHaveBeenCalledTimes(40)
     const disposer = conversationEventsRegister.mock.results[0]?.value
     expect(typeof disposer).toBe('function')
-    // The first effect body returns the Definition registry disposer, so
-    // fiber unload runs it.
-    expect(effect.mock.calls[0]?.[0]()).toBe(disposer)
+    // Background appearance owns the first effect; the workflow Definition
+    // follows it and returns the registry disposer so fiber unload runs it.
+    expect(effect.mock.calls[1]?.[0]()).toBe(disposer)
   })
 
   it('registers the same Definition shape the factory produces', () => {

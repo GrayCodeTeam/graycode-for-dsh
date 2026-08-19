@@ -341,9 +341,9 @@ describe('real settings surface', () => {
     expect(DEFAULTS.images.apiKey).toBe('')
   })
 
-  it('uses nine focused native-settings categories', () => {
+  it('uses ten focused native-settings categories', () => {
     expect(CATEGORIES.map(category => category.id)).toEqual([
-      'checkpoints', 'memory', 'workflows', 'activity', 'image', 'subagents', 'prompt', 'tools', 'advanced',
+      'checkpoints', 'memory', 'workflows', 'activity', 'image', 'subagents', 'prompt', 'tools', 'appearance', 'advanced',
     ])
     expect(new Set(CATEGORIES.map(category => category.id)).size).toBe(CATEGORIES.length)
     for (const category of CATEGORIES) expect(zh).toHaveProperty(category.labelKey)

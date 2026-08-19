@@ -26,6 +26,7 @@ import { createRemoteMemoryTransport } from '../memoryManage/api.ts'
 import { normalizeCheckpointConfig } from '../checkpointList/configModel.ts'
 import type { GrayCodeCheckpointConfigLocaleKey } from '../checkpointList/locales.ts'
 import { PromptModeManager } from './promptModes/PromptModeManager.tsx'
+import { BackgroundAppearanceSection } from './BackgroundAppearanceSection.tsx'
 
 export interface GrayCodePageProps {
   t: GcTranslate
@@ -345,6 +346,8 @@ const ToolsPage: GrayCodePage = ({ t, config, onChange }) => (
   </div>
 )
 
+const AppearancePage: GrayCodePage = ({ t }) => <BackgroundAppearanceSection t={t} />
+
 const AdvancedPage: GrayCodePage = ({ t, config, onChange, onReset }) => {
   const dataRoots = ['workflows', 'memory', 'checkpoints', 'branches', 'prompt', 'migration', 'stagedDiff', 'activity'] as const
   const migrationOn = config.migration.enabled
@@ -403,5 +406,6 @@ export const CATEGORIES: readonly GrayCodeCategory[] = [
   { id: 'subagents', labelKey: 'tabs.subagents', icon: <IconUserOutline16 size={16} />, page: SubagentsPage },
   { id: 'prompt', labelKey: 'tabs.prompt', icon: <IconEnhanceOutline16 size={16} />, page: PromptPage },
   { id: 'tools', labelKey: 'tabs.tools', icon: <IconCodeOutline16 size={16} />, page: ToolsPage },
+  { id: 'appearance', labelKey: 'tabs.appearance', icon: <IconSparkle16 size={16} />, page: AppearancePage },
   { id: 'advanced', labelKey: 'tabs.advanced', icon: <IconSettingsOutline16 size={16} />, page: AdvancedPage },
 ]

@@ -109,6 +109,7 @@ import {
   graycodeRerollEditJaPlaceholder,
 } from './rerollEdit/locales.ts'
 import { installSummarize } from './summarize/install.ts'
+import { installBackgroundAppearance } from './appearance/background.ts'
 
 /**
  * Chain routing for the F1/F2 turn-tail seat: the `conversation.chat.turnTail`
@@ -192,6 +193,7 @@ export const inject = ['slots', 'locale', 'conversationEvents', 'connection']
  * @param ctx - client cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => installBackgroundAppearance())
   // Workflow conversation node Definition (P4-01): event → business Context →
   // `graycode.workflow` chat node. ctx.effect ties the disposer to the fiber
   // (fiber unload runs disposers in reverse registration order).
