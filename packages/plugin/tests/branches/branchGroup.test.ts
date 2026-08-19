@@ -223,6 +223,25 @@ describe('deleteCandidate', () => {
     const error = thrown(() => deleteCandidate(activated, 'child-1'))
     expect((error as BranchError).code).toBe(BranchErrorCode.INVALID_INPUT)
   })
+
+  it('cascades over descendants, preserves timestamps, and is idempotent', () => {
+    const group = makeGroup()
+    const parent = addCandidate(group, { sessionId: 'parent', parentSessionId: 'root-1', kind: 'manual' })
+    const child = addCandidate(parent, { sessionId: 'child', parentSessionId: 'parent', kind: 'manual' })
+    const deleted = deleteCandidate(child, 'parent', undefined, 42)
+    expect(deleted.candidates.find(c => c.sessionId === 'parent')?.deletedAt).toBe(42)
+    expect(deleted.candidates.find(c => c.sessionId === 'child')?.deletedAt).toBe(42)
+    expect(deleteCandidate(deleted, 'parent', undefined, 99)).toBe(deleted)
+  })
+
+  it('rejects deleting an ancestor of the active candidate', () => {
+    const group = makeGroup()
+    const parent = addCandidate(group, { sessionId: 'parent', parentSessionId: 'root-1', kind: 'manual' })
+    const child = addCandidate(parent, { sessionId: 'child', parentSessionId: 'parent', kind: 'manual' })
+    const active = activateCandidate(child, 'child')
+    const error = thrown(() => deleteCandidate(active, 'parent'))
+    expect((error as BranchError).code).toBe(BranchErrorCode.INVALID_INPUT)
+  })
 })
 
 describe('restoreCandidate', () => {
@@ -239,6 +258,15 @@ describe('restoreCandidate', () => {
     const group = makeGroup()
     expect(restoreCandidate(group, 'root-1')).toBe(group)
     expect(group.revision).toBe(1)
+  })
+
+  it('restores the complete descendant subtree', () => {
+    const group = makeGroup()
+    const parent = addCandidate(group, { sessionId: 'parent', parentSessionId: 'root-1', kind: 'manual' })
+    const child = addCandidate(parent, { sessionId: 'child', parentSessionId: 'parent', kind: 'manual' })
+    const restored = restoreCandidate(deleteCandidate(child, 'parent', undefined, 42), 'parent')
+    expect(restored.candidates.find(c => c.sessionId === 'parent')?.deletedAt).toBeUndefined()
+    expect(restored.candidates.find(c => c.sessionId === 'child')?.deletedAt).toBeUndefined()
   })
 })
 

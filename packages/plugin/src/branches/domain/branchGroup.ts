@@ -167,17 +167,20 @@ export function deleteCandidate(
             BranchErrorCode.INVALID_INPUT
         );
     }
-    if (group.activeSessionId === sessionId) {
+    const subtree = collectCandidateSubtree(group, sessionId);
+    if (subtree.has(group.activeSessionId)) {
         throw new BranchError(
-            'cannot delete the active candidate; switch first',
+            'cannot delete a candidate subtree containing the active candidate; switch first',
             BranchErrorCode.INVALID_INPUT
         );
     }
     const timestamp = deletedAt ?? Date.now();
+    const changed = group.candidates.some(c => subtree.has(c.sessionId) && c.deletedAt === undefined);
+    if (!changed) return group;
     return {
         ...group,
         candidates: group.candidates.map(c =>
-            c.sessionId === sessionId ? { ...c, deletedAt: timestamp } : c
+            subtree.has(c.sessionId) && c.deletedAt === undefined ? { ...c, deletedAt: timestamp } : c
         ),
         revision: group.revision + 1,
     };
@@ -191,15 +194,39 @@ export function restoreCandidate(
 ): GrayBranchGroup {
     assertRevision(group, expectedRevision);
     const candidate = getCandidate(group, sessionId);
-    if (candidate.deletedAt === undefined) return group;
-    const { deletedAt: _deletedAt, ...rest } = candidate;
+    const subtree = collectCandidateSubtree(group, sessionId);
+    if (candidate.deletedAt === undefined && !group.candidates.some(c => subtree.has(c.sessionId) && c.deletedAt !== undefined)) {
+        return group;
+    }
     return {
         ...group,
-        candidates: group.candidates.map(c =>
-            c.sessionId === sessionId ? { ...rest } : c
-        ),
+        candidates: group.candidates.map(c => {
+            if (!subtree.has(c.sessionId) || c.deletedAt === undefined) return c;
+            const { deletedAt: _deletedAt, ...rest } = c;
+            return rest;
+        }),
         revision: group.revision + 1,
     };
+}
+
+/** 收集一个候选及其全部后代（parentSessionId 邻接，防御循环/乱序 sidecar）。 */
+function collectCandidateSubtree(group: GrayBranchGroup, sessionId: string): Set<string> {
+    const subtree = new Set<string>([sessionId]);
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const candidate of group.candidates) {
+            if (
+                candidate.parentSessionId !== undefined &&
+                subtree.has(candidate.parentSessionId) &&
+                !subtree.has(candidate.sessionId)
+            ) {
+                subtree.add(candidate.sessionId);
+                changed = true;
+            }
+        }
+    }
+    return subtree;
 }
 
 /** 更新候选显示名。返回新组。 */
