@@ -1,8 +1,8 @@
 /**
- * Workflow tool registry — client half of the Design/Progress/Review workflow
+ * Workflow tool registry — client half of the Design/Plan/Progress/Review workflow
  * surface (P4-01).
  *
- * The 12 Gray workflow tools are owned by the host-side workflows plugin
+ * The 14 Gray workflow tools are owned by the host-side workflows plugin
  * (`packages/plugin/src/workflows/`). The client never re-implements them; it
  * only needs their stable names to recognise their `tool/call` events in the
  * session log and to classify each call into a display family.
@@ -11,10 +11,12 @@
 /** Definition kind (and location-data key) owned by the workflow node. */
 export const WORKFLOW_KIND = 'graycode.workflow'
 
-/** The 12 Gray workflow tools (mirrors packages/plugin/src/workflows/index.ts). */
+/** The 14 Gray workflow tools (mirrors packages/plugin/src/workflows/index.ts). */
 export const WORKFLOW_TOOLS = [
   'create_design',
   'update_design',
+  'create_plan',
+  'update_plan',
   'create_progress',
   'update_progress',
   'record_progress_milestone',
@@ -31,7 +33,7 @@ export const WORKFLOW_TOOLS = [
 export type WorkflowToolName = (typeof WORKFLOW_TOOLS)[number]
 
 /** Display family of a workflow tool (drives the card badge and copy). */
-export type WorkflowFamily = 'design' | 'progress' | 'review'
+export type WorkflowFamily = 'design' | 'plan' | 'progress' | 'review'
 
 /** O(1) membership check (a ReadonlySet over the const tuple). */
 const WORKFLOW_TOOL_SET: ReadonlySet<string> = new Set<string>(WORKFLOW_TOOLS)
@@ -48,6 +50,8 @@ export function isWorkflowToolName(name: string): boolean {
 export const WORKFLOW_TOOL_FAMILY: Readonly<Record<WorkflowToolName, WorkflowFamily>> = {
   create_design: 'design',
   update_design: 'design',
+  create_plan: 'plan',
+  update_plan: 'plan',
   create_progress: 'progress',
   update_progress: 'progress',
   record_progress_milestone: 'progress',

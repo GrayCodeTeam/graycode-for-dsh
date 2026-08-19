@@ -118,8 +118,8 @@ function contextOf(id: string, state: WorkflowNodeState | undefined, start?: Wor
 // ---------------------------------------------------------------------------
 
 describe('workflow tool recognition', () => {
-  it('recognises all 12 workflow tool names', () => {
-    expect(WORKFLOW_TOOLS).toHaveLength(12)
+  it('recognises all 14 workflow tool names', () => {
+    expect(WORKFLOW_TOOLS).toHaveLength(14)
     for (const name of WORKFLOW_TOOLS) {
       expect(isWorkflowToolName(name), name).toBe(true)
     }
@@ -134,6 +134,8 @@ describe('workflow tool recognition', () => {
   it('classifies every tool into its family', () => {
     expect(workflowToolFamily('create_design')).toBe('design')
     expect(workflowToolFamily('update_design')).toBe('design')
+    expect(workflowToolFamily('create_plan')).toBe('plan')
+    expect(workflowToolFamily('update_plan')).toBe('plan')
     expect(workflowToolFamily('create_progress')).toBe('progress')
     expect(workflowToolFamily('validate_review_document')).toBe('review')
     expect(workflowToolFamily('unknown_tool')).toBeNull()
@@ -656,7 +658,7 @@ describe('graycode.workflow locale dictionaries', () => {
     for (const name of WORKFLOW_TOOLS) {
       expect(en[`tool.${name}`]).toBeDefined()
     }
-    for (const family of ['design', 'progress', 'review'] as const) {
+    for (const family of ['design', 'plan', 'progress', 'review'] as const) {
       expect(en[`family.${family}`]).toBeDefined()
     }
     for (const status of ['draft', 'active', 'completed', 'failed', 'cancelled'] as const) {

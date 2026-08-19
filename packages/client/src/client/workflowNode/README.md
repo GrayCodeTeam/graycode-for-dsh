@@ -116,7 +116,7 @@ in `package.json` `dsh.client.inject`).
 
 ## Host-side recommendation (packages/plugin — separate task)
 
-The 12 workflow tools should attach `presentationMeta` (dsh-tools) projecting
+The 14 workflow tools should attach `presentationMeta` (dsh-tools) projecting
 `{ kind: 'graycode.workflow', callId, tool, path, status }` into
 `tool/result.meta`. The client folds results through
 `message.source.callId` regardless (so the card works today), but the marker:

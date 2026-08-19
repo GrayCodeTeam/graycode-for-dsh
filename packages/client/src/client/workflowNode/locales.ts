@@ -21,10 +21,13 @@ export type GrayCodeWorkflowLocaleKey =
   | 'status.failed'
   | 'status.cancelled'
   | 'family.design'
+  | 'family.plan'
   | 'family.progress'
   | 'family.review'
   | 'tool.create_design'
   | 'tool.update_design'
+  | 'tool.create_plan'
+  | 'tool.update_plan'
   | 'tool.create_progress'
   | 'tool.update_progress'
   | 'tool.record_progress_milestone'
@@ -66,10 +69,13 @@ export const graycodeWorkflowDictionaries: Record<LocaleId, LocaleDictOf<'grayco
     'status.failed': '失败',
     'status.cancelled': '已取消',
     'family.design': '设计',
+    'family.plan': '计划',
     'family.progress': '进度',
     'family.review': '审查',
     'tool.create_design': '创建设计文档',
     'tool.update_design': '更新设计文档',
+    'tool.create_plan': '创建计划文档',
+    'tool.update_plan': '更新计划文档',
     'tool.create_progress': '创建进度文档',
     'tool.update_progress': '更新进度文档',
     'tool.record_progress_milestone': '记录进度里程碑',
@@ -96,10 +102,13 @@ export const graycodeWorkflowDictionaries: Record<LocaleId, LocaleDictOf<'grayco
     'status.failed': 'Failed',
     'status.cancelled': 'Cancelled',
     'family.design': 'Design',
+    'family.plan': 'Plan',
     'family.progress': 'Progress',
     'family.review': 'Review',
     'tool.create_design': 'Create design document',
     'tool.update_design': 'Update design document',
+    'tool.create_plan': 'Create plan document',
+    'tool.update_plan': 'Update plan document',
     'tool.create_progress': 'Create progress document',
     'tool.update_progress': 'Update progress document',
     'tool.record_progress_milestone': 'Record progress milestone',
@@ -134,10 +143,13 @@ export const graycodeWorkflowJaPlaceholder: LocaleDict = {
   'status.failed': '失敗',
   'status.cancelled': 'キャンセル済み',
   'family.design': '設計',
+  'family.plan': '計画',
   'family.progress': '進捗',
   'family.review': 'レビュー',
   'tool.create_design': '設計ドキュメント作成',
   'tool.update_design': '設計ドキュメント更新',
+  'tool.create_plan': '計画ドキュメント作成',
+  'tool.update_plan': '計画ドキュメント更新',
   'tool.create_progress': '進捗ドキュメント作成',
   'tool.update_progress': '進捗ドキュメント更新',
   'tool.record_progress_milestone': '進捗マイルストーン記録',
