@@ -20,6 +20,7 @@ import {
   checkpointConfigAbsolutePath,
   checkpointConfigMessageKindEnabled,
   checkpointConfigUnknownTools,
+  checkpointToolProfile,
   checkpointConfigTextFromToolList,
   checkpointConfigToolIssueLabelKey,
   checkpointConfigToolListFromText,
@@ -31,6 +32,7 @@ import {
   withCheckpointConfigMessageKind,
   withCheckpointKnownTools,
   withCheckpointToolFlag,
+  withCheckpointToolProfile,
   withCheckpointToolsReset,
   withoutCheckpointTool,
   type CheckpointConfigValues,
@@ -333,5 +335,17 @@ describe('tool matrix helpers', () => {
   it('catalog covers the default tool surface exactly', () => {
     expect([...CHECKPOINT_TOOL_CATALOG.map(entry => entry.name)].sort()).toEqual([...DSH_TOOL_DEFAULTS].sort())
     expect(CHECKPOINT_TOOL_GROUP_ORDER).toContain('write')
+  })
+
+  it('recognizes and applies compact checkpoint profiles', () => {
+    expect(checkpointToolProfile(DEFAULT_CHECKPOINT_CONFIG)).toBe('recommended')
+    const beforeAll = withCheckpointToolProfile(sparse, 'before-all')
+    expect(checkpointToolProfile(beforeAll)).toBe('before-all')
+    expect(beforeAll.afterTools).toEqual([])
+    const both = withCheckpointToolProfile(sparse, 'before-and-after-all')
+    expect(checkpointToolProfile(both)).toBe('before-and-after-all')
+    const off = withCheckpointToolProfile(sparse, 'off')
+    expect(checkpointToolProfile(off)).toBe('off')
+    expect(checkpointToolProfile(sparse)).toBe('custom')
   })
 })

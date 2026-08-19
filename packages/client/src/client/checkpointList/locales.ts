@@ -272,6 +272,19 @@ export type GrayCodeCheckpointConfigLocaleKey =
   | 'config.toolsEmptyLine'
   | 'config.toolsGroup'
   | 'config.toolsGroup.description'
+  | 'config.toolsProfile'
+  | 'config.toolsProfile.description'
+  | 'config.toolsProfile.recommended'
+  | 'config.toolsProfile.recommended.description'
+  | 'config.toolsProfile.before-all'
+  | 'config.toolsProfile.before-all.description'
+  | 'config.toolsProfile.before-and-after-all'
+  | 'config.toolsProfile.before-and-after-all.description'
+  | 'config.toolsProfile.off'
+  | 'config.toolsProfile.off.description'
+  | 'config.toolsProfile.customActive'
+  | 'config.toolsCustomize'
+  | 'config.toolsCustomize.description'
   | 'config.matrix.tool'
   | 'config.matrix.before'
   | 'config.matrix.after'
@@ -330,21 +343,21 @@ export const GRAYCODE_CHECKPOINT_CONFIG_NS = 'graycode.checkpointConfig'
 export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf<'graycode.checkpointConfig'>> = {
   zh: {
     'config.title': '存档设置',
-    'config.description': '自动存档与模型工具行为配置。',
+    'config.description': '选择何时自动保存工作区，便于随时回到修改前的状态。',
     'config.enabled': '启用存档点',
     'config.enabled.description': '总开关；关闭后不再创建任何存档点。',
     'config.autoCheckpoint': '自动存档',
     'config.autoCheckpoint.description': '在消息与工具触发点上自动创建存档点。',
-    'config.modelToolsEnabled': '模型工具开关',
-    'config.modelToolsEnabled.description': '关闭后模型无法调用 checkpoint_create 等 7 个存档工具；自动存档不受影响。',
+    'config.modelToolsEnabled': '允许 AI 管理存档点',
+    'config.modelToolsEnabled.description': '允许 AI 主动创建、查看和恢复存档点；自动存档不受影响。',
     'config.messageCheckpoint': '消息触发存档',
     'config.messageCheckpoint.description': '选择在哪些消息边界自动创建存档点（默认：用户消息前 + 模型消息前）。',
     'config.beforeUserMessage': '用户消息前',
-    'config.beforeUserMessage.description': '新用户回合处理前创建存档点（agent/pre-step）。',
+    'config.beforeUserMessage.description': '开始处理一条新用户消息前保存。',
     'config.beforeModelMessage': '模型消息前',
-    'config.beforeModelMessage.description': '每次模型调用发起前创建存档点（agent/request；同回合多次调用各存一次，无变更自动去重）。',
+    'config.beforeModelMessage.description': 'AI 每次继续思考或调用工具前保存；没有文件变化时会自动合并。',
     'config.afterModelMessage': '模型消息后',
-    'config.afterModelMessage.description': '模型回合关闭后创建存档点（agent/turn-stopping）。',
+    'config.afterModelMessage.description': 'AI 完成一轮回复后保存。',
     'config.afterUserMessageUnavailable': '「用户消息后」在 DSH 宿主没有对应触发点，因此不提供该选项。',
     'config.beforeTools': '执行前存档',
     'config.beforeTools.description': '勾选的工具在调用前自动创建存档点。',
@@ -356,6 +369,19 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.toolsEmptyLine': '工具名不能为空',
     'config.toolsGroup': '工具触发存档',
     'config.toolsGroup.description': '勾选哪些工具在「执行前 / 执行后」自动创建存档点。默认只勾：执行命令前（bash/pwsh）、删除前（delete_code）、写入后（write）、应用差异后（edit / str_replace_editor）。',
+    'config.toolsProfile': '工具调用存档方案',
+    'config.toolsProfile.description': '先选一个常用方案；需要精细控制时再展开下方的逐工具设置。',
+    'config.toolsProfile.recommended': '推荐',
+    'config.toolsProfile.recommended.description': '危险操作前保存，文件修改后再保存。',
+    'config.toolsProfile.before-all': '所有工具执行前',
+    'config.toolsProfile.before-all.description': '每次工具调用开始前保存。',
+    'config.toolsProfile.before-and-after-all': '所有工具前后',
+    'config.toolsProfile.before-and-after-all.description': '每次工具调用前后都保存，存档最多。',
+    'config.toolsProfile.off': '不按工具自动保存',
+    'config.toolsProfile.off.description': '保留消息触发和手动存档。',
+    'config.toolsProfile.customActive': '当前使用自定义方案。',
+    'config.toolsCustomize': '逐个工具设置',
+    'config.toolsCustomize.description': '为每个工具分别选择执行前或执行后保存。',
     'config.matrix.tool': '工具',
     'config.matrix.before': '执行前',
     'config.matrix.after': '执行后',
@@ -402,21 +428,21 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
   },
   en: {
     'config.title': 'Checkpoint settings',
-    'config.description': 'Behaviour of automatic checkpoints and model tools.',
+    'config.description': 'Choose when the workspace is saved so you can return to an earlier state.',
     'config.enabled': 'Enable checkpoints',
     'config.enabled.description': 'Master switch; no checkpoints are created while off.',
     'config.autoCheckpoint': 'Auto checkpoint',
     'config.autoCheckpoint.description': 'Automatically create checkpoints at message and tool trigger points.',
-    'config.modelToolsEnabled': 'Model tools',
-    'config.modelToolsEnabled.description': 'While off, the model cannot call the 7 checkpoint tools (e.g. checkpoint_create); auto checkpointing is unaffected.',
+    'config.modelToolsEnabled': 'Allow AI to manage checkpoints',
+    'config.modelToolsEnabled.description': 'Lets the AI create, inspect, and restore checkpoints; automatic checkpoints are unaffected.',
     'config.messageCheckpoint': 'Message-triggered checkpoints',
     'config.messageCheckpoint.description': 'Choose which message boundaries create checkpoints automatically (default: before user messages + before model calls).',
     'config.beforeUserMessage': 'Before user messages',
-    'config.beforeUserMessage.description': 'Checkpoint before each new user turn is processed (agent/pre-step).',
+    'config.beforeUserMessage.description': 'Save before processing each new user message.',
     'config.beforeModelMessage': 'Before model messages',
-    'config.beforeModelMessage.description': 'Checkpoint before each model call (agent/request; one per call per turn, unchanged turns are deduped).',
+    'config.beforeModelMessage.description': 'Save whenever the AI continues thinking or starts another tool call; unchanged states are merged.',
     'config.afterModelMessage': 'After model messages',
-    'config.afterModelMessage.description': 'Checkpoint after the model turn closes (agent/turn-stopping).',
+    'config.afterModelMessage.description': 'Save after the AI finishes a response.',
     'config.afterUserMessageUnavailable': '“After user message” has no trigger point in the DSH host, so it is not offered.',
     'config.beforeTools': 'Checkpoint before',
     'config.beforeTools.description': 'Checked tools automatically create a checkpoint before they run.',
@@ -428,6 +454,19 @@ export const graycodeCheckpointConfigDictionaries: Record<LocaleId, LocaleDictOf
     'config.toolsEmptyLine': 'Tool name cannot be empty',
     'config.toolsGroup': 'Tool-triggered checkpoints',
     'config.toolsGroup.description': 'Pick which tools checkpoint before/after execution. Defaults: before commands (bash/pwsh) and deletes (delete_code); after writes (write) and diffs (edit / str_replace_editor).',
+    'config.toolsProfile': 'Tool checkpoint policy',
+    'config.toolsProfile.description': 'Start with a common policy, then expand the per-tool controls only when needed.',
+    'config.toolsProfile.recommended': 'Recommended',
+    'config.toolsProfile.recommended.description': 'Save before risky actions and after file changes.',
+    'config.toolsProfile.before-all': 'Before every tool',
+    'config.toolsProfile.before-all.description': 'Save whenever a tool call begins.',
+    'config.toolsProfile.before-and-after-all': 'Before and after every tool',
+    'config.toolsProfile.before-and-after-all.description': 'Create the most checkpoints.',
+    'config.toolsProfile.off': 'No tool-triggered saves',
+    'config.toolsProfile.off.description': 'Message-triggered and manual checkpoints remain available.',
+    'config.toolsProfile.customActive': 'A custom policy is currently active.',
+    'config.toolsCustomize': 'Customize individual tools',
+    'config.toolsCustomize.description': 'Choose before/after saving separately for each tool.',
     'config.matrix.tool': 'Tool',
     'config.matrix.before': 'Before',
     'config.matrix.after': 'After',
@@ -506,6 +545,19 @@ export const graycodeCheckpointConfigJaPlaceholder: LocaleDict = {
   'config.toolsEmptyLine': 'ツール名を空にできません',
   'config.toolsGroup': 'ツール起点チェックポイント',
   'config.toolsGroup.description': 'どのツールの実行前/後にチェックポイントを作成するかを選択します。リセットで全既知ツールをオンに戻します。',
+  'config.toolsProfile': 'ツールのチェックポイント方針',
+  'config.toolsProfile.description': '一般的な方針を選び、必要な場合だけツールごとの設定を開きます。',
+  'config.toolsProfile.recommended': '推奨',
+  'config.toolsProfile.recommended.description': '危険な操作の前とファイル変更の後に保存します。',
+  'config.toolsProfile.before-all': 'すべてのツール実行前',
+  'config.toolsProfile.before-all.description': '各ツール呼び出しの開始前に保存します。',
+  'config.toolsProfile.before-and-after-all': 'すべてのツール実行前後',
+  'config.toolsProfile.before-and-after-all.description': '最も多くチェックポイントを作成します。',
+  'config.toolsProfile.off': 'ツール起点の保存なし',
+  'config.toolsProfile.off.description': 'メッセージ起点と手動チェックポイントは利用できます。',
+  'config.toolsProfile.customActive': 'カスタム方針が有効です。',
+  'config.toolsCustomize': 'ツールごとに設定',
+  'config.toolsCustomize.description': '各ツールの実行前・実行後を個別に選択します。',
   'config.matrix.tool': 'ツール',
   'config.matrix.before': '実行前',
   'config.matrix.after': '実行後',

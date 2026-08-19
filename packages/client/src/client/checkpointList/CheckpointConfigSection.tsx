@@ -23,17 +23,20 @@ import {
   CHECKPOINT_TOOL_GROUP_ORDER,
   checkpointConfigAbsolutePath,
   checkpointConfigMessageKindEnabled,
+  checkpointToolProfile,
   checkpointConfigToolIssueLabelKey,
   checkpointConfigUnknownTools,
   validateCheckpointConfigToolLine,
   withCheckpointConfigMessageKind,
   withCheckpointKnownTools,
   withCheckpointToolFlag,
+  withCheckpointToolProfile,
   withCheckpointToolsReset,
   withoutCheckpointTool,
   type CheckpointConfigMessageSlot,
   type CheckpointConfigValues,
   type CheckpointToolGroup,
+  type CheckpointToolProfile,
   type CheckpointToolSlot,
 } from './configModel.ts'
 
@@ -181,6 +184,36 @@ const quickActionButtonStyle: CSSProperties = {
   color: 'inherit',
   cursor: 'pointer',
 }
+
+const profileGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))',
+  gap: '0.4rem',
+}
+
+const profileButtonStyle: CSSProperties = {
+  padding: '0.5rem 0.6rem',
+  borderRadius: '0.4rem',
+  border: '1px solid var(--dsh-border-color, #333)',
+  background: 'transparent',
+  color: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+}
+
+const profileButtonActiveStyle: CSSProperties = {
+  ...profileButtonStyle,
+  borderColor: 'var(--dsh-accent-color, #58a6ff)',
+  background: 'color-mix(in srgb, var(--dsh-accent-color, #58a6ff) 12%, transparent)',
+}
+
+const detailsStyle: CSSProperties = {
+  borderRadius: '0.375rem',
+  border: '1px solid var(--dsh-border-color, #333)',
+  padding: '0.4rem 0.5rem',
+}
+
+const summaryStyle: CSSProperties = { cursor: 'pointer', fontSize: '12px', fontWeight: 600 }
 
 const removeButtonStyle: CSSProperties = {
   ...quickActionButtonStyle,
@@ -397,6 +430,55 @@ function ToolMatrixEditor({
   )
 }
 
+function ToolProfileSelector({
+  t,
+  config,
+  disabled,
+  onCommit,
+}: {
+  t: (key: string) => string
+  config: CheckpointConfigValues
+  disabled: boolean
+  onCommit: (path: readonly string[], value: unknown) => void
+}): ReactNode {
+  const current = checkpointToolProfile(config)
+  const profiles: readonly Exclude<CheckpointToolProfile, 'custom'>[] = [
+    'recommended',
+    'before-all',
+    'before-and-after-all',
+    'off',
+  ]
+  const select = (profile: Exclude<CheckpointToolProfile, 'custom'>): void => {
+    const next = withCheckpointToolProfile(config, profile)
+    onCommit(['beforeTools'], [...next.beforeTools])
+    onCommit(['afterTools'], [...next.afterTools])
+  }
+  return (
+    <fieldset style={groupStyle} data-graycode-checkpoint-config="toolProfiles">
+      <legend>{t('config.toolsProfile')}</legend>
+      <span style={rowDescriptionStyle}>{t('config.toolsProfile.description')}</span>
+      <div style={profileGridStyle}>
+        {profiles.map(profile => (
+          <button
+            key={profile}
+            type="button"
+            disabled={disabled}
+            aria-pressed={current === profile}
+            style={current === profile ? profileButtonActiveStyle : profileButtonStyle}
+            onClick={() => select(profile)}
+          >
+            <span style={copyStyle}>
+              <span>{t(`config.toolsProfile.${profile}`)}</span>
+              <span style={rowDescriptionStyle}>{t(`config.toolsProfile.${profile}.description`)}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      {current === 'custom' && <span style={rowDescriptionStyle}>{t('config.toolsProfile.customActive')}</span>}
+    </fieldset>
+  )
+}
+
 /** Checkpoint config field group (see file header). */
 export function CheckpointConfigSection({
   t,
@@ -523,15 +605,24 @@ export function CheckpointConfigSection({
             }}
           />
         </label>
-        <span style={rowDescriptionStyle}>{t('config.afterUserMessageUnavailable')}</span>
       </fieldset>
 
-      <ToolMatrixEditor
+      <ToolProfileSelector
         t={t}
         config={config}
         disabled={switchDisabled}
         onCommit={commit}
       />
+      <details style={detailsStyle}>
+        <summary style={summaryStyle}>{t('config.toolsCustomize')}</summary>
+        <p style={rowDescriptionStyle}>{t('config.toolsCustomize.description')}</p>
+        <ToolMatrixEditor
+          t={t}
+          config={config}
+          disabled={switchDisabled}
+          onCommit={commit}
+        />
+      </details>
     </section>
   )
 }

@@ -347,6 +347,42 @@ export function checkpointConfigUnknownTools(config: CheckpointConfigValues): st
 /** One matrix column (which stored list a checkbox edits). */
 export type CheckpointToolSlot = 'before' | 'after'
 
+export type CheckpointToolProfile = 'recommended' | 'before-all' | 'before-and-after-all' | 'off' | 'custom'
+
+function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every(name => right.includes(name))
+}
+
+/** Identify the compact preset represented by the two stored tool lists. */
+export function checkpointToolProfile(config: CheckpointConfigValues): CheckpointToolProfile {
+  const all = CHECKPOINT_TOOL_CATALOG.map(entry => entry.name)
+  if (sameToolSet(config.beforeTools, DSH_BEFORE_TOOL_DEFAULTS) && sameToolSet(config.afterTools, DSH_AFTER_TOOL_DEFAULTS)) {
+    return 'recommended'
+  }
+  if (sameToolSet(config.beforeTools, all) && config.afterTools.length === 0) return 'before-all'
+  if (sameToolSet(config.beforeTools, all) && sameToolSet(config.afterTools, all)) return 'before-and-after-all'
+  if (config.beforeTools.length === 0 && config.afterTools.length === 0) return 'off'
+  return 'custom'
+}
+
+/** Replace the tool checkpoint policy with one of the user-facing presets. */
+export function withCheckpointToolProfile(
+  config: CheckpointConfigValues,
+  profile: Exclude<CheckpointToolProfile, 'custom'>,
+): CheckpointConfigValues {
+  const all = CHECKPOINT_TOOL_CATALOG.map(entry => entry.name)
+  switch (profile) {
+    case 'recommended':
+      return withCheckpointToolsReset(config)
+    case 'before-all':
+      return { ...config, beforeTools: all, afterTools: [] }
+    case 'before-and-after-all':
+      return { ...config, beforeTools: all, afterTools: [...all] }
+    case 'off':
+      return { ...config, beforeTools: [], afterTools: [] }
+  }
+}
+
 /** Toggle one tool in one slot, preserving stored order (immutable). */
 export function withCheckpointToolFlag(
   config: CheckpointConfigValues,
