@@ -7,11 +7,12 @@
  */
 import {
     BRANCH_GROUP_STORE_VERSION,
-    BRANCH_RETENTION_MS,
     BranchCandidate,
     BranchCandidateKind,
     BranchError,
     BranchErrorCode,
+    DAY_MS,
+    DEFAULT_BRANCH_RETENTION_DAYS,
     GrayBranchGroup,
     MAX_CANDIDATES_PER_PARENT,
     MAX_CANDIDATE_LABEL_LENGTH,
@@ -238,14 +239,17 @@ export function renameCandidate(
  */
 export function purgeExpiredCandidates(
     group: GrayBranchGroup,
-    now: number = Date.now()
+    now: number = Date.now(),
+    retentionDays: number = DEFAULT_BRANCH_RETENTION_DAYS
 ): GrayBranchGroup {
-    const cutoff = now - BRANCH_RETENTION_MS;
+    // 与原项目一致：0 表示禁用自动/过期清理，只保留手动逐项删除/恢复能力。
+    if (retentionDays === 0) return group;
+    const cutoff = now - retentionDays * DAY_MS;
     const kept = group.candidates.filter(c => {
         if (c.deletedAt === undefined) return true;
         if (c.kind === 'root') return true;
         if (c.sessionId === group.activeSessionId) return true;
-        // deletedAt >= cutoff：仍在保留期内（未超过 30 天）
+        // deletedAt >= cutoff：仍在配置的保留期内
         return c.deletedAt >= cutoff;
     });
     if (kept.length === group.candidates.length) return group;

@@ -220,6 +220,42 @@ describe('branches/rename', () => {
   })
 })
 
+describe('branches candidate management', () => {
+  it('switches, soft-deletes, and restores candidates through Remote endpoints', async () => {
+    const group = env.service.groupForSession(ROOT_SESSION)!
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+
+    const switched = await invoke('switch', {
+      groupId: group.id,
+      sessionId: child.sessionId,
+      expectedRevision: child.revision,
+    })
+    expect(switched.ok).toBe(true)
+
+    const back = await invoke('switch', { groupId: group.id, sessionId: ROOT_SESSION })
+    expect(back.ok).toBe(true)
+    const deleted = await invoke('delete', { groupId: group.id, sessionId: child.sessionId, confirm: true })
+    expect(deleted.ok).toBe(true)
+    expect(env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt).toBeDefined()
+
+    const restored = await invoke('restore', { groupId: group.id, sessionId: child.sessionId })
+    expect(restored.ok).toBe(true)
+    expect(env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === child.sessionId)!.deletedAt).toBeUndefined()
+  })
+
+  it('requires explicit confirmation before deleting or pruning', async () => {
+    const group = env.service.groupForSession(ROOT_SESSION)!
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    const deleted = await invoke('delete', { groupId: group.id, sessionId: child.sessionId })
+    expect(deleted.ok).toBe(false)
+    if (!deleted.ok) expect(deleted.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+
+    const pruned = await invoke('pruneDeleted', { workspace: env.tmpDir })
+    expect(pruned.ok).toBe(false)
+    if (!pruned.ok) expect(pruned.error.code).toBe(GRAY_REMOTE_ERROR_CODES.INVALID_INPUT)
+  })
+})
+
 describe('branches/reroll', () => {
   it('reroll 成功：fork 新候选并自动激活，返回 branchSessionId', async () => {
     const result = await invoke('reroll', { sessionId: ROOT_SESSION, turn: 2 })

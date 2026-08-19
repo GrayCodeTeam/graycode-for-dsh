@@ -30,6 +30,7 @@ import {
     BranchGroupStore,
     BRANCH_GROUP_STORE_VERSION,
     BRANCH_STORE_FILE,
+    DEFAULT_BRANCH_RETENTION_DAYS,
     GrayBranchGroup,
 } from './domain/types.ts';
 import {
@@ -132,11 +133,20 @@ export interface BranchMutationResult {
 export interface BranchCoordinatorConfig {
     /** 插件私有数据根（sidecar 位于 <dataRoot>/branches/） */
     dataRoot: string;
+    /** 软删候选保留天数；0 表示不自动清理。 */
+    retentionDays?: number;
+}
+
+export interface BranchPruneResult {
+    groupsScanned: number;
+    groupsChanged: number;
+    prunedCandidateCount: number;
 }
 
 export class BranchCoordinatorService {
     private readonly rootDir: string;
     private readonly storePath: string;
+    private readonly retentionDays: number;
     private groups: GrayBranchGroup[] = [];
     private loaded = false;
     /** 加载承诺：并发调用 initialize / 变更操作统一 await 同一份加载（ensureLoaded 模式） */
@@ -149,11 +159,12 @@ export class BranchCoordinatorService {
     private disposed = false;
 
     constructor(
-        private readonly config: BranchCoordinatorConfig,
+        config: BranchCoordinatorConfig,
         private readonly adapter: BranchSessionAdapter
     ) {
         this.rootDir = path.join(config.dataRoot, 'branches');
         this.storePath = path.join(this.rootDir, BRANCH_STORE_FILE);
+        this.retentionDays = config.retentionDays ?? DEFAULT_BRANCH_RETENTION_DAYS;
     }
 
     /** 加载 sidecar；文件缺失视为空库。加载失败（损坏/版本不支持）在内部捕获并记录日志、
@@ -198,7 +209,10 @@ export class BranchCoordinatorService {
     /** 加载后惰性清理：超过保留期的软删候选移出 sidecar（失败不阻断启动，
      *  内存清理结果会在下一次 persist 时自然落盘）。 */
     private async purgeExpiredGroups(): Promise<void> {
-        const purged = this.groups.map(group => purgeExpiredCandidates(group));
+        if (this.retentionDays === 0) return;
+        const purged = this.groups.map(group =>
+            purgeExpiredCandidates(group, Date.now(), this.retentionDays)
+        );
         const changed = purged.some((group, index) => group !== this.groups[index]);
         if (!changed) return;
         this.groups = purged;
@@ -481,6 +495,43 @@ export class BranchCoordinatorService {
                 revision: next.revision,
                 activeSessionId: next.activeSessionId,
             };
+        });
+    }
+
+    /** 按当前保留期清理已过期 tombstone；只移除 sidecar 候选，不删除 dsh Session。 */
+    pruneDeletedCandidates(input: {
+        workspaceId?: string;
+        now?: number;
+    } = {}): Promise<BranchPruneResult> {
+        return this.mutate(async () => {
+            this.assertUsable();
+            const selected = this.groups.filter(
+                group => input.workspaceId === undefined || group.workspaceId === input.workspaceId
+            );
+            if (this.retentionDays === 0) {
+                return { groupsScanned: selected.length, groupsChanged: 0, prunedCandidateCount: 0 };
+            }
+            const selectedIds = new Set(selected.map(group => group.id));
+            let groupsChanged = 0;
+            let prunedCandidateCount = 0;
+            const nextGroups = this.groups.map(group => {
+                if (!selectedIds.has(group.id)) return group;
+                const next = purgeExpiredCandidates(
+                    group,
+                    input.now ?? Date.now(),
+                    this.retentionDays
+                );
+                if (next !== group) {
+                    groupsChanged += 1;
+                    prunedCandidateCount += group.candidates.length - next.candidates.length;
+                }
+                return next;
+            });
+            if (groupsChanged > 0) {
+                await this.persist(nextGroups);
+                this.groups = nextGroups;
+            }
+            return { groupsScanned: selected.length, groupsChanged, prunedCandidateCount };
         });
     }
 

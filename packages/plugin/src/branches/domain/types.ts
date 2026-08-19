@@ -66,8 +66,8 @@ export const DEFAULT_BRANCH_RETENTION_DAYS = 30;
 /** 候选显示名长度上限（对齐老版 renameBranchCandidate ≤200 字符） */
 export const MAX_CANDIDATE_LABEL_LENGTH = 200;
 
-/** 软删保留期（毫秒） */
-export const BRANCH_RETENTION_MS = DEFAULT_BRANCH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+/** 一天的毫秒数（保留期换算使用）。 */
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** 稳定错误码（机器可读，UI 不解析错误文案） */
 export const BranchErrorCode = {

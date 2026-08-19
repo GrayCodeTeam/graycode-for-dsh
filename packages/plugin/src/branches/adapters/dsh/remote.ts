@@ -5,6 +5,8 @@
  * - `branches/list`：按 workspace 列出分支组（含候选/激活指针/revision，
  *   供 UI 与管理端点做 CAS）；
  * - `branches/rename`：重命名候选显示名（1-200 字符；expectedRevision CAS）；
+ * - `branches/switch` / `delete` / `restore`：浏览器侧候选管理；
+ * - `branches/pruneDeleted`：按配置保留期清理过期 tombstone（不删除会话）；
  * - `branches/reroll`：重新生成——fork 目标轮次之前的完整前缀并把该轮次的
  *   用户消息重发到新会话（新会话自动激活）；
  * - `branches/editRetry`：编辑并重试——同上但重发编辑后的文本。
@@ -19,9 +21,9 @@ import type { GrayBranchGroup } from '../../domain/types.ts'
 import { GrayRemoteError } from '../../../remote/errors.ts'
 import {
   normalizeLimit,
-  optionalInt,
   optionalString,
   optionalWorkspace,
+  requireBoolean,
   requireInt,
   requireString,
   slicePage,
@@ -110,7 +112,7 @@ export function createBranchesRemoteHandlers(service: BranchCoordinatorService):
         throw GrayRemoteError.invalidInput('label must be at most 200 characters', { label })
       }
       const groupId = optionalString(args, 'groupId')
-      const expectedRevision = optionalInt(args, 'expectedRevision')
+      const expectedRevision = optionalRevision(args)
 
       let resolvedGroupId: string
       if (groupId) {
@@ -138,6 +140,37 @@ export function createBranchesRemoteHandlers(service: BranchCoordinatorService):
         revision: result.revision,
         activeSessionId: result.activeSessionId,
       }
+    },
+
+    'branches/switch': async (args: GrayRemoteArgs) => {
+      const groupId = requireString(args, 'groupId')
+      const sessionId = requireString(args, 'sessionId')
+      return service.switchCandidate({ groupId, sessionId, expectedRevision: optionalRevision(args) })
+    },
+
+    'branches/delete': async (args: GrayRemoteArgs) => {
+      const groupId = requireString(args, 'groupId')
+      const sessionId = requireString(args, 'sessionId')
+      if (requireBoolean(args, 'confirm') !== true) {
+        throw GrayRemoteError.invalidInput('confirm must be true', { field: 'confirm' })
+      }
+      return service.deleteCandidate({ groupId, sessionId, expectedRevision: optionalRevision(args) })
+    },
+
+    'branches/restore': async (args: GrayRemoteArgs) => {
+      const groupId = requireString(args, 'groupId')
+      const sessionId = requireString(args, 'sessionId')
+      return service.restoreCandidate({ groupId, sessionId, expectedRevision: optionalRevision(args) })
+    },
+
+    'branches/pruneDeleted': async (args: GrayRemoteArgs) => {
+      if (requireBoolean(args, 'confirm') !== true) {
+        throw GrayRemoteError.invalidInput('confirm must be true', { field: 'confirm' })
+      }
+      const workspace = optionalWorkspace(args)
+      return service.pruneDeletedCandidates({
+        workspaceId: workspace ? createBranchWorkspaceId(workspace) : undefined,
+      })
     },
 
     'branches/reroll': async (args: GrayRemoteArgs) => {

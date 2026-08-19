@@ -6,6 +6,7 @@ import { createBranchTools } from './tools.ts'
 import { createBranchesRemoteHandlers } from './adapters/dsh/remote.ts'
 import type { GrayRemoteService } from '../remote/service.ts'
 import { createScopedToolRegistrar, agentScopeSchema, type AgentScopeMode } from '../agentScope.ts'
+import { DEFAULT_BRANCH_RETENTION_DAYS } from './domain/types.ts'
 
 export const name = 'graycode-branches'
 
@@ -23,16 +24,19 @@ export interface Config {
   dataRoot: string
   /** Tool install scope: roots (default), all agents, or disabled (no registration). */
   agentScope: AgentScopeMode
+  /** Days to retain soft-deleted candidates; 0 disables automatic pruning. */
+  retentionDays: number
 }
 
 export const Config: z<Config> = z.object({
   dataRoot: z.string().default(''),
   agentScope: agentScopeSchema,
+  retentionDays: z.number().step(1).min(0).default(DEFAULT_BRANCH_RETENTION_DAYS),
 })
 
 export async function apply(ctx: Context, config: Config): Promise<() => void> {
   const service = new BranchCoordinatorService(
-    { dataRoot: config.dataRoot },
+    { dataRoot: config.dataRoot, retentionDays: config.retentionDays },
     createDshBranchSessionAdapter(ctx)
   )
   // Cordis 会等待 async apply；初始化完成前不暴露工具/Remote，失败由 fiber

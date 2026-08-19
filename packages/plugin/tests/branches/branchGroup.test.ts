@@ -286,6 +286,16 @@ describe('purgeExpiredCandidates', () => {
     const group = makeGroup()
     expect(purgeExpiredCandidates(group, 2_000_000_000_000)).toBe(group)
   })
+
+  it('supports a configurable retention period and treats zero as disabled', () => {
+    const now = 2_000_000_000_000
+    let group = makeGroup()
+    group = addCandidate(group, { sessionId: 'old', parentSessionId: 'root-1', kind: 'manual' })
+    group = deleteCandidate(group, 'old', undefined, now - 2 * DAY)
+
+    expect(purgeExpiredCandidates(group, now, 0)).toBe(group)
+    expect(purgeExpiredCandidates(group, now, 1).candidates.some(c => c.sessionId === 'old')).toBe(false)
+  })
 })
 
 describe('parseBranchGroupStore', () => {

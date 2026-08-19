@@ -667,6 +667,21 @@ describe('BranchCoordinatorService deleteCandidate / restoreCandidate', () => {
       BranchErrorCode.INVALID_INPUT,
     )
   })
+
+  it('prunes expired tombstones with counts and workspace filtering', async () => {
+    const group = await env.service.ensureGroup({ workspaceId: WS, rootSessionId: ROOT_SESSION })
+    const child = await env.service.createBranch({ groupId: group.id, parentSessionId: ROOT_SESSION, boundary: 2 })
+    await env.service.deleteCandidate({ groupId: group.id, sessionId: child.sessionId })
+    const deleted = env.service.getGroup(group.id)!.candidates.find(c => c.sessionId === child.sessionId)!
+    deleted.deletedAt = Date.now() - 31 * 24 * 60 * 60 * 1000
+
+    const other = await env.service.pruneDeletedCandidates({ workspaceId: 'other-workspace' })
+    expect(other).toEqual({ groupsScanned: 0, groupsChanged: 0, prunedCandidateCount: 0 })
+
+    const result = await env.service.pruneDeletedCandidates({ workspaceId: WS })
+    expect(result).toEqual({ groupsScanned: 1, groupsChanged: 1, prunedCandidateCount: 1 })
+    expect(env.service.getGroup(group.id)!.candidates.some(c => c.sessionId === child.sessionId)).toBe(false)
+  })
 })
 
 describe('BranchCoordinatorService optimistic concurrency (CAS)', () => {

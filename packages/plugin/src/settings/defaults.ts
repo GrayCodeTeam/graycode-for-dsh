@@ -29,7 +29,7 @@ export const DEFAULTS: GrayCodeConfig = {
       mergeUnchangedCheckpoints: true,
     },
   },
-  branches: { dataRoot: '', agentScope: 'roots' },
+  branches: { dataRoot: '', agentScope: 'roots', retentionDays: 30 },
   persona: { enabled: true, agentScope: 'roots', template: '' },
   prompt: {
     dataRoot: '',
