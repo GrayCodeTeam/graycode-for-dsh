@@ -537,7 +537,7 @@ describe('review tools (lifecycle + session gate)', () => {
       .rejects.toThrow('Duplicate milestone id is not allowed: m1')
   })
 
-  it('compare_review_documents reports description/evidence edits as persisted changes, not added+removed', async () => {
+  it('compare_review_documents treats description/evidence edits as finding identity changes', async () => {
     const a = await executeCreateReview(deps, { title: 'Compare Edit A', review: 'scope a' }) as { path: string }
 
     await executeRecordReviewMilestone(deps, {
@@ -557,7 +557,7 @@ describe('review tools (lifecycle + session gate)', () => {
 
     const b = await executeCreateReview(makeDeps('session-edit-b'), { title: 'Compare Edit B', review: 'scope b' }) as { path: string }
 
-    // 只改 description（category+title 身份不变）→ persisted + changes 含 'description'
+    // 原项目比较协议把 description 与 evidence 纳入稳定键：改写正文会形成新 finding。
     await executeRecordReviewMilestone(makeDeps('session-edit-b'), {
       path: b.path,
       milestoneTitle: '第二轮',
@@ -577,15 +577,15 @@ describe('review tools (lifecycle + session gate)', () => {
       summary: { addedFindings: number; removedFindings: number; persistedFindings: number; evidenceChanged: number }
       findings: { added: unknown[]; removed: unknown[]; persisted: Array<{ changes: string[] }> }
     }
-    expect(compareDesc.summary.addedFindings).toBe(0)
-    expect(compareDesc.summary.removedFindings).toBe(0)
-    expect(compareDesc.summary.persistedFindings).toBe(1)
-    expect(compareDesc.findings.persisted[0]?.changes).toContain('description')
+    expect(compareDesc.summary.addedFindings).toBe(1)
+    expect(compareDesc.summary.removedFindings).toBe(1)
+    expect(compareDesc.summary.persistedFindings).toBe(0)
+    expect(compareDesc.findings.persisted).toHaveLength(0)
     expect(compareDesc.summary.evidenceChanged).toBe(0)
 
     const c = await executeCreateReview(makeDeps('session-edit-c'), { title: 'Compare Edit C', review: 'scope c' }) as { path: string }
 
-    // 只改 evidence（身份不变）→ persisted + changes 含 'evidence'，evidenceChanged 统计为 1
+    // 证据也参与稳定键，换证据同样是删除旧 finding 并新增一条。
     await executeRecordReviewMilestone(makeDeps('session-edit-c'), {
       path: c.path,
       milestoneTitle: '第三轮',
@@ -605,11 +605,11 @@ describe('review tools (lifecycle + session gate)', () => {
       summary: { addedFindings: number; removedFindings: number; persistedFindings: number; evidenceChanged: number }
       findings: { persisted: Array<{ changes: string[] }> }
     }
-    expect(compareEvidence.summary.addedFindings).toBe(0)
-    expect(compareEvidence.summary.removedFindings).toBe(0)
-    expect(compareEvidence.summary.persistedFindings).toBe(1)
-    expect(compareEvidence.findings.persisted[0]?.changes).toContain('evidence')
-    expect(compareEvidence.summary.evidenceChanged).toBe(1)
+    expect(compareEvidence.summary.addedFindings).toBe(1)
+    expect(compareEvidence.summary.removedFindings).toBe(1)
+    expect(compareEvidence.summary.persistedFindings).toBe(0)
+    expect(compareEvidence.findings.persisted).toHaveLength(0)
+    expect(compareEvidence.summary.evidenceChanged).toBe(0)
   })
 
   it('create_review prefixes Windows-reserved default filenames (title NUL)', async () => {
@@ -617,7 +617,7 @@ describe('review tools (lifecycle + session gate)', () => {
     expect(created.path).toBe('.graycode/review/_nul.md')
   })
 
-  it('compare_review_documents treats same-title findings with different severity as distinct identities', async () => {
+  it('compare_review_documents reports severity edits as persisted changes', async () => {
     const a = await executeCreateReview(deps, { title: 'Compare Sev A', review: 'scope a' }) as { path: string }
 
     await executeRecordReviewMilestone(deps, {
@@ -625,20 +625,18 @@ describe('review tools (lifecycle + session gate)', () => {
       milestoneTitle: '第一轮',
       summary: '摘要',
       structuredFindings: [
-        { severity: 'high', category: 'html', title: 'same title' },
-        { severity: 'low', category: 'html', title: 'same title' },
+        { severity: 'low', category: 'html', title: 'same finding', description: 'same description' },
       ],
     })
 
     const b = await executeCreateReview(makeDeps('session-sev-b'), { title: 'Compare Sev B', review: 'scope b' }) as { path: string }
-    // 目标文档只保留 high 版本：low 版本应从比较中「移除」，而不是被 high 的
-    // category+title key 覆盖后静默消失（key 加入 severity 后两版本身份不同）
+    // 严重级别不属于 finding 身份，因此 low → high 应保留同一 finding 并报告变化。
     await executeRecordReviewMilestone(makeDeps('session-sev-b'), {
       path: b.path,
       milestoneTitle: '第二轮',
       summary: '摘要二',
       structuredFindings: [
-        { severity: 'high', category: 'html', title: 'same title' },
+        { severity: 'high', category: 'html', title: 'same finding', description: 'same description' },
       ],
     })
 
@@ -652,11 +650,10 @@ describe('review tools (lifecycle + session gate)', () => {
     }
 
     expect(compare.summary.addedFindings).toBe(0)
-    expect(compare.summary.removedFindings).toBe(1)
+    expect(compare.summary.removedFindings).toBe(0)
     expect(compare.summary.persistedFindings).toBe(1)
-    // high↔high 匹配：没有把 low 误配成 high 的 severity 变化
-    expect(compare.summary.severityChanged).toBe(0)
-    expect(compare.findings.persisted.filter((item) => item.changes.length > 0)).toHaveLength(0)
+    expect(compare.summary.severityChanged).toBe(1)
+    expect(compare.findings.persisted[0]?.changes).toContain('severity')
   })
 })
 

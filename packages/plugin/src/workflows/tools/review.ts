@@ -615,20 +615,24 @@ function sortUnique(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean))).sort()
 }
 
-/**
- * finding 匹配 key：稳定身份 = category + title + severity（归一化后哈希）。
- *
- * severity 参与 key：同标题同类别但不同 severity 的是两个独立 finding（与领域层
- * getFindingMergeKey 的 severity|category|title 口径一致）；修复前只取 category+title
- * 时两者在 baseMap/targetMap 中互相覆盖，比较结果静默丢失其中一个。
- * description / evidence / recommendation / trackingStatus / relatedMilestoneIds
- * 等易变字段仍不参与 key——它们的变化走 persisted 分支的 changes 列表。
- */
-function hashFindingKey(finding: { category: string; title: string; severity: string }): string {
+/** finding 匹配 key 与 Gray Code 当前比较协议一致：问题内容和证据构成身份，
+ * 严重级别、跟踪状态、建议与关联里程碑属于可比较变化。 */
+function hashFindingKey(finding: {
+  category: string
+  title: string
+  descriptionMarkdown: string | null
+  evidence: ReviewEvidenceRef[]
+}): string {
+  const evidenceKey = finding.evidence
+    .map((item) => normalizeEvidenceKey(item))
+    .filter(Boolean)
+    .sort()
+    .join('||')
   const payload = [
     normalizeComparableText(finding.category),
     normalizeComparableText(finding.title),
-    normalizeComparableText(finding.severity),
+    normalizeComparableText(finding.descriptionMarkdown),
+    evidenceKey,
   ].join('||')
 
   return `finding:${createHash('sha256').update(payload, 'utf8').digest('hex')}`
