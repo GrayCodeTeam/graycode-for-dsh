@@ -56,17 +56,17 @@ interface PreviewResult {
 }
 
 describe('prompt 工具层', () => {
-  test('prompt_mode_list：5 个内建模式、currentModeId=code、恰一个 current 标记', async () => {
+  test('prompt_mode_list：6 个内建模式、currentModeId=minimal、恰一个 current 标记', async () => {
     const { dataRoot, tools } = await setup()
     try {
       const result = (await tools.get('prompt_mode_list')!.execute({}, makeExec())) as ListResult
       expect(result.success).toBe(true)
       expect(result.error).toBeUndefined()
-      expect(result.currentModeId).toBe('code')
-      expect(result.modes.map(mode => mode.id)).toEqual(['code', 'design', 'plan', 'ask', 'review'])
+      expect(result.currentModeId).toBe('minimal')
+      expect(result.modes.map(mode => mode.id)).toEqual(['minimal', 'code', 'design', 'plan', 'ask', 'review'])
       expect(result.modes.every(mode => mode.kind === 'builtin')).toBe(true)
       expect(result.modes.filter(mode => mode.current)).toHaveLength(1)
-      expect(result.modes.filter(mode => mode.current)[0]!.id).toBe('code')
+      expect(result.modes.filter(mode => mode.current)[0]!.id).toBe('minimal')
       expect(result.modes[0]!.templateLength).toBeGreaterThan(0)
     } finally {
       await fs.rm(dataRoot, { recursive: true, force: true })
@@ -106,7 +106,7 @@ describe('prompt 工具层', () => {
 
       const current = (await preview.execute({}, makeExec())) as PreviewResult
       expect(current.success).toBe(true)
-      expect(current.modeId).toBe('code')
+      expect(current.modeId).toBe('minimal')
       // 结构断言：预览文本包含系统内容首行（模板或 system 条目，不绑定具体内容）
       const currentMode = await service.getCurrentMode()
       const systemText = currentMode.template

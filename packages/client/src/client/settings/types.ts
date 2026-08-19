@@ -15,6 +15,7 @@ export interface CustomAgentConfig {
   enabled: boolean
   toolMode?: 'all' | 'allow' | 'deny'
   tools?: string[]
+  maxIterations?: number
 }
 
 /** 消息级自动存档策略（checkpoints.messageCheckpoint）。 */
@@ -92,21 +93,8 @@ export interface GrayCodeConfig {
   summary: SummaryConfig
   branches: DataRootConfig & ScopedConfig
   persona: ToggleScopedConfig & { template?: string }
-  prompt: DataRootConfig & ToggleScopedConfig & {
-    sendHistoryThoughts: boolean
-    modeToolPolicy: boolean
-    requestLayer: boolean
-    /** 覆盖 DSH 自带系统提示词（宿主内容以 {{graycode_dsh_prompt}} 变量可引用）。 */
-    overrideHostPrompt: boolean
-    /** 注入 TODO 动态上下文（以宿主注入上下文行显示）。 */
-    dynamicTodo: boolean
-    /** 注入 MEMORY 说明动态上下文。 */
-    dynamicMemory: boolean
-  }
-  migration: DataRootConfig & {
-    enabled: boolean
-    allowLegacyReaders: boolean
-  }
+  prompt: DataRootConfig
+  migration: DataRootConfig & { enabled: boolean }
   stagedDiff: DataRootConfig & ToggleScopedConfig
   activity: DataRootConfig & ToggleScopedConfig & { sampleIntervalMs: number }
   media: ToggleScopedConfig & { maxBatch: number }
@@ -116,6 +104,8 @@ export interface GrayCodeConfig {
     generalWorkerEnabled: boolean
     maxHopDepth: number
     maxConcurrent: number
+    /** 子代理默认最大工具调用轮数（-1 不限，默认 80）。 */
+    defaultMaxIterations: number
     /** 排队等待并发名额的超时（秒，-1 不限，默认 600）。 */
     queueTimeoutSeconds: number
     /** one-shot 子代理默认最大运行时间（秒，-1 不限，默认 1800；continuable 不适用）。 */
@@ -123,7 +113,7 @@ export interface GrayCodeConfig {
     customAgents: CustomAgentConfig[]
   }
   notifications: ToggleScopedConfig & { windowsToast: boolean }
-  thoughts: { enabled: boolean; sendHistoryThoughts: boolean }
+  thoughts: { sendHistoryThoughts: boolean }
 }
 
 export type GrayCodePatch = { [K in keyof GrayCodeConfig]?: GrayCodeConfig[K] }

@@ -124,28 +124,14 @@ src/prompt/
 - 模式切换：service 变更事件 → `injector.refresh()`；同状态刷新幂等。
 - 持久化：`<dataRoot>/prompt/modes.json`（versioned envelope，原子 tmp+rename，
   Windows rename 重试模式同 memory/domain/configFile.ts）。
-- 配置默认值：`requestLayer` / `sendHistoryThoughts` / `overrideHostPrompt` /
-  `dynamicTodo` / `dynamicMemory` 默认 true；组合根 AND 联动
-  （thoughts 实际启用 = `thoughts.enabled && prompt.requestLayer`）。
+- 提示词替换、预设消息、工具策略与动态上下文是提示词模式的核心链路，始终启用；
+  用户配置只保留数据目录，以及 thoughts 域的模拟思考发送选项。
 
-## 存量配置升级（默认值翻转）
+## 旧配置兼容
 
-`requestLayer` / `sendHistoryThoughts` / `overrideHostPrompt` / `dynamicTodo` /
-`dynamicMemory`（以及 thoughts 域的 `thoughts.enabled` / `sendHistoryThoughts`）
-的默认值都是 `true`，但**默认值只对新建配置生效**：
-
-- dsh-settings 的解析顺序是 schema 默认 < base 层 < 用户文档层（settings.yaml）；
-  已持久化的用户显式值永远胜出，不会被 base 层默认覆盖。
-- 存量用户在旧版本显式保存的 `false`（例如 settings.yaml 中留有
-  `prompt.requestLayer: false`、`prompt.sendHistoryThoughts: false` 或
-  `thoughts.enabled: false` 等键）升级后**仍然生效**，不会因默认值翻转而自动
-  开启。这是「用户显式选择优先」的预期语义，不是回归。
-- 后果示例：`requestLayer: false` 时预设 user/assistant 条目不注入；且因组合根
-  AND 联动（thoughts 实际启用 = `thoughts.enabled && prompt.requestLayer`），
-  thoughts 域同样保持关闭。
-- 需要启用新默认行为的存量配置，请手动更新：在设置面板把对应开关改回开启，
-  或直接编辑 `$DSH_HOME/settings.yaml` 删除/改值相关键；面板「重置」（replace）
-  会移除用户层键，使其重新继承 base 默认值。
+旧版本遗留的实现开关会被 schema 忽略，避免残留的 `false` 让系统提示词、预设消息
+或动态上下文静默消失。`thoughts.sendHistoryThoughts` 仍保留，用来决定 assistant
+预设条目的 `fakeThought` 是否作为 typed reasoning 块发送。
 
 ## 测试
 

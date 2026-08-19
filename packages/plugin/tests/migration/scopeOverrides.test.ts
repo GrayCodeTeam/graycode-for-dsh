@@ -400,7 +400,7 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
     const overridesPath = path.join(os.tmpdir(), `scope-overrides-${Date.now()}.json`)
     try {
       const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
-      const tools = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const tools = createMigrationTools(fx.service)
       const scanTool = tools.find(tool => tool.name === 'migration_scan')
       const applyTool = tools.find(tool => tool.name === 'migration_apply')
       if (!scanTool || !applyTool) throw new Error('migration tools 未完整注册')
@@ -437,7 +437,7 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
     const badPath = path.join(os.tmpdir(), `scope-overrides-bad-${Date.now()}.json`)
     try {
       const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
-      const applyTool = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const applyTool = createMigrationTools(fx.service)
         .find(tool => tool.name === 'migration_apply')
       if (!applyTool) throw new Error('migration_apply 未注册')
       fs.writeFileSync(badPath, '{broken', 'utf-8')
@@ -465,7 +465,7 @@ describe('migration_apply scopeOverridesFile（D-1 文件导入）', () => {
     const badPath = path.join(os.tmpdir(), `scope-overrides-invalid-${Date.now()}.json`)
     try {
       const scan = await fx.service.scan(path.join(FIXTURES_DIR, 'F11-memory-workspace', 'dataRoot'))
-      const applyTool = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const applyTool = createMigrationTools(fx.service)
         .find(tool => tool.name === 'migration_apply')
       if (!applyTool) throw new Error('migration_apply 未注册')
       fs.writeFileSync(badPath, JSON.stringify(payload), 'utf-8')

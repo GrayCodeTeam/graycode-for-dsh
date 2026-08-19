@@ -35,11 +35,11 @@ async function serviceOf(root: string): Promise<PromptSettingsService> {
 }
 
 describe('内置模式种子', () => {
-  test('首次运行种子化 5 个内置模式，currentModeId 默认 code；每个内置模式自带一个 chat_history 条目', async () => {
+  test('首次运行种子化 6 个内置模式，currentModeId 默认 minimal；每个内置模式自带完整三件套', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
     const modes = await service.listModes()
-    expect(modes.map(mode => mode.id)).toEqual(['code', 'design', 'plan', 'ask', 'review'])
+    expect(modes.map(mode => mode.id)).toEqual(['minimal', 'code', 'design', 'plan', 'ask', 'review'])
     for (const mode of modes) {
       expect(mode.kind).toBe('builtin')
       expect(mode.name).toBe(mode.id)
@@ -55,11 +55,11 @@ describe('内置模式种子', () => {
       expect(mode.promptEntries[1]).toMatchObject({ id: 'chat-history', enabled: true, content: '' })
       expect(mode.promptEntries[2]!.content).toContain('{{$TODO_LIST}}')
     }
-    expect((await service.getCurrentMode()).id).toBe('code')
+    expect((await service.getCurrentMode()).id).toBe('minimal')
     // 种子已持久化
     const raw = JSON.parse(await readFile(storePath(root), 'utf8'))
     expect(raw.version).toBe(1)
-    expect(raw.modes).toHaveLength(5)
+    expect(raw.modes).toHaveLength(6)
   })
 
   test('ensureChatHistoryPromptEntry：无标记自动补（order 排末位）、多标记只留第一个、内容强制为空、order 重编号', async () => {
@@ -256,7 +256,7 @@ describe('模式 CRUD', () => {
     expect(original?.promptEntries[0]?.id).toBe('orig-entry')
   })
 
-  test('deleteMode：custom 可删；builtin 拒绝；删除当前模式回退到 code', async () => {
+  test('deleteMode：custom 可删；builtin 拒绝；删除当前模式回退到 minimal', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
     const created = await service.createMode({ name: 'Temp' })
@@ -266,7 +266,7 @@ describe('模式 CRUD', () => {
 
     await service.deleteMode(created.id)
     expect(await service.getMode(created.id)).toBeUndefined()
-    expect((await service.getCurrentMode()).id).toBe('code')
+    expect((await service.getCurrentMode()).id).toBe('minimal')
   })
 
   test('setCurrentMode 未知 id 抛 MODE_NOT_FOUND；合法切换持久化', async () => {
@@ -298,7 +298,7 @@ describe('导入 / 导出', () => {
     expect(result.modes[0]?.template).toBe('t')
     expect(result.modes[0]?.promptEntries[0]?.content).toBe('c')
     expect(result.modes[0]?.promptEntries[0]?.role).toBe('assistant')
-    expect(await service.listModes()).toHaveLength(7)
+    expect(await service.listModes()).toHaveLength(8)
   })
 
   test('P-H4：旧版导出 JSON 导入——type:chat_history 映射为 chat_history 角色；旧字段丢弃并列入 warnings', async () => {
@@ -437,6 +437,36 @@ describe('导入 / 导出', () => {
     expect(empty.warnings).toContain('export envelope carried no modes; nothing was imported')
   })
 
+  test('Gray Code 单模式包装、无 content 的 Chat History 与完整设置导出均可导入', async () => {
+    const service = await serviceOf(await makeDataRoot())
+    const wrapped = await service.importModes({
+      mode: {
+        id: 'wrapped',
+        name: 'Wrapped',
+        promptEntries: [{ id: 'chat-history', type: 'chat_history', role: 'user' }],
+      },
+    })
+    expect(wrapped.modes[0]?.name).toBe('Wrapped')
+    expect(wrapped.modes[0]?.promptEntries).toEqual([
+      expect.objectContaining({ id: 'chat-history', role: 'chat_history', content: '' }),
+    ])
+
+    const full = await service.importModes({
+      version: '1.0',
+      vscodeSettings: {
+        'graycode.promptModes': {
+          schema: 'graycode.promptModes.v1',
+          modes: [{ id: 'full-export', name: 'Full Export', promptEntries: [] }],
+        },
+      },
+    })
+    expect(full.modes[0]?.name).toBe('Full Export')
+    expect(full.warnings).toEqual(expect.arrayContaining([
+      'imported full Gray Code settings export; using vscodeSettings.graycode.promptModes',
+      'imported payload is a Gray Code export envelope (graycode.promptModes.v1); importing the modes array',
+    ]))
+  })
+
   test('D-4：toolPolicy / toolPolicyCustomized 经 createMode/updateMode 保存并在导入后保留', async () => {
     const root = await makeDataRoot()
     const service = await serviceOf(root)
@@ -554,12 +584,12 @@ describe('导入 / 导出', () => {
     })
     const exported = await service.exportModes()
     expect(exported.version).toBe(1)
-    expect(exported.modes).toHaveLength(6)
+    expect(exported.modes).toHaveLength(7)
 
     const root2 = await makeDataRoot()
     const service2 = await serviceOf(root2)
     const result = await service2.importModes(exported.modes)
-    expect(result.modes).toHaveLength(6)
+    expect(result.modes).toHaveLength(7)
     expect(result.warnings).toEqual([])
     const round = result.modes.find(mode => mode.name === 'Round')
     expect(round?.template).toBe('tpl')
@@ -684,7 +714,7 @@ describe('存储与事件', () => {
     const entries = await readdir(path.join(root, 'prompt'))
     expect(entries.filter(name => name.endsWith('.tmp'))).toEqual([])
     const parsed = JSON.parse(await readFile(storePath(root), 'utf8')) as { modes: unknown[] }
-    expect(parsed.modes.length).toBe(7)
+    expect(parsed.modes.length).toBe(8)
   })
 
   test('差距-1：setCurrentMode 写盘失败回滚内存，无 内存新/磁盘旧 分叉', async () => {
@@ -699,8 +729,8 @@ describe('存储与事件', () => {
     await expect(service.setCurrentMode('plan')).rejects.toMatchObject({
       code: PromptErrorCode.STORAGE_WRITE_FAILED,
     })
-    // 内存回滚：仍是旧模式 code（与磁盘一致）
-    expect((await service.getCurrentMode()).id).toBe('code')
+    // 内存回滚：仍是旧模式 minimal（与磁盘一致）
+    expect((await service.getCurrentMode()).id).toBe('minimal')
 
     // 修复存储后切换正常
     await rm(promptDir, { force: true })

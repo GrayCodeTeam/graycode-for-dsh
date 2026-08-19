@@ -41,7 +41,7 @@ function makeConnection(call: ReturnType<typeof vi.fn>): ConnectionHandle {
 describe('settings path helpers', () => {
   it('reads real module values', () => {
     expect(getAtPath(DEFAULTS, ['memory', 'wakeLines'])).toBe(96)
-    expect(getAtPath(DEFAULTS, ['prompt', 'modeToolPolicy'])).toBe(true)
+    expect(getAtPath(DEFAULTS, ['prompt', 'dataRoot'])).toBe('')
     expect(getAtPath(DEFAULTS, ['missing', 'value'])).toBeUndefined()
   })
 
@@ -235,19 +235,19 @@ describe('GrayCodeStore', () => {
 
   it('serializes writes so slower older responses cannot overwrite newer state', async () => {
     const order: string[] = []
-    const call = vi.fn(async (_channel, _endpoint, payload: { patch: { thoughts: { enabled: boolean } } }) => {
-      order.push(`start:${payload.patch.thoughts.enabled}`)
+    const call = vi.fn(async (_channel, _endpoint, payload: { patch: { thoughts: { sendHistoryThoughts: boolean } } }) => {
+      order.push(`start:${payload.patch.thoughts.sendHistoryThoughts}`)
       await Promise.resolve()
-      order.push(`end:${payload.patch.thoughts.enabled}`)
+      order.push(`end:${payload.patch.thoughts.sendHistoryThoughts}`)
       return { ok: true as const, value: { ...DEFAULTS, thoughts: payload.patch.thoughts } }
     })
     const store = createGrayCodeStore(makeConnection(call))
     await Promise.all([
-      store.patch({ thoughts: { enabled: true, sendHistoryThoughts: false } }),
-      store.patch({ thoughts: { enabled: false, sendHistoryThoughts: false } }),
+      store.patch({ thoughts: { sendHistoryThoughts: true } }),
+      store.patch({ thoughts: { sendHistoryThoughts: false } }),
     ])
     expect(order).toEqual(['start:true', 'end:true', 'start:false', 'end:false'])
-    expect(store.state).toMatchObject({ status: 'ready', config: { thoughts: { enabled: false } } })
+    expect(store.state).toMatchObject({ status: 'ready', config: { thoughts: { sendHistoryThoughts: false } } })
   })
 
   it('rebases queued field edits on the latest snapshot within one module', async () => {

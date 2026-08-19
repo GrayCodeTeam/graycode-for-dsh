@@ -74,15 +74,12 @@ async function makeWorld(modeToolPolicy?: boolean): Promise<World> {
   mounted.push(await ctx.plugin(AgentLoop, { agents: [] }))
   ctx.llm.registerAdapter(['echo'], new ScriptedAdapter([]))
 
-  const promptFiber = await ctx.plugin(promptPlugin, {
+  const promptConfig = promptPlugin.Config({
     dataRoot,
-    enabled: true,
-    agentScope: 'roots',
-    sendHistoryThoughts: false,
-    requestLayer: false,
-    // 不传时显式走默认 true，与 Config schema 的 default(true) 一致
+    // 旧配置字段会被 schema 忽略；核心模式策略始终启用。
     modeToolPolicy: modeToolPolicy ?? true,
-  })
+  } as never)
+  const promptFiber = await ctx.plugin(promptPlugin, promptConfig)
   mounted.push(promptFiber)
 
   // 全局探针写工具：名字不在任何内置白名单内；经 ctx.tools.execute 走完整管线。
@@ -190,11 +187,11 @@ describe('B6：prompt 插件 → ctx.tools.guard 模式 toolPolicy 接线', () =
     expectAllowed(await executeProbe(world, false))
   })
 
-  it('modeToolPolicy=false 零侵入：ask 模式下写工具照常执行', async () => {
+  it('旧 modeToolPolicy=false 不再关闭核心策略：ask 仍拒绝名单外工具', async () => {
     const world = await makeWorld(false)
     await switchMode(world, 'ask')
-    expectAllowed(await executeProbe(world, false))
-    expectAllowed(await executeProbe(world, true))
+    expectDenied(await executeProbe(world, false), 'ask')
+    expectDenied(await executeProbe(world, true), 'ask')
   })
 
   it('插件卸载后 guard 随 ctx.effect disposer 注销（HMR 契约）', async () => {

@@ -10,24 +10,23 @@
  * message list; `after` entries land before the current turn's user message
  * (aligned with the original Gray semantics).
  *
- * ENABLED BY DEFAULT: `thoughts.enabled` and `sendHistoryThoughts` both
- * default to true, so mounting the plugin injects preset entries as real
- * messages (and fake thoughts as reasoning blocks) unless explicitly
- * disabled. The rewrite substitutes a NEW options object for the documented
+ * This layer is always active so preset entries cannot be accidentally
+ * disabled. `sendHistoryThoughts` only controls optional reasoning blocks.
+ * The rewrite substitutes a NEW options object for the documented
  * read-only loop request (NON-CONTRACT usage, ADR-0002 §4b) and re-marks +
  * deep-freezes it to keep the loop contract; any state/rewrite failure passes
  * the original request through untouched (fail-closed).
  *
- * requestLayer hand-off (prompt): when `prompt.requestLayer` is enabled the
+ * Request-layer hand-off: the prompt injector skips user/assistant
  * prompt injector skips user/assistant context paragraphs — the same preset
  * would otherwise be injected twice (once as system text by D-11 = c, once
- * as real messages here). The pairing is config-side: enable both
- * `prompt.requestLayer` and `thoughts.enabled` together.
+ * as real messages here). Both halves are installed together by the
+ * composition root.
  *
  * State source: the live prompt mode service (`graycode.promptModes`,
  * provided by graycode-prompt). Per llm/stream event the current mode's
  * preset entries are projected to injections + block-order anchors. If the
- * service is absent (prompt disabled / not mounted) or no mode is loaded,
+ * service is absent or no mode is loaded,
  * the adapter degrades to passing every request untouched.
  */
 
@@ -53,14 +52,10 @@ export interface PromptModesLike {
 }
 
 /**
- * Thoughts config. Enabled by default: mounting the plugin injects preset
- * user/assistant entries as real messages and fake thoughts as reasoning
- * blocks. Turn either switch off to opt out; fail-closed handling stays —
- * any state/rewrite error passes the original request through untouched.
+ * Thoughts config. Preset messages are always injected; this option only
+ * controls whether assistant fake-thought fields become reasoning blocks.
  */
 export interface Config {
-  /** Master switch (default true): off passes every llm/stream request untouched. */
-  enabled: boolean
   /**
    * sendHistoryThoughts gate for reasoning blocks (default true; off = the
    * thought field is simply not set — never a `[thinking]` text downgrade).
@@ -69,7 +64,6 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(true),
   sendHistoryThoughts: z.boolean().default(true),
 })
 
@@ -103,7 +97,7 @@ export function apply(
   getState: ThoughtsStateProvider = modeDrivenState(ctx, config.sendHistoryThoughts),
 ): () => void {
   const adapter = createLlmStreamThoughtsAdapter(ctx, () => ({
-    enabled: config.enabled,
+    enabled: true,
     sendHistoryThoughts: config.sendHistoryThoughts,
     ...getState(),
   }))

@@ -393,7 +393,9 @@ export function PromptModeManager({ t, remote }: PromptModeManagerProps): ReactN
                 onChange={event => handleSelectMode(event.target.value)}
               >
                 {modes.map(mode => (
-                  <option key={mode.id} value={mode.id}>{mode.name}</option>
+                  <option key={mode.id} value={mode.id}>
+                    {mode.kind === 'builtin' ? t(`promptModes.builtin.${mode.id}`) : mode.name}
+                  </option>
                 ))}
               </select>
               {selectedId === currentModeId && <span style={badgeStyle}>{t('promptModes.current')}</span>}

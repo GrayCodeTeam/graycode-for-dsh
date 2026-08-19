@@ -132,13 +132,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     todo: config.todo,
     subagents: config.subagents,
     notifications: config.notifications,
-    // A1 AND 联动（防双注入）：thoughts 的实际启用 = thoughts.enabled && prompt.requestLayer。
-    // requestLayer=false 时预设 user/assistant 条目不注入（段落路径已删除），thoughts
-    // 也必须不注入，否则（thoughts 独立开启时）会出现无来源注入。
-    thoughts: {
-      ...config.thoughts,
-      enabled: config.thoughts.enabled && config.prompt.requestLayer,
-    },
+    thoughts: config.thoughts,
     images: config.images,
     summary: config.summary,
   }
@@ -148,49 +142,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Typert `@Remote` 方法（设计见 docs/PLAN_V2.md §5.6 与 docs/ADR-0002 §5）。
   new GrayRemoteService(ctx, { journalPath: `${dataRoot}/remote/projections.jsonl` })
 
-  // --- A1 AND 联动（防双注入）共享状态 ---
-  // createLiveConfigUpdater 按 key 独立 diff：用户只改 prompt.requestLayer 时 thoughts
-  // key 不变、thoughts fiber 不会重启。联动因此放在 fibers 包装层，用共享 ref 传递
-  // 当前 requestLayer：prompt 的 update 先落 ref 再调原 fiber.update；thoughts 的
-  // update 读取 ref 派生 enabled（next.enabled && currentPromptRequestLayer）。
-  let currentPromptRequestLayer = liveConfig.prompt.requestLayer
-  /** thoughts 的原始开关（AND 派生之前）；thoughts 每次 update 时刷新。 */
-  let rawThoughtsConfig: settings.GrayCodeConfig['thoughts'] = { ...config.thoughts }
-
   // Thoughts request layer (A1): llm/stream waterfall rewrite (non-contract,
   // ADR-0002 §4b). Reads the prompt-mode service lazily via ctx.get — prompt
   // must mount first (it does, right above) so the service exists.
   const promptFiber = ctx.plugin(prompt, liveConfig.prompt)
   const thoughtsFiber = ctx.plugin(thoughts, liveConfig.thoughts)
-
-  /** thoughts live-update wrapper: AND-derive enabled from the shared requestLayer ref. */
-  const liveThoughts: LiveConfigFibers['thoughts'] = {
-    update: (next: settings.GrayCodeConfig['thoughts'], noSave?: boolean) => {
-      rawThoughtsConfig = { ...next }
-      return thoughtsFiber.update(
-        { ...next, enabled: next.enabled && currentPromptRequestLayer },
-        noSave,
-      )
-    },
-  }
-
-  /** prompt live-update wrapper: persist the requestLayer ref, then re-derive thoughts when it flips. */
-  const livePrompt: LiveConfigFibers['prompt'] = {
-    update: async (next: settings.GrayCodeConfig['prompt'], noSave?: boolean) => {
-      const requestLayerChanged = next.requestLayer !== currentPromptRequestLayer
-      currentPromptRequestLayer = next.requestLayer
-      await promptFiber.update(next, noSave)
-      // requestLayer 翻转会改变 thoughts 的实际启用（AND）。updater 按 key 独立 diff，
-      // 不会因此重启 thoughts fiber；这里主动用最新 ref 重派生，避免双注入
-      // （requestLayer 关而 thoughts 仍开）或条目丢失（requestLayer 开而 thoughts 仍关）。
-      if (requestLayerChanged) {
-        await thoughtsFiber.update(
-          { ...rawThoughtsConfig, enabled: rawThoughtsConfig.enabled && currentPromptRequestLayer },
-          noSave,
-        )
-      }
-    },
-  }
 
   const fibers = {
     workflows: ctx.plugin(workflows, liveConfig.workflows),
@@ -198,7 +154,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     checkpoints: ctx.plugin(checkpoints, liveConfig.checkpoints),
     branches: ctx.plugin(branches, liveConfig.branches),
     persona: ctx.plugin(persona, liveConfig.persona),
-    prompt: livePrompt,
+    prompt: promptFiber,
     migration: ctx.plugin(migration, liveConfig.migration),
     stagedDiff: ctx.plugin(stagedDiff, liveConfig.stagedDiff),
   // Activity domain: Config carries its own dataRoot field, forwarded from the composition root.
@@ -215,9 +171,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Notifications domain (C4): notify tool + Windows native toast / noop backends.
     notifications: ctx.plugin(notifications, liveConfig.notifications),
   // Thoughts request layer (A1): llm/stream waterfall rewrite (non-contract,
-  // ADR-0002 §4b). Actual activation is AND-paired with prompt.requestLayer
-  // (see the shared-ref wrappers above) to prevent unsourced/double injection.
-    thoughts: liveThoughts,
+  // ADR-0002 §4b), always paired with the prompt plugin above.
+    thoughts: thoughtsFiber,
   // Images: generate_image tool (default off); mounts after media so its
   // real implementation supersedes the media domain's fail-closed placeholder.
     images: ctx.plugin(images, liveConfig.images),

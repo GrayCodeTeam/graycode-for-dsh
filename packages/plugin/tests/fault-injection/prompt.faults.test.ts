@@ -220,8 +220,8 @@ describe('损坏的 modes.json（JSON 语法错误）', () => {
     // 修复存储（删除损坏文件）后，新实例回退内置默认模式
     await rm(storePath(root))
     const repaired = await serviceOf(root)
-    expect((await repaired.getCurrentMode()).id).toBe('code')
-    expect((await repaired.listModes()).map(mode => mode.id)).toEqual(['code', 'design', 'plan', 'ask', 'review'])
+    expect((await repaired.getCurrentMode()).id).toBe('minimal')
+    expect((await repaired.listModes()).map(mode => mode.id)).toEqual(['minimal', 'code', 'design', 'plan', 'ask', 'review'])
   })
 })
 
@@ -240,8 +240,8 @@ describe('存储提交失败（persist 写入中抛错）', () => {
     expect((error as PromptError).code).toBe(PromptErrorCode.STORAGE_WRITE_FAILED)
 
     // 期望最终状态（差距-1 已修复）：persist 失败 → 内存 currentModeId 回滚，
-    // 内存与磁盘一致（都是旧模式 code）；调用方收到稳定错误码，绝不假报成功
-    expect((await service.getCurrentMode()).id).toBe('code')
+    // 内存与磁盘一致（都是旧模式 minimal）；调用方收到稳定错误码，绝不假报成功
+    expect((await service.getCurrentMode()).id).toBe('minimal')
 
     // 修复存储后，新的提交可正常落盘并被新实例读到
     await rm(promptDir, { force: true })

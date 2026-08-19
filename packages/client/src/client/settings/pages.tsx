@@ -286,7 +286,8 @@ const SubagentsPage: GrayCodePage = ({ t, config, onChange }) => (
       description={t('pages.subagents.description')}
       fields={[
         { kind: 'boolean', path: ['subagents', 'generalWorkerEnabled'], labelKey: 'fields.generalWorkerEnabled', descriptionKey: 'fields.generalWorkerEnabled.description' },
-        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', descriptionKey: 'fields.maxConcurrent.description', min: 0, step: 1 },
+        { kind: 'number', path: ['subagents', 'maxConcurrent'], labelKey: 'fields.maxConcurrent', descriptionKey: 'fields.maxConcurrent.description', min: -1, step: 1 },
+        { kind: 'number', path: ['subagents', 'defaultMaxIterations'], labelKey: 'fields.defaultMaxIterations', descriptionKey: 'fields.defaultMaxIterations.description', min: -1, step: 1 },
         { kind: 'number', path: ['subagents', 'queueTimeoutSeconds'], labelKey: 'fields.queueTimeoutSeconds', descriptionKey: 'fields.queueTimeoutSeconds.description', min: -1, step: 1 },
         { kind: 'number', path: ['subagents', 'defaultMaxRuntimeSeconds'], labelKey: 'fields.defaultMaxRuntimeSeconds', descriptionKey: 'fields.defaultMaxRuntimeSeconds.description', min: -1, step: 1 },
       ]}
@@ -310,15 +311,7 @@ const PromptPage: GrayCodePage = ({ t, config, onChange, remote }) => (
       fields={[
         { kind: 'boolean', path: ['persona', 'enabled'], labelKey: 'fields.personaEnabled', descriptionKey: 'fields.personaEnabled.description' },
         scope('persona', t),
-        scope('prompt', t),
-        { kind: 'boolean', path: ['prompt', 'modeToolPolicy'], labelKey: 'fields.modeToolPolicy', descriptionKey: 'fields.modeToolPolicy.description' },
-        { kind: 'boolean', path: ['prompt', 'sendHistoryThoughts'], labelKey: 'fields.sendHistoryThoughts' },
-        { kind: 'boolean', path: ['prompt', 'requestLayer'], labelKey: 'fields.requestLayer', descriptionKey: 'fields.requestLayer.description' },
-        { kind: 'boolean', path: ['prompt', 'overrideHostPrompt'], labelKey: 'fields.overrideHostPrompt', descriptionKey: 'fields.overrideHostPrompt.description' },
-        { kind: 'boolean', path: ['prompt', 'dynamicTodo'], labelKey: 'fields.dynamicTodo', descriptionKey: 'fields.dynamicTodo.description' },
-        { kind: 'boolean', path: ['prompt', 'dynamicMemory'], labelKey: 'fields.dynamicMemory', descriptionKey: 'fields.dynamicMemory.description' },
-        { kind: 'boolean', path: ['thoughts', 'enabled'], labelKey: 'fields.thoughtsEnabled', descriptionKey: 'fields.thoughtsEnabled.description' },
-        { kind: 'boolean', path: ['thoughts', 'sendHistoryThoughts'], labelKey: 'fields.thoughtsHistory' },
+        { kind: 'boolean', path: ['thoughts', 'sendHistoryThoughts'], labelKey: 'fields.thoughtsHistory', descriptionKey: 'fields.thoughtsHistory.description' },
       ]}
       config={config}
       onChange={onChange}
@@ -354,15 +347,9 @@ const ToolsPage: GrayCodePage = ({ t, config, onChange }) => (
 
 const AdvancedPage: GrayCodePage = ({ t, config, onChange, onReset }) => {
   const dataRoots = ['workflows', 'memory', 'checkpoints', 'branches', 'prompt', 'migration', 'stagedDiff', 'activity'] as const
-  // 迁移双闸门（enabled=装载迁移工具；allowLegacyReaders=授权读取旧数据目录）
-  // 在 UI 上折叠为一个开关：对用户而言「启用旧版迁移」意味着同时装载工具并
-  // 授权读取，两个 config 字段与宿主契约保持不变（高级用户仍可在 settings.yaml
-  // 里分开配置）。写入经 store 的串行队列，两次 set 各自基于最新已确认快照 rebase。
-  const migrationOn = config.migration.enabled && config.migration.allowLegacyReaders
+  const migrationOn = config.migration.enabled
   const setMigration = (on: boolean): void => {
-    void Promise.resolve(onChange(['migration', 'enabled'], on))
-      .then(() => onChange(['migration', 'allowLegacyReaders'], on))
-      .catch(() => undefined)
+    void Promise.resolve(onChange(['migration', 'enabled'], on)).catch(() => undefined)
   }
   return (
     <div>

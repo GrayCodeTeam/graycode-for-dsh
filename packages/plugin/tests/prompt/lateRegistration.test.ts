@@ -47,19 +47,12 @@ describe('prompt 域 Remote 端点晚到注册（GRAY_ENDPOINT_NOT_FOUND 回归�
     const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'graycode-prompt-late-'))
     tempDirs.push(dataRoot)
 
-    // prompt 顶层 inject 依赖的最小 mock（agentScope=disabled 时不注册工具/注入器，
-    // 不实际访问 agents/tools 行为）。
+    // prompt 顶层 inject 依赖的最小 mock；当前没有真实 agent，因此不会注册工具。
     ctx.provide('agents', { on: () => () => {}, list: () => [], roots: () => [] })
     ctx.provide('tools', { guard: () => () => {} })
 
-    await ctx.plugin(promptPlugin, {
-      dataRoot,
-      enabled: true,
-      agentScope: 'disabled',
-      sendHistoryThoughts: true,
-      modeToolPolicy: false,
-      requestLayer: false,
-    })
+    const promptConfig = promptPlugin.Config({ dataRoot } as promptPlugin.Config)
+    await ctx.plugin(promptPlugin, promptConfig)
 
     // grayRemote 尚不存在：端点未注册（旧 bug 场景）。
     expect(ctx.get('grayRemote')).toBeUndefined()

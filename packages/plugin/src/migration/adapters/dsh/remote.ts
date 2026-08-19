@@ -7,7 +7,7 @@
  *   为空数组）。client ScopeMapPanel 消费（rc.6 无浏览器→host 通道，面板以
  *   Remote/Mock 双源交付，host 升级后平移 Typert 即联调）。
  *
- * 安全门：端点仅在 migration.allowLegacyReaders=true 时由 apply() 注册
+ * 端点仅在旧版数据迁移功能开启时由 apply() 注册。
  * （与工具层一致——读取旧扩展数据是显式操作）。
  */
 

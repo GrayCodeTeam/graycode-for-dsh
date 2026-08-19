@@ -157,19 +157,32 @@ interface AgentDraft {
   systemPrompt: string
   toolMode: 'all' | 'allow' | 'deny'
   toolsText: string
+  maxIterations: string
 }
 
-const EMPTY_DRAFT: AgentDraft = { name: '', description: '', systemPrompt: '', toolMode: 'all', toolsText: '' }
+const EMPTY_DRAFT: AgentDraft = { name: '', description: '', systemPrompt: '', toolMode: 'all', toolsText: '', maxIterations: '' }
 
 function parseToolNames(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map(name => name.trim()).filter(name => name.length > 0))]
 }
 
-type DraftError = { name?: string; tools?: string }
+function parseOptionalLimit(value: string): number | undefined {
+  if (value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= -1 ? parsed : undefined
+}
+
+type DraftError = { name?: string; tools?: string; maxIterations?: string }
 
 function validateTools(draft: AgentDraft): DraftError {
   return draft.toolMode !== 'all' && parseToolNames(draft.toolsText).length === 0
     ? { tools: 'toolsRequired' }
+    : {}
+}
+
+function validateIterationLimit(draft: AgentDraft): DraftError {
+  return draft.maxIterations.trim() !== '' && parseOptionalLimit(draft.maxIterations) === undefined
+    ? { maxIterations: 'invalidMaxIterations' }
     : {}
 }
 
@@ -181,9 +194,9 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
   const [submitError, setSubmitError] = useState('')
 
   const addAgent = (): void => {
-    const error = { ...validateCustomAgentDraft(draft, agents), ...validateTools(draft) }
+    const error = { ...validateCustomAgentDraft(draft, agents), ...validateTools(draft), ...validateIterationLimit(draft) }
     setDraftError(error)
-    if (error.name !== undefined || error.tools !== undefined) return
+    if (error.name !== undefined || error.tools !== undefined || error.maxIterations !== undefined) return
     setSubmitError('')
     Promise.resolve(onChange(upsertCustomAgent(agents, {
       id: createCustomAgentId(),
@@ -193,6 +206,7 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       enabled: true,
       toolMode: draft.toolMode,
       tools: parseToolNames(draft.toolsText),
+      maxIterations: parseOptionalLimit(draft.maxIterations),
     }))).then(
       () => setDraft(EMPTY_DRAFT),
       (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
@@ -207,6 +221,7 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       systemPrompt: agent.systemPrompt,
       toolMode: agent.toolMode ?? 'all',
       toolsText: (agent.tools ?? []).join('\n'),
+      maxIterations: agent.maxIterations === undefined ? '' : String(agent.maxIterations),
     })
   }
 
@@ -214,8 +229,9 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
     const error = {
       ...validateCustomAgentDraft(editDraft, agents.filter(candidate => candidate.id !== agent.id)),
       ...validateTools(editDraft),
+      ...validateIterationLimit(editDraft),
     }
-    if (error.name !== undefined || error.tools !== undefined) {
+    if (error.name !== undefined || error.tools !== undefined || error.maxIterations !== undefined) {
       setDraftError(error)
       return
     }
@@ -228,6 +244,7 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
       systemPrompt: editDraft.systemPrompt.trim(),
       toolMode: editDraft.toolMode,
       tools: parseToolNames(editDraft.toolsText),
+      maxIterations: parseOptionalLimit(editDraft.maxIterations),
     }))).then(
       () => { setEditingId(null); setDraftError({}) },
       (cause: unknown) => setSubmitError(cause instanceof Error ? cause.message : String(cause)),
@@ -308,8 +325,22 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
             onChange={event => setDraft({ ...draft, systemPrompt: event.target.value })}
           />
         </label>
+        <label>
+          <span style={fieldLabelStyle}>{t('fields.customAgentMaxIterations')}</span>
+          <span style={fieldDescriptionStyle}>{t('fields.customAgentMaxIterations.description')}</span>
+          <input
+            type="number"
+            min={-1}
+            step={1}
+            style={inputStyle}
+            value={draft.maxIterations}
+            placeholder="80"
+            onChange={event => setDraft({ ...draft, maxIterations: event.target.value })}
+          />
+        </label>
         {draftError.name !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.name}`)}</p>}
         {draftError.tools !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.tools}`)}</p>}
+        {draftError.maxIterations !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.maxIterations}`)}</p>}
         <div style={addRowStyle}>
           <button
             type="button"
@@ -365,6 +396,7 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
                   )}
                   {draftError.name !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.name}`)}</p>}
                   {draftError.tools !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.tools}`)}</p>}
+                  {draftError.maxIterations !== undefined && <p style={errorStyle}>{t(`customAgents.${draftError.maxIterations}`)}</p>}
                   <label>
                     <span style={fieldLabelStyle}>{t('fields.customAgentDescription')}</span>
                     <input
@@ -381,6 +413,19 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
                       style={textareaStyle}
                       value={editDraft.systemPrompt}
                       onChange={event => setEditDraft({ ...editDraft, systemPrompt: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span style={fieldLabelStyle}>{t('fields.customAgentMaxIterations')}</span>
+                    <span style={fieldDescriptionStyle}>{t('fields.customAgentMaxIterations.description')}</span>
+                    <input
+                      type="number"
+                      min={-1}
+                      step={1}
+                      style={inputStyle}
+                      value={editDraft.maxIterations}
+                      placeholder="80"
+                      onChange={event => setEditDraft({ ...editDraft, maxIterations: event.target.value })}
                     />
                   </label>
                   <div style={addRowStyle}>
@@ -413,6 +458,11 @@ export function CustomAgentsSection({ t, agents, onChange }: CustomAgentsSection
                           ? ` (${agent.tools!.join(', ')})`
                           : ''}
                       </span>
+                      {agent.maxIterations !== undefined && (
+                        <span style={entryMetaStyle}>
+                          {t('fields.customAgentMaxIterations')}: {agent.maxIterations}
+                        </span>
+                      )}
                     </div>
                     <div style={entryActionsStyle}>
                       <button type="button" style={buttonStyle} onClick={() => startEdit(agent)}>

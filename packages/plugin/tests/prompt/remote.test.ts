@@ -99,8 +99,8 @@ describe('prompt/modes.list', () => {
         current: boolean
       }>
     }
-    expect(value.currentModeId).toBe('code')
-    expect(value.modes.map(mode => mode.id)).toEqual(['code', 'design', 'plan', 'ask', 'review'])
+    expect(value.currentModeId).toBe('minimal')
+    expect(value.modes.map(mode => mode.id)).toEqual(['minimal', 'code', 'design', 'plan', 'ask', 'review'])
     for (const mode of value.modes) {
       expect(mode.kind).toBe('builtin')
       // 系统内容位于 system 条目（内置种子三件套），模板为空是预期形态。
@@ -108,7 +108,7 @@ describe('prompt/modes.list', () => {
       expect(Array.isArray(mode.promptEntries)).toBe(true)
     }
     expect(value.modes.filter(mode => mode.current)).toHaveLength(1)
-    expect(value.modes.find(mode => mode.id === 'code')?.current).toBe(true)
+    expect(value.modes.find(mode => mode.id === 'minimal')?.current).toBe(true)
   })
 
   it('create 后 list 反映新模式且 current 标记不变', async () => {
@@ -119,9 +119,9 @@ describe('prompt/modes.list', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     const value = result.value as { currentModeId: string; modes: Array<{ id: string; current: boolean }> }
-    expect(value.modes).toHaveLength(6)
-    expect(value.currentModeId).toBe('code')
-    expect(value.modes.find(mode => mode.id === 'code')?.current).toBe(true)
+    expect(value.modes).toHaveLength(7)
+    expect(value.currentModeId).toBe('minimal')
+    expect(value.modes.find(mode => mode.id === 'minimal')?.current).toBe(true)
   })
 })
 
@@ -237,7 +237,7 @@ describe('prompt/modes.create', () => {
     )
     const listed = await invoke('modes.list')
     expect(listed.ok).toBe(true)
-    if (listed.ok) expect((listed.value as { modes: unknown[] }).modes).toHaveLength(5)
+    if (listed.ok) expect((listed.value as { modes: unknown[] }).modes).toHaveLength(6)
   })
 
   it('缺 name → GRAY_INVALID_INPUT；空 name → GRAY_PROMPT_INVALID_PAYLOAD', async () => {
@@ -384,7 +384,7 @@ describe('prompt/modes.import', () => {
 
     const listed = await invoke('modes.list')
     expect(listed.ok).toBe(true)
-    if (listed.ok) expect((listed.value as { modes: unknown[] }).modes).toHaveLength(7)
+    if (listed.ok) expect((listed.value as { modes: unknown[] }).modes).toHaveLength(8)
   })
 
   it('缺 payload → GRAY_INVALID_INPUT', async () => {
@@ -401,7 +401,7 @@ describe('prompt/modes.export', () => {
     if (!result.ok) return
     const value = result.value as { version: number; modes: Array<{ id: string }> }
     expect(value.version).toBe(1)
-    expect(value.modes).toHaveLength(5)
+    expect(value.modes).toHaveLength(6)
   })
 
   it('ids 子集导出', async () => {

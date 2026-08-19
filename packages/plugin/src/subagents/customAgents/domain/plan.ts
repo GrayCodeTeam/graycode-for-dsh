@@ -22,6 +22,8 @@ export interface CustomAgentConfig {
   readonly toolMode?: CustomAgentToolMode
   /** Tool names used by the allow/deny policy. */
   readonly tools?: string[]
+  /** Maximum model/tool iterations for this child; omitted inherits the global default. */
+  readonly maxIterations?: number
 }
 
 /** ASCII-fragment slug: lowercase, non-alphanumerics collapse to `-`. */

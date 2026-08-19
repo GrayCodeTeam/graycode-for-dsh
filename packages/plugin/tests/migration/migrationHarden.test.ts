@@ -861,7 +861,7 @@ describe('M4 scan 描述修正与取消支持', () => {
   test('migration_scan 工具描述不再声称“绝不写盘”，改为“不修改源目录”', () => {
     const fx = makeService()
     try {
-      const tools = createMigrationTools(fx.service, { allowLegacyReaders: true })
+      const tools = createMigrationTools(fx.service)
       const scanTool = tools.find(t => (t as { name?: string }).name === 'migration_scan')
       const desc = (scanTool as { description?: string }).description ?? ''
       expect(desc).toContain('不修改源目录')

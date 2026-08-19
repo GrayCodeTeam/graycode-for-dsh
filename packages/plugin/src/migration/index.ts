@@ -5,9 +5,7 @@
  * dry-run 报告、确认后逐域导入。源目录全程只读；凭据不迁移；
  * 幂等键（sourceFingerprint + objectType + legacyId）保证重跑不生成副本。
  *
- * Config：
- * - enabled：总开关（默认关闭，迁移是显式操作）；
- * - allowLegacyReaders：读取旧扩展数据的安全门（默认关闭）。
+ * Config：enabled 是唯一开关；开启即表示允许迁移工具读取旧版数据。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -27,17 +25,11 @@ export interface Config {
   dataRoot: string
   /** Master switch for the migration domain (default off: migration is explicit). */
   enabled: boolean
-  /**
-   * Gate for reading legacy extension data (default off). `migration_scan` /
-   * `migration_apply` refuse to run while this is false.
-   */
-  allowLegacyReaders: boolean
 }
 
 export const Config: z<Config> = z.object({
   dataRoot: z.string().default(''),
   enabled: z.boolean().default(false),
-  allowLegacyReaders: z.boolean().default(false),
 })
 
 export function apply(ctx: Context, config: Config): () => void {
@@ -45,18 +37,16 @@ export function apply(ctx: Context, config: Config): () => void {
 
   const service = createMigrationService({ dataRoot: config.dataRoot, ctx })
   const registrar = createScopedToolRegistrar(ctx, 'roots')
-  registrar.register(createMigrationTools(service, { allowLegacyReaders: config.allowLegacyReaders }))
+  registrar.register(createMigrationTools(service))
   // D-2 可视化：scope 映射 Remote 端点（仅安全门开启时暴露；client ScopeMapPanel 消费）。
   // grayRemote 是可选依赖——用 ctx.inject 声明，服务未 ACTIVE 时回调挂起、可用后
   // 自动补注册（修复组合根 LOADING 期间端点缺失导致的 GRAY_ENDPOINT_NOT_FOUND）。
   // 注销随 inject 纤维自动回收（HMR 重载后同 key 可重新注册）。
-  if (config.allowLegacyReaders) {
-    ctx.inject(['grayRemote'], (child) => {
-      const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
-      const disposeRemote = grayRemote?.register(createMigrationRemoteHandlers(service))
-      child.effect(() => () => disposeRemote?.())
-    })
-  }
+  ctx.inject(['grayRemote'], (child) => {
+    const grayRemote = child.get('grayRemote') as GrayRemoteService | undefined
+    const disposeRemote = grayRemote?.register(createMigrationRemoteHandlers(service))
+    child.effect(() => () => disposeRemote?.())
+  })
   return () => {
     registrar.dispose()
   }

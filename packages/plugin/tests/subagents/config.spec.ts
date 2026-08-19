@@ -10,7 +10,7 @@
  * - 负值 / 非整数被 schemastery 拒绝；customAgents 条目缺 id/name 被拒绝。
  */
 import { describe, expect, it } from 'vitest'
-import { Config, GENERAL_WORKER_AGENT, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
+import { Config, GENERAL_WORKER_AGENT, isSubagentIterationAllowed, validateCustomAgentConfig, type Config as SubagentsConfig } from '../../src/subagents/index.ts'
 
 describe('subagents Config（Schemastery）', () => {
   it('缺省：通用子代理启用，守卫使用安全默认值，customAgents=[]', () => {
@@ -18,6 +18,7 @@ describe('subagents Config（Schemastery）', () => {
       generalWorkerEnabled: true,
       maxHopDepth: 5,
       maxConcurrent: 3,
+      defaultMaxIterations: 80,
       queueTimeoutSeconds: 600,
       defaultMaxRuntimeSeconds: 1800,
       customAgents: [],
@@ -30,15 +31,17 @@ describe('subagents Config（Schemastery）', () => {
       generalWorkerEnabled: true,
       maxHopDepth: 3,
       maxConcurrent: 4,
+      defaultMaxIterations: 80,
       queueTimeoutSeconds: 600,
       defaultMaxRuntimeSeconds: 1800,
       customAgents: [],
     })
     // 0 = 关闭对应守卫（并发/排队/预算均不限）。
-    expect(Config({ maxHopDepth: 0, maxConcurrent: 0, queueTimeoutSeconds: -1, defaultMaxRuntimeSeconds: -1 } as SubagentsConfig)).toEqual({
+    expect(Config({ maxHopDepth: 0, maxConcurrent: -1, defaultMaxIterations: -1, queueTimeoutSeconds: -1, defaultMaxRuntimeSeconds: -1 } as SubagentsConfig)).toEqual({
       generalWorkerEnabled: true,
       maxHopDepth: 0,
-      maxConcurrent: 0,
+      maxConcurrent: -1,
+      defaultMaxIterations: -1,
       queueTimeoutSeconds: -1,
       defaultMaxRuntimeSeconds: -1,
       customAgents: [],
@@ -47,7 +50,7 @@ describe('subagents Config（Schemastery）', () => {
 
   it('负值 / 非整数被拒绝', () => {
     expect(() => Config({ maxHopDepth: -1, maxConcurrent: 2 } as unknown as SubagentsConfig)).toThrow()
-    expect(() => Config({ maxHopDepth: 5, maxConcurrent: -1 } as unknown as SubagentsConfig)).toThrow()
+    expect(() => Config({ maxHopDepth: 5, maxConcurrent: -2 } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ maxHopDepth: 1.5, maxConcurrent: 2 } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ maxHopDepth: 5, maxConcurrent: 2.5 } as unknown as SubagentsConfig)).toThrow()
   })
@@ -62,6 +65,7 @@ describe('subagents Config（Schemastery）', () => {
       enabled: true,
       toolMode: 'all',
       tools: [],
+      maxIterations: undefined,
     }])
     expect(() => Config({ customAgents: [{}] } as unknown as SubagentsConfig)).toThrow()
     expect(() => Config({ customAgents: [{ id: '' }] } as unknown as SubagentsConfig)).toThrow()
@@ -96,5 +100,16 @@ describe('subagents Config（Schemastery）', () => {
     expect(() => validateCustomAgentConfig([
       { id: 'agent-1', name: 'A', description: '', systemPrompt: '', enabled: true },
     ])).not.toThrow()
+    expect(() => validateCustomAgentConfig([
+      { id: 'agent-1', name: 'A', description: '', systemPrompt: '', enabled: true, maxIterations: -2 },
+    ])).toThrow(/maxIterations/)
+  })
+
+  it('only limits Gray Code children carrying an explicit iteration budget', () => {
+    expect(isSubagentIterationAllowed(undefined, 999)).toBe(true)
+    expect(isSubagentIterationAllowed(-1, 999)).toBe(true)
+    expect(isSubagentIterationAllowed(80, 80)).toBe(true)
+    expect(isSubagentIterationAllowed(80, 81)).toBe(false)
+    expect(isSubagentIterationAllowed(0, 1)).toBe(false)
   })
 })

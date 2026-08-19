@@ -21,11 +21,6 @@ import {
 } from './domain/scopeMap.ts'
 import type { LegacyImportService } from './application/importService.ts'
 
-export interface MigrationToolOptions {
-  /** 是否允许读取旧扩展数据（安全门：默认关闭） */
-  allowLegacyReaders: boolean
-}
-
 interface ScanArgs {
   sourceDir: string
 }
@@ -127,19 +122,7 @@ function toToolResult(report: MigrationReport): {
   }
 }
 
-function assertReaderAllowed(options: MigrationToolOptions, toolName: string): void {
-  if (!options.allowLegacyReaders) {
-    throw new Error(
-      `${toolName} 被禁用：migration.allowLegacyReaders=false（默认）。` +
-        '读取旧扩展数据需要显式开启该配置并重启。',
-    )
-  }
-}
-
-export function createMigrationTools(
-  service: LegacyImportService,
-  options: MigrationToolOptions,
-): ToolDefinition[] {
+export function createMigrationTools(service: LegacyImportService): ToolDefinition[] {
   const scan = defineTool({
     name: 'migration_scan',
     description:
@@ -153,7 +136,6 @@ export function createMigrationTools(
       render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }],
     },
     async execute(args, exec) {
-      assertReaderAllowed(options, 'migration_scan')
       const { sourceDir } = args as ScanArgs
       const { report } = await service.scan(sourceDir, { signal: exec.signal })
       return toToolResult(report)
@@ -176,7 +158,6 @@ export function createMigrationTools(
       render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }],
     },
     async execute(args, exec) {
-      assertReaderAllowed(options, 'migration_apply')
       const { sourceDir, confirmToken, migrateCredentials, scopeOverridesFile } = args as ApplyArgs
       // D-1：scope 覆盖解析（文件入口；须为 JSON 对象）
       let merged: ScopeOverrideMap | undefined

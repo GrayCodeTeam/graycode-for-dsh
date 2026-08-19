@@ -414,8 +414,8 @@ describe('buildModeSavePatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('builtin mode protection', () => {
-  it('recognizes the five builtin ids and nothing else', () => {
-    expect(BUILTIN_MODE_IDS).toEqual(['code', 'design', 'plan', 'ask', 'review'])
+  it('recognizes the six builtin ids and nothing else', () => {
+    expect(BUILTIN_MODE_IDS).toEqual(['minimal', 'code', 'design', 'plan', 'ask', 'review'])
     for (const id of BUILTIN_MODE_IDS) expect(isBuiltinModeId(id)).toBe(true)
     expect(isBuiltinModeId('mode-custom')).toBe(false)
     expect(isBuiltinModeId('')).toBe(false)

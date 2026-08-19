@@ -167,6 +167,7 @@ describe('custom agent tool', () => {
     expect(request.persona).toBe('You are a careful code reviewer.')
     expect(request.label).toBe('review')
     expect(request.parent).toEqual({ id: 'parent' })
+    expect(request.agentOptions).toEqual({ graycodeMaxIterations: 80 })
     expect(result).toMatchObject({ kind: 'foreground', output: [{ type: 'text', text: 'ok' }] })
   })
 
@@ -179,7 +180,18 @@ describe('custom agent tool', () => {
     expect(spec.provider).toBe('graycode-custom-agent-1')
     expect(spec.label).toBe('review')
     expect(spec.request.persona).toBe('You are a careful code reviewer.')
+    expect(spec.request.agentOptions).toEqual({ graycodeMaxIterations: 80 })
     expect(result).toEqual({ kind: 'continuable', subagentId: 'child' })
+  })
+
+  it('lets an agent override the global iteration limit', async () => {
+    const { seam, start } = makeFakeSeam()
+    const tool = toolOf(createCustomAgentTool({ ...AGENT, maxIterations: 120 }, 'subagent_long', seam, 60))
+    await tool.execute(
+      { description: 'long task', prompt: 'work', run_in_background: false },
+      { agent: { id: 'parent' }, signal: new AbortController().signal },
+    )
+    expect(start.mock.calls[0]![1].agentOptions).toEqual({ graycodeMaxIterations: 120 })
   })
 
   it('omits persona when the system prompt is empty', async () => {

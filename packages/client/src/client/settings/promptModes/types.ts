@@ -71,7 +71,7 @@ export interface PromptMode {
 }
 
 /** Built-in mode ids; these modes seed the store and cannot be deleted/renamed. */
-export const BUILTIN_MODE_IDS = ['code', 'design', 'plan', 'ask', 'review'] as const
+export const BUILTIN_MODE_IDS = ['minimal', 'code', 'design', 'plan', 'ask', 'review'] as const
 
 export function isBuiltinModeId(id: string): boolean {
   return (BUILTIN_MODE_IDS as readonly string[]).includes(id)

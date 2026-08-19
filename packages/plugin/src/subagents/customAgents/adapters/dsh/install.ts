@@ -50,6 +50,7 @@ export interface ResolvedSubagentStartRequestLike {
   readonly signal: AbortSignal
   readonly persona?: string
   readonly toolFilter?: ToolRestrictionLike
+  readonly agentOptions?: Readonly<Record<string, unknown>>
 }
 
 /** Structural subset of `SubagentRun`. */
@@ -128,6 +129,7 @@ export function createCustomAgentTool(
   agent: CustomAgentConfig,
   toolName: string,
   seam: CustomAgentSeamLike,
+  defaultMaxIterations = 80,
 ): unknown {
   const providerName = deriveProviderName(agent.id)
   const identity = agent.description.trim().length > 0
@@ -196,6 +198,9 @@ export function createCustomAgentTool(
         prompt: [{ type: 'text', text: args.prompt }],
         parent,
         ...(agent.systemPrompt.trim().length > 0 ? { persona: agent.systemPrompt.trim() } : {}),
+        agentOptions: {
+          graycodeMaxIterations: agent.maxIterations ?? defaultMaxIterations,
+        },
         ...toolFilterFor(agent),
       }
       if (args.run_in_background !== false) {
@@ -247,6 +252,7 @@ export function installCustomAgentRuntimes(
   seam: CustomAgentSeamLike,
   tools: CustomAgentToolsLike,
   agents: readonly CustomAgentConfig[],
+  defaultMaxIterations = 80,
 ): () => void {
   const enabled = agents.filter((agent) => agent.enabled)
 
@@ -274,7 +280,7 @@ export function installCustomAgentRuntimes(
     for (const agent of enabled) {
       const toolName = toolNames.get(agent.id) ?? deriveToolName(agent)
       disposers.push(seam.registerProvider(createDelegatingProvider(agent, seam)))
-      disposers.push(tools.register(createCustomAgentTool(agent, toolName, seam)))
+      disposers.push(tools.register(createCustomAgentTool(agent, toolName, seam, defaultMaxIterations)))
     }
   } catch (error) {
     // H-4a ② 局部回滚：注册中途失败（如与宿主既有工具/provider 重名）时释放本轮

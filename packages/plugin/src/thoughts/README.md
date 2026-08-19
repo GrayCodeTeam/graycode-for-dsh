@@ -6,11 +6,10 @@
 
 ## 状态（重要）
 
-- **默认启用、已挂载 composition root（2026 修订）**。`enabled: true`（默认）时
-  `llm/stream` 拦截 agent-loop 请求并把当前模式的 user/assistant 条目注入为真实消息；
-  无 user/assistant 条目的模式（内置 5 模式条目为空）零注入透传。
-- **AND 联动（组合根）**：thoughts 实际启用 = `thoughts.enabled && prompt.requestLayer`。
-  `requestLayer=false` 时条目不注入（D-11=c 段落路径已删除，不存在文本兜底）。
+- **始终启用、已挂载 composition root**。`llm/stream` 拦截 agent-loop 请求并把
+  当前模式的 user/assistant 条目注入为真实消息；模式没有这类条目时零注入透传。
+- `sendHistoryThoughts` 只控制 assistant 预设条目的 `fakeThought` 是否作为 typed
+  reasoning 块发送，不会关闭预设消息本身。
 - 状态源：默认从 prompt 域 `graycode.promptModes` 服务（`ctx.get` 惰性查询）投影
   当前 mode 的 preset 条目；服务缺失/无 mode → 空注入透传（fail-safe）。
 
@@ -18,7 +17,7 @@
 
 ```
 src/thoughts/
-  index.ts            子插件（Config: enabled/sendHistoryThoughts，均默认 true；
+  index.ts            子插件（Config: sendHistoryThoughts，默认 true；
                       默认状态源 = graycode.promptModes 服务投影）
   adapters/
     llmStream.ts      llm/stream waterfall 拦截（isAgentLoopRequest 识别 + WeakSet 防递归
@@ -83,4 +82,4 @@ tests/thoughts/       rewrite.test.ts + llmStream.test.ts + apply.test.ts
 - `llmStream.test.ts`：enabled/disabled、非 loop 请求透传、注入错误 fail-closed、
   WeakSet 防递归、mark+freeze 后 isAgentLoopRequest 为 true、dispose 后不拦截；
 - `apply.test.ts`：promptModes 服务缺失/无 mode 降级、真实 mode 投影改写（before/after
-  位置 + reasoning）、sendHistoryThoughts 门、enabled=false 透传、getState 注入覆盖。
+  位置 + reasoning）、sendHistoryThoughts 门、旧 enabled 配置兼容、getState 注入覆盖。

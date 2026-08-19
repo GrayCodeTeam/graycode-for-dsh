@@ -94,6 +94,7 @@ const LEGACY_MODE_DROPPED_FIELDS = [
  * unchanged.
  */
 export const BUILTIN_MODE_TEMPLATES: Record<BuiltinModeId, string> = {
+  minimal: DEFAULT_MINIMAL_SYSTEM_PROMPT,
   code: `You are a professional programming assistant, proficient in multiple programming languages and frameworks.
 
 {{$ENVIRONMENT}}
@@ -491,7 +492,7 @@ function parseEntryRecord(
   } else if (typeof role !== 'string' || !(BUILTIN_ROLE as readonly string[]).includes(role)) {
     throw new PromptError(`entry role must be one of ${BUILTIN_ROLE.join('/')}`, errorCode)
   }
-  const content = record.content
+  const content = record.content ?? (role === 'chat_history' ? '' : undefined)
   if (typeof content !== 'string') {
     throw new PromptError('entry content must be a string', errorCode)
   }
@@ -679,6 +680,45 @@ function graycodeExportEnvelopeModes(payload: unknown): unknown[] | undefined {
 }
 
 /**
+ * Unwrap the other JSON containers emitted by Gray Code settings/preset
+ * screens. PromptSettings accepted `{ mode }` in addition to `{ modes }`, and
+ * a full settings export may nest the prompt payload under `vscodeSettings`.
+ * Keep this deliberately key-based: unrelated settings exports fail with the
+ * normal INVALID_PAYLOAD error instead of guessing at arbitrary objects.
+ */
+function unwrapGrayCodePromptPayload(payload: unknown, warnings: string[]): unknown {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return payload
+  const record = payload as Record<string, unknown>
+  if (typeof record.mode === 'object' && record.mode !== null && !Array.isArray(record.mode)) {
+    warnings.push('imported payload used the Gray Code single-mode { mode } wrapper')
+    return record.mode
+  }
+  if (typeof record.systemPromptConfig === 'object' && record.systemPromptConfig !== null) {
+    warnings.push('imported payload contained systemPromptConfig; importing that prompt configuration')
+    return record.systemPromptConfig
+  }
+  if (typeof record.vscodeSettings === 'object' && record.vscodeSettings !== null && !Array.isArray(record.vscodeSettings)) {
+    const settings = record.vscodeSettings as Record<string, unknown>
+    const keys = [
+      'systemPromptConfig',
+      'systemPrompt',
+      'promptModes',
+      'graycode.systemPromptConfig',
+      'graycode.systemPrompt',
+      'graycode.promptModes',
+    ] as const
+    for (const key of keys) {
+      const nested = settings[key]
+      if (typeof nested === 'object' && nested !== null) {
+        warnings.push(`imported full Gray Code settings export; using vscodeSettings.${key}`)
+        return nested
+      }
+    }
+  }
+  return payload
+}
+
+/**
  * Detect a SystemPromptConfig envelope (old Gray `system_prompt` export):
  * - `modes` present as a Record (not an array), or
  * - top-level `currentModeId` (a config-only field), or
@@ -817,6 +857,25 @@ export class PromptSettingsService {
       seenIds.add(mode.id)
       modes.push(mode)
     }
+    // New built-ins are reconciled into an existing store so upgrades gain the
+    // ready-to-use Minimal preset without overwriting user-edited built-ins.
+    const seededBuiltins = createBuiltinModes()
+    const missingBuiltins = seededBuiltins.filter(mode => !seenIds.has(mode.id))
+    if (missingBuiltins.length > 0) {
+      modes.unshift(...missingBuiltins)
+      for (const mode of missingBuiltins) seenIds.add(mode.id)
+    }
+    // Keep built-ins in the documented order, followed by custom modes in
+    // their stored order.
+    const builtinOrder = new Map(BUILTIN_MODE_IDS.map((id, index) => [id as string, index]))
+    modes.sort((a, b) => {
+      const ai = builtinOrder.get(a.id)
+      const bi = builtinOrder.get(b.id)
+      if (ai === undefined && bi === undefined) return 0
+      if (ai === undefined) return 1
+      if (bi === undefined) return -1
+      return ai - bi
+    })
     // L6：currentModeId 必须引用已存在的 mode——手改 store 产生悬垂引用时回退到
     // 首个内置模式（与 getCurrentMode/currentModeSnapshot 的既有回退语义一致），
     // 而不是把悬垂 id 留在内存快照里。合法 store 的 currentModeId 始终指向真实 mode。
@@ -1103,15 +1162,16 @@ export class PromptSettingsService {
         }
       }
 
-      const envelopeModes = graycodeExportEnvelopeModes(payload)
+      const normalizedPayload = unwrapGrayCodePromptPayload(payload, warnings)
+      const envelopeModes = graycodeExportEnvelopeModes(normalizedPayload)
       if (envelopeModes !== undefined) {
         warnings.push('imported payload is a Gray Code export envelope (graycode.promptModes.v1); importing the modes array')
         importModeRecords(envelopeModes)
         if (envelopeModes.length === 0) {
           warnings.push('export envelope carried no modes; nothing was imported')
         }
-      } else if (isSystemPromptConfigShape(payload)) {
-        const config = payload as Record<string, unknown>
+      } else if (isSystemPromptConfigShape(normalizedPayload)) {
+        const config = normalizedPayload as Record<string, unknown>
         warnings.push('imported payload is a SystemPromptConfig; folding the global config')
         const globalTemplate = typeof config.template === 'string' ? normalizeTemplate(config.template) : undefined
         const globalDynEnabled = config.dynamicTemplateEnabled === true
@@ -1173,7 +1233,7 @@ export class PromptSettingsService {
           }
         }
       } else {
-        importModeRecords(Array.isArray(payload) ? payload : [payload])
+        importModeRecords(Array.isArray(normalizedPayload) ? normalizedPayload : [normalizedPayload])
       }
 
       store.modes.push(...imported)

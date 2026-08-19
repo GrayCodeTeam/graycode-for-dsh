@@ -29,6 +29,13 @@ import type { SubagentsSeamLike } from './adapters/dsh/seamTypes.ts'
 import { installCustomAgentRuntimes, type CustomAgentSeamLike, type CustomAgentToolsLike } from './customAgents/adapters/dsh/install.ts'
 import { deriveProviderName, slugify, type CustomAgentConfig } from './customAgents/domain/plan.ts'
 
+declare module '@deepseek-ai/dsh-agent' {
+  interface AgentOptions {
+    /** Gray Code child-only model/tool iteration budget (-1 = unlimited). */
+    graycodeMaxIterations?: number
+  }
+}
+
 export const name = 'graycode-subagents'
 
 /** 依赖 `agents`（G2 判断主会话）、`subagents`（seam，base 层挂载）与 `tools`（自定义子代理工具）。 */
@@ -48,6 +55,8 @@ export interface Config {
    * 等待名额释放（排队而不是拒绝）。0 = 不限（不排队）。
    */
   maxConcurrent: number
+  /** Default child model/tool iteration budget (-1 = unlimited). */
+  defaultMaxIterations: number
   /**
    * G3：排队等待并发名额的超时（秒，对齐老 Gray subagents.queueTimeoutSeconds
    * 默认 600）。排队超过该时长的委派以失败结算（SubagentQueueTimeoutError，
@@ -78,12 +87,14 @@ const customAgentSchema = z.object({
   enabled: z.boolean().default(true),
   toolMode: z.union(['all', 'allow', 'deny'] as const).default('all'),
   tools: z.array(z.string()).default([]),
+  maxIterations: z.number().step(1).min(-1),
 })
 
 export const Config: z<Config> = z.object({
   generalWorkerEnabled: z.boolean().default(true),
   maxHopDepth: z.number().step(1).min(0).default(5),
-  maxConcurrent: z.number().step(1).min(0).default(3),
+  maxConcurrent: z.number().step(1).min(-1).default(3),
+  defaultMaxIterations: z.number().step(1).min(-1).default(80),
   queueTimeoutSeconds: z.number().step(1).min(-1).default(600),
   defaultMaxRuntimeSeconds: z.number().step(1).min(-1).default(1800),
   customAgents: z.array(customAgentSchema).default([]),
@@ -119,6 +130,9 @@ export function validateCustomAgentConfig(customAgents: readonly CustomAgentConf
     if (toolMode !== 'all' && toolNames.length === 0) {
       throw new Error(`custom agent "${agent.id}" uses ${toolMode} tool mode but names no tools`)
     }
+    if (agent.maxIterations !== undefined && (!Number.isInteger(agent.maxIterations) || agent.maxIterations < -1)) {
+      throw new Error(`custom agent "${agent.id}" maxIterations must be an integer greater than or equal to -1`)
+    }
   }
 }
 
@@ -131,6 +145,11 @@ export const GENERAL_WORKER_AGENT: CustomAgentConfig = {
   enabled: true,
   toolMode: 'all',
   tools: [],
+}
+
+/** True while a Gray Code child may start the requested model/tool step. */
+export function isSubagentIterationAllowed(limit: number | undefined, step: number): boolean {
+  return limit === undefined || limit < 0 || step <= limit
 }
 
 /** 跨域服务名：G2/G1/G3 守卫句柄（Gray 侧代码经 ctx.get 取用，可选）。 */
@@ -165,6 +184,20 @@ export function apply(ctx: Context, config: Config): void {
       on: (event, listener) => ctx.on(event as never, listener as never),
     },
   )
+  // DSH has no native per-child iteration option. Custom Gray Code child
+  // requests carry a merge-extensible AgentOptions field; reject the first
+  // step beyond that budget and cancel the child through the public hook
+  // cancellation path. Root agents and non-Gray children have no field and
+  // are untouched.
+  const detachIterationLimit = ctx.on('agent/pre-step', (payload, next) => {
+    const limit = payload.agent.options.graycodeMaxIterations
+    if (isSubagentIterationAllowed(limit, payload.step)) return next()
+    payload.agent.cancel({
+      kind: 'hook',
+      reason: `Gray Code subagent reached its maximum iterations (${limit})`,
+    })
+    return Promise.resolve({ kind: 'reject' as const })
+  })
   // 跨域共享（可选增强）：守卫句柄供 Gray 侧工作流做「子→父任意寻址 fail-closed」
   // 与受守卫的消息投递。fiber 卸载时随 provide 与 effect 一并注销。
   // H-4a ③：自定义子代理安装先于任何 ctx.provide/ctx.effect 注册——配置非法时
@@ -176,14 +209,17 @@ export function apply(ctx: Context, config: Config): void {
       runtime as unknown as CustomAgentSeamLike,
       ctx.tools as unknown as CustomAgentToolsLike,
       config.generalWorkerEnabled ? [GENERAL_WORKER_AGENT, ...config.customAgents] : config.customAgents,
+      config.defaultMaxIterations,
     )
   } catch (error) {
+    detachIterationLimit()
     guard.dispose()
     throw error
   }
   const disposeProvide = ctx.provide(SUBAGENTS_GUARD_SERVICE_KEY, guard)
   ctx.effect(() => () => {
     disposeProvide()
+    detachIterationLimit()
     guard.dispose()
     disposeCustomAgents()
   })

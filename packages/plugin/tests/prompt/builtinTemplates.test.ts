@@ -1,5 +1,5 @@
 /**
- * 内置 5 模式模板对齐旧版 Gray Code 1.5.4（决策 D-1，审计 H1）：
+ * 内置模式模板：五个兼容模式对齐旧版 Gray Code 1.5.4，另提供默认 Minimal：
  *
  * - golden：`BUILTIN_MODE_TEMPLATES` 与旧版 `backend/modules/settings/promptModes.ts`
  *   的五个内置模板逐字节一致（旧仓库为 CRLF，本仓库为 LF；JS 模板字面量的
@@ -17,7 +17,10 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
-import { BUILTIN_MODE_IDS } from '../../src/prompt/domain/promptTypes.ts'
+import {
+  BUILTIN_MODE_IDS,
+  DEFAULT_MINIMAL_SYSTEM_PROMPT,
+} from '../../src/prompt/domain/promptTypes.ts'
 import {
   deprecatedPlaceholderText,
   normalizeTemplate,
@@ -39,6 +42,8 @@ const MODE_MARKERS: Record<string, string> = {
   review: 'REVIEW MODE',
 }
 
+const LEGACY_MODE_IDS = ['code', 'design', 'plan', 'ask', 'review'] as const
+
 let tmpDir: string | undefined
 
 afterEach(async () => {
@@ -48,12 +53,13 @@ afterEach(async () => {
   }
 })
 
-describe('内置 5 模式模板对齐 Gray Code 1.5.4（D-1 / H1）', () => {
+describe('内置模式模板（Gray Code 兼容模式 + Minimal）', () => {
   test('模板文本与旧版 promptModes.ts 逐字节一致（LF 归一化 golden）', () => {
-    expect(Object.keys(LEGACY_TEMPLATES).sort()).toEqual([...BUILTIN_MODE_IDS].sort())
-    for (const id of BUILTIN_MODE_IDS) {
+    expect(Object.keys(LEGACY_TEMPLATES).sort()).toEqual([...LEGACY_MODE_IDS].sort())
+    for (const id of LEGACY_MODE_IDS) {
       expect(BUILTIN_MODE_TEMPLATES[id], `mode ${id} 与 1.5.4 模板字节一致`).toBe(LEGACY_TEMPLATES[id])
     }
+    expect(BUILTIN_MODE_TEMPLATES.minimal).toBe(DEFAULT_MINIMAL_SYSTEM_PROMPT)
   })
 
   test('模板已归一化（无行尾空白/首尾空行；归一化幂等）', () => {
@@ -64,8 +70,8 @@ describe('内置 5 模式模板对齐 Gray Code 1.5.4（D-1 / H1）', () => {
     }
   })
 
-  test('每个模板保留旧版结构特征（占位符块 + 模式专属节）', () => {
-    for (const id of BUILTIN_MODE_IDS) {
+  test('五个兼容模板保留旧版结构特征（占位符块 + 模式专属节）', () => {
+    for (const id of LEGACY_MODE_IDS) {
       const template = BUILTIN_MODE_TEMPLATES[id]
       expect(template.startsWith('You are a professional')).toBe(true)
       expect(template).toContain('{{$ENVIRONMENT}}')
@@ -78,6 +84,10 @@ describe('内置 5 模式模板对齐 Gray Code 1.5.4（D-1 / H1）', () => {
         expect(template).toContain('{{$MEMORY}}')
       }
     }
+    expect(BUILTIN_MODE_TEMPLATES.minimal).toContain('{{$ENVIRONMENT}}')
+    expect(BUILTIN_MODE_TEMPLATES.minimal).toContain('GUIDELINES')
+    expect(BUILTIN_MODE_TEMPLATES.minimal).not.toContain('{{$TOOLS}}')
+    expect(BUILTIN_MODE_TEMPLATES.minimal).not.toContain('{{$MEMORY}}')
   })
 
   test('种子 store 使用对齐后的内置模板，且每个内置模式自带一个 chat_history 定位条目', async () => {

@@ -5,7 +5,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { markAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { apply, type PromptModesLike } from '../../src/thoughts/index.ts'
+import { apply, Config as ThoughtsConfig, type PromptModesLike } from '../../src/thoughts/index.ts'
 import type { PromptEntry } from '../../src/prompt/domain/promptTypes.ts'
 
 function entry(overrides: Partial<PromptEntry> & { id: string }): PromptEntry {
@@ -70,9 +70,9 @@ function fire(ctx: FakeCtx, options: GenerateOptions): AsyncIterable<unknown> {
 }
 
 describe('thoughts apply 接线（promptModes 服务投影）', () => {
-  it('prompt 服务缺失 → 即使 enabled=true 也透传（降级 no-op）', async () => {
+  it('prompt 服务缺失 → 透传（降级 no-op）', async () => {
     const ctx = makeCtx(undefined)
-    const dispose = apply(ctx as never, { enabled: true, sendHistoryThoughts: true })
+    const dispose = apply(ctx as never, { sendHistoryThoughts: true })
     await fire(ctx, loopOptions())[Symbol.asyncIterator]()!.next()
     expect(ctx.llm.stream).not.toHaveBeenCalled()
     dispose()
@@ -80,7 +80,7 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
 
   it('无当前 mode → 空注入透传', async () => {
     const ctx = makeCtx({ currentModeSnapshot: () => undefined })
-    apply(ctx as never, { enabled: true, sendHistoryThoughts: true })
+    apply(ctx as never, { sendHistoryThoughts: true })
     await fire(ctx, loopOptions())[Symbol.asyncIterator]()!.next()
     expect(ctx.llm.stream).not.toHaveBeenCalled()
   })
@@ -93,7 +93,7 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
         entry({ id: 'a1', role: 'assistant', order: 3, content: 'A1', fakeThought: 'think' }),
       ]),
     )
-    apply(ctx as never, { enabled: true, sendHistoryThoughts: true })
+    apply(ctx as never, { sendHistoryThoughts: true })
     const options = loopOptions()
     await fire(ctx, options)[Symbol.asyncIterator]()!.next()
 
@@ -117,7 +117,7 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
         entry({ id: 'a1', role: 'assistant', order: 1, content: 'A1', fakeThought: 'think' }),
       ]),
     )
-    apply(ctx as never, { enabled: true, sendHistoryThoughts: false })
+    apply(ctx as never, { sendHistoryThoughts: false })
     await fire(ctx, loopOptions())[Symbol.asyncIterator]()!.next()
 
     const rewritten = ctx.llm.stream.mock.calls[0]![0] as GenerateOptions
@@ -129,23 +129,19 @@ describe('thoughts apply 接线（promptModes 服务投影）', () => {
     ])
   })
 
-  it('enabled=false → 透传原请求', async () => {
+  it('旧 enabled=false 被 schema 忽略，预设消息仍正常注入', async () => {
     const ctx = makeCtx(modeWithEntries([entry({ id: 'u1', role: 'user', order: 1, content: 'U1' })]))
-    apply(ctx as never, { enabled: false, sendHistoryThoughts: true })
-    let nextCalled = false
-    await ctx.listeners[0]!(loopOptions(), () => {
-      nextCalled = true
-      return fakeStream()
-    })[Symbol.asyncIterator]()!.next()
-    expect(nextCalled).toBe(true)
-    expect(ctx.llm.stream).not.toHaveBeenCalled()
+    const config = ThoughtsConfig({ enabled: false, sendHistoryThoughts: true } as never)
+    apply(ctx as never, config)
+    await fire(ctx, loopOptions())[Symbol.asyncIterator]()!.next()
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
   })
 
   it('getState 注入覆盖默认投影（测试替身）', async () => {
     const ctx = makeCtx(undefined)
     const dispose = apply(
       ctx as never,
-      { enabled: true, sendHistoryThoughts: false },
+      { sendHistoryThoughts: false },
       () => ({
         injections: [{ role: 'user', text: 'fixed', entryOrder: 1 }],
         blockOrders: [{ role: 'user', order: 1 }, { role: 'chat_history', order: 2 }],

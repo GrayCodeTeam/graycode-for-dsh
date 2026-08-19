@@ -64,7 +64,7 @@ export interface PromptMode {
 }
 
 /** Built-in mode ids; these modes seed the store and cannot be deleted. */
-export const BUILTIN_MODE_IDS = ['code', 'design', 'plan', 'ask', 'review'] as const
+export const BUILTIN_MODE_IDS = ['minimal', 'code', 'design', 'plan', 'ask', 'review'] as const
 
 export type BuiltinModeId = (typeof BUILTIN_MODE_IDS)[number]
 

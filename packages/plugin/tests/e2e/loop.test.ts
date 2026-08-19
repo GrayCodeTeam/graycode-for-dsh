@@ -1,8 +1,8 @@
 /**
  * Mock-LLM E2E：真实 DSH 服务组合 + ScriptedAdapter + @graycode/dsh-plugin。
  *
- * S1 消息→文本回复（同时断言 request/header.system 含 Gray persona、当前
- *    预设的系统提示词与动态 MEMORY 上下文）
+ * S1 消息→文本回复（同时断言 request/header.system 含 Gray persona 与当前
+ *    预设的系统提示词；动态预设消息由 thoughtsLoop E2E 覆盖）
  * S2 工具调用→结果回传：memory_note 经 scoped 注册在真实 agent 上执行，并
  *    落盘到 <dataRoot>/memory-workspaces/*
  * S3 文件变更：create_design 写入 <workspace>/.graycode/design/*.md
@@ -115,7 +115,7 @@ async function whenIdleWithin(agent: Agent, label: string, timeoutMs: number): P
 }
 
 describe('mock-LLM loop E2E', () => {
-  it('S1 发消息→文本回复；真实请求头已组装 persona、预设系统提示词与动态上下文', async () => {
+  it('S1 发消息→文本回复；真实请求头已组装 persona 与默认 Minimal 系统提示词', async () => {
     let harness: Harness | undefined
     try {
       harness = await makeHarness([[{ type: 'text', text: 'Hello from echo' }]])
@@ -127,9 +127,9 @@ describe('mock-LLM loop E2E', () => {
 
       // persona section 进入真实 loop 的 prompt 组装（Task A E2E 证据）
       expect(headerSystem(events)).toContain('GrayCode-enhanced')
-      // 当前 code 预设的 system 条目与 graycode.memory 动态 context 都进入请求头。
+      // 默认 Minimal 预设的 system 条目进入请求头。动态上下文是预设 user
+      // 消息，不属于 request/header.system；其真实消息注入由 thoughtsLoop E2E 覆盖。
       expect(headerSystem(events)).toContain('professional programming assistant')
-      expect(headerSystem(events)).toContain('Permanent Memory')
       // memory 工具随 agentScope=roots 注册到 agent 作用域，进入请求头工具 schema
       expect(headerTools(events)).toContain('memory_note')
       expect(headerTools(events)).toContain('create_design')
